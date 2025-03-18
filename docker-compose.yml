@@ -1,0 +1,16 @@
+version: "1.0"
+
+services:
+  blase_dev:
+    image: blase_env
+    container_name: blase_dev
+    build: .
+    runtime: nvidia
+    volumes:
+      - .:/workspace
+    working_dir: /workspace
+    environment:
+      - PYTHONPATH=/workspace/blase
+      - NVIDIA_DRIVER_CAPABILITIES=compute,utility
+      - NVIDIA_VISIBLE_DEVICES=all
+    command: sleep infinity

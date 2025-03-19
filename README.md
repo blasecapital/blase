@@ -22,10 +22,30 @@ Given the range of use cases, the library needs to function with different kinds
 
 Steps to success:
 
-1. Collect and inspect sample datasets.
+1. Collect and inspect sample datasets. The following are suggested datasets and use case.
+    - Healthcare:
+        - Readmission prediction (classification)
+        - Disease detection with images (classification)
+    - Finance:
+        - Sentiment detection with news/filings (classification, language-based analysis)
+        - Trade prediction (timeseries, classification)
+        - Home price estimation (regression)
+    - Environmental Science:
+        - Species identification (classification, fine tune a pre-trained model)
+        - Weather prediction (regression/multi-class classification, timeseries)
+    - Industry:
+        - Defect detection (computer vision)
+        - Machine failure from vibration data (regression)
+    - Generative/Language:
+        - Fine-tune/create small language model
+        - Image generation
+    - Reinforcement Learning:
+        - Gaming env
+
 2. Outline core modules.
     - Extract, Transform, Load
     - Data preparation
+        - Inspect, clean, synthesize
     - Train
     - Evaluate
     - Deploy

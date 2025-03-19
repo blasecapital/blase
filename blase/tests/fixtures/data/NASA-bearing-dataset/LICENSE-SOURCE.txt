@@ -1,0 +1,3 @@
+LICENSE: https://www.usa.gov/government-copyright
+SOURCE: https://data.nasa.gov/Raw-Data/IMS-Bearings/brfb-gzcv/about_data
+NOTE: Most of the original dataset is not included. Only the last 100 records from the 1st and 2nd set are used.

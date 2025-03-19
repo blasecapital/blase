@@ -14,3 +14,4 @@ services:
       - NVIDIA_DRIVER_CAPABILITIES=compute,utility
       - NVIDIA_VISIBLE_DEVICES=all
     command: sleep infinity
+    

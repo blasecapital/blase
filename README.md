@@ -2,7 +2,7 @@
 ## blase: expand and standardize your machine learning
 
 ## What is it?
-`blase` (*'blāz'*) is a TensorFlow-GPU framework for training neural networks on a single, local machine while working with arbitrarily large datasets and enforcing documentation. It removes cloud dependency for small to medium-sized projects by chunking data at every stage—cleaning, preprocessing, training, and evaluation—allowing models to handle more data. You are only limited by your machine's capacity to store the full dataset in drive and a chunk of training data and model weights in RAM. The framework gives you custom control over feature and target engineering, model architecture, and business impact modeling functions for iterative development. Reproducibility is built in by storing custom functions, datasets, model architecture, and arguments, keeping models ready for production.
+`blase` (*'blāz'*) is a deep learning framework for training neural networks on a single, local machine while working with arbitrarily large datasets and enforcing documentation. It removes cloud dependency for small to medium-sized projects by chunking data at every stage—cleaning, preprocessing, training, and evaluation—allowing models to handle more data. You are only limited by your machine's capacity to store the full dataset in drive and a chunk of training data and model weights in RAM. The framework gives you custom control over feature and target engineering, model architecture, and business impact modeling functions for iterative development. Reproducibility is built in by storing custom functions, datasets, model architecture, and arguments, keeping models ready for production.
 
 *`blase` builds upon Blase Capital Management, LLC's `balcones_train` library to make general-purpose deep learning model training pipeline functions.*
 
@@ -34,8 +34,8 @@ Steps to success:
         - Species identification (classification, fine tune a pre-trained model)
         - Weather prediction (regression/multi-class classification, timeseries)
     - Industry:
-        - Defect detection (computer vision)
-        - Machine failure from vibration data (regression)
+        - Defect detection (computer vision, unsupervised)
+        - Machine failure from vibration data (unsupervised, tabular data)
     - Generative/Language:
         - Fine-tune/create small language model
         - Image generation
@@ -63,12 +63,50 @@ Steps to success:
 1. Clone the repository
    ```sh
    cd <your preferred install directory>
-   git clone https://github.com/blasecapital/balcones_train.git
+   git clone https://github.com/blasecapital/blase.git
    ```
 2. Open VS Code and navigate to the 'blase' directory in 'Explorer'
 3. Right-click on 'docker-compose.yml' and select 'Compose Up' to build the container
 4. Navigate to the Docker extension, right-click on the 'blase_env' under 'Containers,' and select 'Attach Visual Studio Code'
 5. Navigate to the /workspace folder in the 'Explorer' tab to view the project directory
+
+### Pip Install Alternative:
+**Prerequisites:**
+1. **CUDA & cuDNN:**  
+   - Install **CUDA 11.2** and **cuDNN 8.1** (latest compatible version for Windows).  
+   - Follow this [installation guide](https://youtu.be/hHWkvEcDBO0?si=3xxz4VfhOVcnri8E). 
+
+**Steps:**
+1. Clone the repository
+    ```sh
+    cd <your preferred install directory>
+    git clone https://github.com/blasecapital/blase.git
+    ```
+2. Create python environment
+    - Windows:
+        ```sh
+        python -m venv C:\path\to\new\virtual\environment
+        C:\path\to\new\virtual\environment\Scripts\activate
+        ```
+    - macOS/Linux:
+        ```sh
+        python -m venv ~/path/to/new/virtual/environment
+        source ~/path/to/new/virtual/environment/bin/activate
+        ```
+3. Pip install:
+    ```sh
+    pip install .
+    or
+    pip install .[full]
+    ```
+4. Verify installation:
+    ```sh
+    python -c "import blase; print(blase.__version__)"
+    ```
+5. If you are using PyTorch with GPU, run the following to install the compatible CUDA version:
+    ```sh
+    pip install torch==1.10.1+cu111 torchvision==0.11.2+cu111 torchaudio==0.10.1 -f https://download.pytorch.org/whl/torch_stable.html
+    ```
 
 ## Contribute
 This project is pretty much a clean slate so you can make an impact! Discussions and issues will be updated with topics related to design and to-do's. This project will make it easier for practitioners to make better models - particularly in healthcare - so we can provide the tools to improve lives!

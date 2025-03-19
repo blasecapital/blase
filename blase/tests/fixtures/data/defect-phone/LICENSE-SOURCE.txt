@@ -1,0 +1,11 @@
+LICENSE: https://www.gnu.org/licenses/agpl-3.0.html
+SOURCE: https://www.kaggle.com/datasets/girish17019/mobile-phone-defect-segmentation-dataset
+CITATION: @inproceedings{zhang2022fdsnet,
+  title={FDSNeT: An Accurate Real-Time Surface Defect Segmentation Network},
+  author={Zhang, Jian and Ding, Runwei and Ban, Miaoju and Guo, Tianyu},
+  booktitle={ICASSP 2022-2022 IEEE International Conference on Acoustics, Speech and Signal Processing (ICASSP)},
+  pages={3803--3807},
+  year={2022},
+  organization={IEEE}
+}
+NOTE: Data contained is only a subset of the full data prepared by above.

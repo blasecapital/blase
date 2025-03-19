@@ -1,0 +1,3 @@
+LICENSE: https://creativecommons.org/licenses/by/4.0/deed.en
+SOURCE: https://www.bgc-jena.mpg.de/wetter/
+NOTE: The name of the data files is modified with the suffix "-WS-<location>"

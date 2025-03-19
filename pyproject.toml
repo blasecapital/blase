@@ -1,0 +1,63 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "blase"
+version = "0.1.0"
+description = "Train deep learning models locally"
+authors = [{ name = "Blase Capital Management, LLC", email = "bblase@blasecapital.com" }]
+license = { text = "BSD-3-Clause" }
+readme = "README.md"
+requires-python = ">=3.9"
+
+dependencies = [
+    "tensorflow-gpu==2.5.0",
+    "torch==1.10.1",
+    "torchvision==0.11.2",
+    "torchaudio==0.10.1",
+    "numpy==1.19.5",
+    "pandas==1.1.5",
+    "scikit-learn",
+    "scipy",
+]
+
+[project.optional-dependencies]
+full = [
+    "transformers",
+    "jupyter",
+    "matplotlib",
+    "mplfinance",
+    "pickleshare",
+    "pillow",
+    "python-dateutil",
+    "python-dotenv",
+    "pytz",
+    "scikit-learn",
+    "scipy",
+    "threadpoolctl",
+    "tqdm",
+    "lime",
+    "pytest"
+]
+
+[project.urls]
+Repository = "https://github.com/blasecapital/blase.git"
+
+[tool.hatch.build.targets.sdist]
+include = ["blase", "README.md"]
+
+[tool.hatch.build.targets.wheel]
+packages = ["blase"]
+
+[tool.black]
+line-length = 88
+target-version = ["py39"]
+
+[tool.pytest.ini_options]
+minversion = "6.0"
+addopts = "-ra -q"
+testpaths = ["tests"]
+
+[tool.flake8]
+max-line-length = 88

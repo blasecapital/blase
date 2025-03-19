@@ -1,0 +1,3 @@
+LICENSE - https://creativecommons.org/licenses/by-sa/4.0/
+SOURCE - https://www.robots.ox.ac.uk/~vgg/data/pets/#:~:text=We%20have%20created%20a%2037,and%20pixel%20level%20trimap%20segmentation
+ACKNOWLEDGEMENTS - This work is funded by The UK India Education and Research Initiative (UKIERI) and ERC Grant VisRec.

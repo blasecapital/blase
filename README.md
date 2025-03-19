@@ -51,6 +51,28 @@ Steps to success:
     - Deploy
 3. Iterate - make the functions support a general workflow while enabling customization.
 
+## Setup
+### Recommended steps using Docker:
+**Prerequisites**
+1. [Install Docker](https://www.docker.com/products/docker-desktop/)
+    - Enable WSL2 Backend if using Windows - Follow [this guide](https://learn.microsoft.com/en-us/windows/wsl/install)
+2. [Install VS Code](https://code.visualstudio.com/download) or Docker-compatible IDE
+3. Install Docker and Python extensions in VS Code
+
+**Run 'balcones_train'**
+1. Clone the repository
+   ```sh
+   cd <your preferred install directory>
+   git clone https://github.com/blasecapital/balcones_train.git
+   ```
+2. Open VS Code and navigate to the 'blase' directory in 'Explorer'
+3. Right-click on 'docker-compose.yml' and select 'Compose Up' to build the container
+4. Navigate to the Docker extension, right-click on the 'blase_env' under 'Containers,' and select 'Attach Visual Studio Code'
+5. Navigate to the /workspace folder in the 'Explorer' tab to view the project directory
+
+## Contribute
+This project is pretty much a clean slate so you can make an impact! Discussions and issues will be updated with topics related to design and to-do's. This project will make it easier for practitioners to make better models - particularly in healthcare - so we can provide the tools to improve lives!
+
 ## License
 This project is licensed under the BSD 3-Clause License.
 

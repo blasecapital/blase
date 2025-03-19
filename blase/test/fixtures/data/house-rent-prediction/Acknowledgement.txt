@@ -1,0 +1,3 @@
+Acknowledgement
+This Dataset is created from https://www.magicbricks.com/. If you want to learn more, you can visit the Website.
+Loaded from https://www.kaggle.com/datasets/iamsouravbanerjee/house-rent-prediction-dataset?select=Dataset+Glossary.txt.

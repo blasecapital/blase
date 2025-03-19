@@ -18,7 +18,7 @@
 Expected users include healthcare researchers, finance professionals, environmental scientist, manufacturers, academics, and hobbyists. 
 
 ### Development
-Given the range of use cases, the library needs to function with different kinds of data, so developing with sample datasets is necessary for creating practical functions.
+Given the range of use cases, the library needs to function with different kinds of data, so developing with sample datasets is necessary for creating practical functions. Furthermore, batched data extracting and loading is required to handle datasets larger than memory.
 
 Steps to success:
 

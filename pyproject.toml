@@ -44,6 +44,9 @@ full = [
 [project.urls]
 Repository = "https://github.com/blasecapital/blase.git"
 
+[project.scripts]
+blase = "blase.cli.cli:main"
+
 [tool.hatch.build.targets.sdist]
 include = ["blase", "README.md"]
 

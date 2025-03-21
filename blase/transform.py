@@ -84,3 +84,4 @@ class Transform:
     def apply_function(self, data: Iterable, transform_func: Callable) -> Iterable: pass
     def apply_from_module(self, data: Iterable, module_path: str, function_name: str) -> Iterable: pass
     def apply_standard_transformation(self, data, transformation: str, columns: list): pass
+    # Maybe include a fill missing values explicitly here or include it in standard transformation

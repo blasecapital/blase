@@ -4,7 +4,7 @@ from pathlib import Path
 import importlib.resources as pkg_resources
 import blase.cli.templates
 
-TEMPLATE_CHOICES = ["pipeline1"] # List of template sub dirs
+TEMPLATE_CHOICES = ["pipeline"] # List of template sub dirs
 
 def create_project(template_type, project_name):
     if template_type not in TEMPLATE_CHOICES:

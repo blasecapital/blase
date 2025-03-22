@@ -1,3 +1,6 @@
+from typing import Callable, List, Optional, Any
+
+
 class Clean:
     """
     Identifies and tracks undesirable data for removal or exclusion across multiple datasets,
@@ -67,3 +70,10 @@ class Clean:
     - For detecting schema inconsistencies or statistical anomalies, use the `Examine` module.
 
     """
+
+    def apply_filter(self, batch: Any, filter_fn: Callable) -> None: pass
+    def remove_keys(self, batch: Any) -> Any: pass
+    def validate_keys(self, batch: Any, key_fn: Callable) -> List[str]: pass
+    def save_keys(self, tag: str, path: Optional[str] = None) -> None: pass
+    def load_keys(self, tag: str, path: Optional[str] = None) -> None: pass
+    def clear_keys(self) -> None: pass

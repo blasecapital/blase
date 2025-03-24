@@ -1,4 +1,6 @@
-from typing import Callable, Dict, Any
+from typing import Callable, Dict, Any, Iterator, Tuple
+
+import pandas as pd
 
 
 class Monitor:
@@ -33,6 +35,9 @@ class Monitor:
 
     load_prediction_priors(path: str)
         Load prior model output distributions (e.g., softmax outputs) for drift detection.
+
+    stream_batches(batch_size: int = 100, source_paths: dict = None)
+        Streams aligned batches of features, predictions, and ground truth for live evaluation.
 
     submit_live_batch(features, predictions, ground_truth)
         Provide a new batch of live model inputs/outputs to be tracked and compared.
@@ -94,6 +99,29 @@ class Monitor:
 
     def load_prediction_priors(self, path: str) -> None:
         """Load stored model prediction distribution priors from training data."""
+        pass
+
+    def stream_batches(
+        self,
+        batch_size: int = 100,
+        source_paths: dict = None
+    ) -> Iterator[Tuple[pd.DataFrame, pd.Series, pd.Series]]:
+        """
+        Streams batches of live features, predictions, and ground truth values.
+
+        Parameters:
+        -----------
+        batch_size : int
+            Number of rows per batch.
+        source_paths : dict
+            A dictionary with keys: 'features', 'predictions', 'ground_truth', 
+            and values as paths to the corresponding files or directories.
+
+        Returns:
+        --------
+        Iterator[Tuple[pd.DataFrame, pd.Series, pd.Series]]
+            Yields a tuple of (features, predictions, ground truth) for each batch.
+        """
         pass
 
     def submit_live_batch(

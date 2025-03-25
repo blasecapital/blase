@@ -26,11 +26,18 @@ RUN pip install --no-cache-dir tensorflow-gpu==2.5.0
 RUN pip install --no-cache-dir torch==1.10.1+cu111 \
     torchvision==0.11.2+cu111 \
     torchaudio==0.10.1 -f https://download.pytorch.org/whl/cu111/torch_stable.html
-RUN pip install --no-cache-dir pandas==1.1.5
 
 RUN conda install -y \
     transformers \
+    xgboost \
+    lightgbm \
     jupyter \
+    pyarrow \
+    duckdb \
+    polars \
+    orjson \
+    librosa \
+    joblib \
     matplotlib \
     mplfinance \
     pickleshare \
@@ -55,6 +62,5 @@ RUN python -c "import tensorflow as tf; print('TensorFlow:', tf.__version__)"
 RUN python -c "import torch; print('PyTorch:', torch.__version__)"
 RUN python -c "import numpy as np; print('NumPy:', np.__version__)"
 RUN python -c "import pandas as pd; print('Pandas:', pd.__version__)"
-RUN python -c "import transformers; print('Transformers:', transformers.__version__)"
 
 WORKDIR /workspace

@@ -24,21 +24,32 @@ dependencies = [
 
 [project.optional-dependencies]
 full = [
+    "pyarrow",
+    "duckdb",
+    "polars",
+    "orjson",
+    "joblib",
+    "xgboost",
+    "librosa",
     "transformers",
     "jupyter",
-    "matplotlib",
-    "mplfinance",
     "pickleshare",
     "pillow",
     "python-dateutil",
     "python-dotenv",
     "pytz",
-    "scikit-learn",
-    "scipy",
     "threadpoolctl",
     "tqdm",
-    "lime",
     "pytest"
+]
+
+conda_only = [
+    "lime",
+    "matplotlib",
+    "lightgbm",
+    "scikit-learn",
+    "scipy",
+    "mplfinance",
 ]
 
 [project.urls]

@@ -1,6 +1,6 @@
-# Contributing to `balcones_train`
+# Contributing to `blase`
 
-Thank you for your interest in contributing to `balcones_train`, together we will help people and their machines learn better! Contributions are welcome in the form of bug reports, feature requests, code contributions, and documentation improvements.
+Thank you for your interest in contributing to `blase`, together we will help people and their machines learn better! Contributions are welcome in the form of bug reports, feature requests, code contributions, and documentation improvements.
 
 ## Getting Started
 
@@ -49,6 +49,6 @@ All major contributions should be accompanied by documentation updates:
 - Keep commits focused and concise.
 
 ## License
-By contributing to 'balcones_train', you agree that your contributions will be licensed under the **BSD 3-Clause License**.
+By contributing to 'blase', you agree that your contributions will be licensed under the **BSD 3-Clause License**.
 
 For any further questions, feel free to open an issue or reach out to the maintainers.

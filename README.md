@@ -116,6 +116,7 @@ Home price estimation (regression)
     pip install .
     or
     pip install .[full]
+    conda install lime matplotlib lightgbm scikit-learn scipy mplfinance
     ```
 4. Verify installation:
     ```sh

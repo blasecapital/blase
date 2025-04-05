@@ -1,7 +1,12 @@
 from typing import Any, Callable
+from pathlib import Path
 
 import numpy as np
-import pandas as pd
+
+from blase.track import Track
+from blase.utils.hashing import Hash
+from blase.utils.backends import resolve_backend
+from blase.loading.csv_backend import save_batch_pandas, save_batch_polars
 
 
 class Load:
@@ -62,10 +67,84 @@ class Load:
              metadata: dict = None):
         pass
 
-    def save_to_csv(self, data: pd.DataFrame, path: str, mode: str = "overwrite"):
-        pass
+    def save_to_csv(
+            self, 
+            data: Any, 
+            path: str,
+            backend: str = "polars",
+            track: bool = True
+    ) -> None:
+        """
+        Saves a Pandas or Polars DataFrame to a CSV file.
 
-    def save_to_parquet(self, data: pd.DataFrame, path: str, mode: str = "overwrite"):
+        If the file exists, appends the data without duplicating headers.
+        If the file does not exist, creates it with headers.
+
+        Args:
+            data (Any): A pandas or polars DataFrame.
+            path (str): Path to save the CSV.
+            backend : {"pandas", "polars"}, default="polars"
+            track (bool): Whether to track this save operation.
+        """
+
+        path_obj = Path(path)
+        file_exists = path_obj.exists()
+        backend = resolve_backend(backend)
+
+        # Tracking
+        if track:
+            track_dir = Track._validate_run_directory(track=track)
+            run_path = Track._validate_active_run(track_dir=track_dir)
+
+            hasher = Hash()
+            pre_save_hash = hasher.hash_file(path_obj) if file_exists else None
+
+            inputs = {
+                "file_path": str(path_obj),
+                "pre_save_hash": pre_save_hash,
+                "file_exists": file_exists
+            }
+
+            step_id, step_file_path = Track._start_step(
+                run_path=run_path,
+                function="save_to_csv",
+                params={
+                    "backend": backend,
+                    "file_path": str(path_obj)
+                },
+                inputs=inputs
+            )
+
+        # Write logic
+        try:
+            if backend == "polars":
+                save_path = save_batch_polars(data, path_obj, file_exists)
+            elif backend == "pandas":
+                save_path = save_batch_pandas(data, path_obj, file_exists)
+
+            if track:
+                post_save_hash = hasher.hash_file(save_path)
+
+                Track._end_step(
+                    step_file_path=step_file_path,
+                    status="completed",
+                    outputs={
+                        "backend": backend,
+                        "post_save_hash": post_save_hash,
+                        "file_path": str(save_path),
+                        "file_size": save_path.stat().st_size
+                    }
+                )
+        except Exception as e:
+            if track:
+                Track._end_step(
+                    step_file_path=step_file_path,
+                    status="failed",
+                    outputs={"error": str(e)}
+                )
+            raise
+
+    def save_to_parquet(self, data: Any, path: str, mode: str = "overwrite"):
         pass
 
     def save_to_npy(self, data: np.ndarray, path: str):
@@ -74,13 +153,13 @@ class Load:
     def save_to_json(self, data: Any, path: str):
         pass
 
-    def save_to_sqlite(self, data: pd.DataFrame, db_path: str, table: str, mode: str = "append"):
+    def save_to_sqlite(self, data: Any, db_path: str, table: str, mode: str = "append"):
         pass
 
-    def save_to_duckdb(self, data: pd.DataFrame, db_path: str, table: str, mode: str = "append"):
+    def save_to_duckdb(self, data: Any, db_path: str, table: str, mode: str = "append"):
         pass
 
-    def save_to_postgresql(self, data: pd.DataFrame, conn_params: dict, table: str, mode: str = "append"):
+    def save_to_postgresql(self, data: Any, conn_params: dict, table: str, mode: str = "append"):
         pass
 
     def save_to_filesystem(self, data: Any, directory: str, filename_fn: Callable):
@@ -89,5 +168,5 @@ class Load:
     def save_metadata(self, metadata: dict, destination: str):
         pass
 
-    def validate_schema(self, data: pd.DataFrame, schema_path: str):
+    def validate_schema(self, data: Any, schema_path: str):
         pass

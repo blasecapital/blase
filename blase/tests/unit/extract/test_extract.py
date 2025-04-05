@@ -23,9 +23,9 @@ def temp_csv_file(tmp_path):
     file_path.write_text(TEST_CSV_CONTENT)
     return str(file_path)
 
-def test_load_csv_batches(temp_csv_file):
+def test_read_csv_batches(temp_csv_file):
     extractor = Extract()
-    batches = list(extractor.load_csv(file_path=temp_csv_file, mode="manual", batch_size=2, backend="pandas"))
+    batches = list(extractor.read_csv(file_path=temp_csv_file, mode="manual", batch_size=2, backend="pandas"))
     
     # Should split into 3 batches (2+2+1)
     assert len(batches) == 3
@@ -35,9 +35,9 @@ def test_load_csv_batches(temp_csv_file):
     assert batches[2].shape[0] == 1
     assert batches[0].iloc[0]["id"] == 1
 
-def test_load_csv_batches_polars(temp_csv_file):
+def test_read_csv_batches_polars(temp_csv_file):
     extractor = Extract()
-    batches = list(extractor.load_csv(file_path=temp_csv_file, mode="manual", batch_size=2, backend="polars"))
+    batches = list(extractor.read_csv(file_path=temp_csv_file, mode="manual", batch_size=2, backend="polars"))
 
     # Should split into 3 batches (2+2+1)
     assert len(batches) == 3

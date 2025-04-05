@@ -1,5 +1,8 @@
-from typing import Any, Union
+import hashlib
+import pickle
+import inspect
 from pathlib import Path
+from typing import Any, Union
 
 
 class Hash:
@@ -66,7 +69,16 @@ class Hash:
         Args:
             hash_algorithm (str): Hashing algorithm to use (default is 'sha256').
         """
-        pass
+        self.hash_algorithm = hash_algorithm
+
+    def _hasher(self):
+        """
+        Create a new hash object using the initialized algorithm.
+
+        Returns:
+            hashlib.Hash: A new hash object.
+        """
+        return hashlib.new(self.hash_algorithm)
 
     def hash_function(self, func: Any) -> str:
         """
@@ -78,7 +90,10 @@ class Hash:
         Returns:
             str: Hash digest string.
         """
-        pass
+        source = inspect.getsource(func)
+        h = self._hasher()
+        h.update(source.encode('utf-8'))
+        return h.hexdigest()
 
     def hash_file(self, file_path: Union[str, Path]) -> str:
         """
@@ -90,7 +105,11 @@ class Hash:
         Returns:
             str: Hash digest string.
         """
-        pass
+        h = self._hasher()
+        with open(file_path, "rb") as f:
+            while chunk := f.read(8192):
+                h.update(chunk)
+        return h.hexdigest()
 
     def hash_directory(self, directory_path: Union[str, Path]) -> str:
         """
@@ -102,7 +121,13 @@ class Hash:
         Returns:
             str: Combined hash of all file contents.
         """
-        pass
+        h = self._hasher()
+        directory = Path(directory_path)
+        for path in sorted(directory.rglob("*")):
+            if path.is_file():
+                h.update(path.name.encode('utf-8'))
+                h.update(self.hash_file(path).encode('utf-8'))
+        return h.hexdigest()
 
     def hash_object(self, obj: Any) -> str:
         """
@@ -114,7 +139,10 @@ class Hash:
         Returns:
             str: Hash digest string.
         """
-        pass
+        h = self._hasher()
+        serialized = pickle.dumps(obj)
+        h.update(serialized)
+        return h.hexdigest()
 
     def compare_hashes(self, hash1: str, hash2: str) -> bool:
         """
@@ -127,4 +155,4 @@ class Hash:
         Returns:
             bool: True if hashes match, False otherwise.
         """
-        pass
+        return hash1 == hash2

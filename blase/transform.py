@@ -1,8 +1,11 @@
 import importlib
 import logging
 import os
-from typing import Callable, Iterable, Any
+from typing import Callable, Iterable, Any, Optional
+from pathlib import Path
 
+from blase.track import Track
+from blase.utils.hashing import Hash
 
 class Transform:
     """
@@ -60,26 +63,51 @@ class Transform:
     - Provides flexibility to use **either inline functions, classes, or external scripts** for transformations.
     """
 
-    def __init__(self, enable_logging=True, log_to_file=False, log_file="transform.log"):
-        self.enable_logging = enable_logging
-        if self.enable_logging:
-            if log_to_file:
-                log_dir = os.path.dirname(log_file) or "."
-                os.makedirs(log_dir, exist_ok=True)
-                
-                logging.basicConfig(
-                    filename=log_file,
-                    filemode="a",
-                    level=logging.INFO,
-                    format="%(asctime)s - %(levelname)s - %(message)s",
-                )
-            else:
-                logging.basicConfig(
-                    level=logging.INFO,
-                    format="%(asctime)s - %(levelname)s - %(message)s",
-                )
+    def apply_function(
+        self,
+        data: Any,
+        transform_func: Callable,
+        track: bool = True,
+        batch_level: bool = False
+    ) -> Iterable:
+        """
+        Applies a user-defined transformation function to batched data.
 
-    def apply_function(self, data: Iterable, transform_func: Callable) -> Iterable: pass
+        Args:
+            data (Any): A DataFrames object.
+            transform_func (Callable): A function that transforms a batch.
+            track (bool): Whether to log this transformation step.
+            batch_level (bool): If True, track each batch separately. If False, track the entire transformation once.
+
+        Yields:
+            Iterable: Transformed batches.
+        """
+
+        # tracking
+        if track:
+            hasher = Hash()
+            func_hash = hasher.hash_function(transform_func)
+
+            track_dir = Track._validate_run_directory(track=track)
+            run_path = Track._validate_active_run(track_dir=track_dir)
+            step_id, step_file_path = Track._start_step(
+                run_path=run_path,
+                function=transform_func.__name__,
+                params={"function_hash": func_hash},
+                inputs={}  # you could optionally pass file hashes if this depends on any
+            )
+
+        # main logic
+        result = transform_func(data)
+
+        if track:
+            Track._end_step(
+                step_file_path=step_file_path,
+                outputs={"function_hash": func_hash}
+            )
+
+        return result
+
     def apply_from_module(self, data: Iterable, module_path: str, function_name: str) -> Iterable: pass
     def apply_standard_transformation(self, data, transformation: str, columns: list): pass
     # Maybe include a fill missing values explicitly here or include it in standard transformation

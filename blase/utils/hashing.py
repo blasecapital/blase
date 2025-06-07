@@ -4,6 +4,8 @@ import inspect
 from pathlib import Path
 from typing import Any, Union
 
+from rust_engine import byte_hasher, file_hasher
+
 
 class Hash:
     """
@@ -105,11 +107,8 @@ class Hash:
         Returns:
             str: Hash digest string.
         """
-        h = self._hasher()
-        with open(file_path, "rb") as f:
-            while chunk := f.read(8192):
-                h.update(chunk)
-        return h.hexdigest()
+        file_hash = file_hasher(str(file_path))
+        return file_hash
 
     def hash_directory(self, directory_path: Union[str, Path]) -> str:
         """
@@ -139,10 +138,9 @@ class Hash:
         Returns:
             str: Hash digest string.
         """
-        h = self._hasher()
         serialized = pickle.dumps(obj)
-        h.update(serialized)
-        return h.hexdigest()
+        obj_hash = byte_hasher(serialized)
+        return obj_hash
 
     def compare_hashes(self, hash1: str, hash2: str) -> bool:
         """

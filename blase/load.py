@@ -1,5 +1,6 @@
-from typing import Any, Callable
+from typing import Any, Callable, Optional
 from pathlib import Path
+import json
 
 import numpy as np
 
@@ -68,28 +69,62 @@ class Load:
         pass
 
     def save_to_csv(
-            self, 
-            data: Any, 
-            path: str,
-            backend: str = "polars",
-            track: bool = True
+        self,
+        data: Any,
+        path: Optional[str] = None,
+        file_name: Optional[str] = None,
+        subdir: Optional[str] = None,
+        backend: str = "polars",
+        track: bool = True,
+        use_blase_path: bool = True
     ) -> None:
         """
         Saves a Pandas or Polars DataFrame to a CSV file.
 
-        If the file exists, appends the data without duplicating headers.
-        If the file does not exist, creates it with headers.
+        If using a Blase pipeline (use_blase_path=True), automatically saves to:
+        ./runs/<active_run>/assets/[subdir/]<file_name>
+
+        If a custom path is provided, saves directly to that location.
 
         Args:
             data (Any): A pandas or polars DataFrame.
-            path (str): Path to save the CSV.
-            backend : {"pandas", "polars"}, default="polars"
-            track (bool): Whether to track this save operation.
+            path (str, optional): Custom file path for saving (ignored if use_blase_path=True).
+            file_name (str, optional): File name when using Blase run context.
+            subdir (str, optional): Subdirectory under assets/ for organization.
+            backend (str): Either 'pandas' or 'polars'.
+            track (bool): Whether to track the save step.
+            use_blase_path (bool): Whether to use Blase run directory structure.
         """
 
-        path_obj = Path(path)
-        file_exists = path_obj.exists()
         backend = resolve_backend(backend)
+
+        # Build save path
+        if use_blase_path:
+            run_info_path = Path("runs/active_run.blase")
+            if not run_info_path.exists():
+                raise RuntimeError("No active run found. Expected 'runs/active_run.blase'.")
+
+            with open(run_info_path) as f:
+                run_id = json.load(f).get("run_id")
+                if not run_id:
+                    raise RuntimeError("Missing run_id in active_run.blase.")
+
+            run_path = Path("runs") / run_id / "assets"
+            if subdir:
+                run_path = run_path / subdir
+            run_path.mkdir(parents=True, exist_ok=True)
+
+            if not file_name:
+                raise ValueError("file_name must be provided when using use_blase_path=True")
+
+            path_obj = run_path / file_name
+        else:
+            if not path:
+                raise ValueError("Either 'path' must be provided or use_blase_path must be True")
+            path_obj = Path(path)
+            path_obj.parent.mkdir(parents=True, exist_ok=True)
+
+        file_exists = path_obj.exists()
 
         # Tracking
         if track:
@@ -123,15 +158,14 @@ class Load:
                 save_path = save_batch_pandas(data, path_obj, file_exists)
 
             if track:
-                post_save_hash = hasher.hash_file(save_path)
-
+                post_save_hash = Hash().hash_file(save_path)
                 Track._end_step(
                     step_file_path=step_file_path,
                     status="completed",
                     outputs={
                         "backend": backend,
                         "post_save_hash": post_save_hash,
-                        "file_path": str(save_path),
+                        "file_path": str(path_obj),
                         "file_size": save_path.stat().st_size
                     }
                 )

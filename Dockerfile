@@ -63,4 +63,24 @@ RUN python -c "import torch; print('PyTorch:', torch.__version__)"
 RUN python -c "import numpy as np; print('NumPy:', np.__version__)"
 RUN python -c "import pandas as pd; print('Pandas:', pd.__version__)"
 
+# -------- Rust + maturin setup --------
+RUN apt-get update && apt-get install -y \
+    curl \
+    build-essential \
+    pkg-config \
+    libssl-dev \
+    && curl https://sh.rustup.rs -sSf | bash -s -- -y --default-toolchain 1.87.0 \
+    && apt-get clean && rm -rf /var/lib/apt/lists/*
+
+ENV PATH="/root/.cargo/bin:${PATH}"
+
+# Install maturin globally (used to build Rust Python bindings)
+RUN pip install maturin
+
+RUN python -c "import tensorflow as tf; print('TensorFlow:', tf.__version__)"
+RUN python -c "import torch; print('PyTorch:', torch.__version__)"
+RUN python -c "import numpy as np; print('NumPy:', np.__version__)"
+RUN python -c "import pandas as pd; print('Pandas:', pd.__version__)"
+# -------- end Rust setup ---------
+
 WORKDIR /workspace

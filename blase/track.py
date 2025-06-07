@@ -43,8 +43,8 @@ class Track:
         └── <runs>/
             └── <run_id>_<timestamp>/
                 ├── logs/
-                │   ├── prepare.json
-                │   ├── train.json
+                │   ├── prepare.blase
+                │   ├── train.blase
                 ├── scripts/
                 │   └── model_def.py
                 └── artifacts/
@@ -121,6 +121,9 @@ class Track:
         """Return a list of references forming a lineage chain between logged steps."""
         pass
 
+    def restore_step(step_hash):
+        """(For later) Walk DAG backward and rerun steps if assets are missing."""
+        pass
 
     # ──────────────────────────────────────────────────────
     # Protected Methods — For Use Inside ML Modules (e.g., Prepare, Train)
@@ -172,12 +175,12 @@ class Track:
         (run_path / "lookup").mkdir(exist_ok=True)
 
         # Initialize tracking files
-        (run_path / "lookup/hash_to_step.json").write_text(json.dumps({}, indent=2))
-        (run_path / "lookup/step_index.json").write_text(json.dumps([], indent=2))
-        (run_path / "lookup/tags.json").write_text(json.dumps({}, indent=2))
+        (run_path / "lookup/hash_to_step.blase").write_text(json.dumps({}, indent=2))
+        (run_path / "lookup/step_index.blase").write_text(json.dumps([], indent=2))
+        (run_path / "lookup/tags.blase").write_text(json.dumps({}, indent=2))
 
         # Global metadata
-        (run_path / "run_metadata.json").write_text(json.dumps({
+        (run_path / "run_metadata.blase").write_text(json.dumps({
             "created_at": datetime.now().isoformat(),
             "system": platform.system(),
             "platform": platform.platform(),
@@ -197,7 +200,7 @@ class Track:
     def _validate_active_run(track_dir: str) -> Path:
         """Check run directory for active run, or create a new one."""
         track_path = Path(track_dir)
-        active_path = track_path / "active_run.json"
+        active_path = track_path / "active_run.blase"
 
         if not active_path.exists():
             response = input("Start tracking your first run? [y/N]: ")
@@ -219,7 +222,7 @@ class Track:
 
         run_id = data.get("run_id")
         if not run_id:
-            raise RuntimeError("Corrupted active_run.json — missing run_id.")
+            raise RuntimeError("Corrupted active_run.blase — missing run_id.")
 
         run_path = track_path / run_id
         if not run_path.exists():
@@ -257,14 +260,14 @@ class Track:
         })
 
         # Lookup
-        hash_to_step_path = run_path / "lookup" / "hash_to_step.json"
-        step_index_path = run_path / "lookup" / "step_index.json"
+        hash_to_step_path = run_path / "lookup" / "hash_to_step.blase"
+        step_index_path = run_path / "lookup" / "step_index.blase"
         hash_to_step = json.loads(hash_to_step_path.read_text()) if hash_to_step_path.exists() else {}
         step_index = json.loads(step_index_path.read_text()) if step_index_path.exists() else []
 
         if step_hash in hash_to_step:
             step_id = hash_to_step[step_hash]
-            step_file_path = run_path / "logs" / f"{step_id}.json"
+            step_file_path = run_path / "logs" / f"{step_id}.blase"
 
             # Update existing step with a new replay timestamp
             with open(step_file_path, "r") as f:
@@ -278,9 +281,9 @@ class Track:
                 json.dump(step_data, f, indent=2)
         else:
             # New step
-            step_num = len(list((run_path / "logs").glob("step_*.json"))) + 1
+            step_num = len(list((run_path / "logs").glob("step_*.blase"))) + 1
             step_id = f"step_{step_num:03d}_{function.split('.')[-1]}"
-            step_file_path = run_path / "logs" / f"{step_id}.json"
+            step_file_path = run_path / "logs" / f"{step_id}.blase"
 
             step_data = {
                 "step_id": step_id,

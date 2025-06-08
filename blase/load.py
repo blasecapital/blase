@@ -57,6 +57,9 @@ class Load:
     - By default, the module infers the best storage format from the input data.
     - Schema validation and metadata logging are optional but enhance pipeline safety and traceability.
     """
+    def __init__(self):
+        self.tracked = False
+        self.step_file_path = None
 
     def save(self, 
              data: Any, 
@@ -71,9 +74,10 @@ class Load:
     def save_to_csv(
         self,
         data: Any,
+        last_batch: bool,
         path: Optional[str] = None,
         file_name: Optional[str] = None,
-        subdir: Optional[str] = None,
+        subdir: Optional[str] = "csv_data",
         backend: str = "polars",
         track: bool = True,
         use_blase_path: bool = True
@@ -88,6 +92,7 @@ class Load:
 
         Args:
             data (Any): A pandas or polars DataFrame.
+            last_batch (bool): Flag from Extract to end tracking step.
             path (str, optional): Custom file path for saving (ignored if use_blase_path=True).
             file_name (str, optional): File name when using Blase run context.
             subdir (str, optional): Subdirectory under assets/ for organization.
@@ -127,7 +132,7 @@ class Load:
         file_exists = path_obj.exists()
 
         # Tracking
-        if track:
+        if track and not self.tracked:
             track_dir = Track._validate_run_directory(track=track)
             run_path = Track._validate_active_run(track_dir=track_dir)
 
@@ -140,7 +145,7 @@ class Load:
                 "file_exists": file_exists
             }
 
-            step_id, step_file_path = Track._start_step(
+            step_id, self.step_file_path = Track._start_step(
                 run_path=run_path,
                 function="save_to_csv",
                 params={
@@ -149,6 +154,7 @@ class Load:
                 },
                 inputs=inputs
             )
+            self.tracked = True
 
         # Write logic
         try:
@@ -157,10 +163,10 @@ class Load:
             elif backend == "pandas":
                 save_path = save_batch_pandas(data, path_obj, file_exists)
 
-            if track:
+            if track and last_batch:
                 post_save_hash = Hash().hash_file(save_path)
                 Track._end_step(
-                    step_file_path=step_file_path,
+                    step_file_path = self.step_file_path,
                     status="completed",
                     outputs={
                         "backend": backend,
@@ -172,7 +178,7 @@ class Load:
         except Exception as e:
             if track:
                 Track._end_step(
-                    step_file_path=step_file_path,
+                    step_file_path = self.step_file_path,
                     status="failed",
                     outputs={"error": str(e)}
                 )

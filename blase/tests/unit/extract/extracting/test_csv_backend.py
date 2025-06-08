@@ -89,20 +89,24 @@ def test_read_batches_pandas_with_use_cols_only(sample_csv_file):
     ))
 
     assert len(batches) == 3  # 2 + 2 + 1
-    assert isinstance(batches[0], pd.DataFrame)
-    assert "id" in batches[0].columns
-    assert "country" in batches[0].columns
-    assert "year" not in batches[0].columns  # ensure it's excluded
-    assert batches[0].iloc[0]["id"] == 1
+
+    for i, (batch, is_last) in enumerate(batches):
+        assert isinstance(batch, pd.DataFrame)
+        assert "id" in batch.columns
+        assert "country" in batch.columns
+        assert "year" not in batch.columns  # ensure it's excluded
+
+    assert batches[0][0].iloc[0]["id"] == 1  # access batch 0, then first row "id"
+    assert batches[-1][1] is True  # make sure the final batch is flagged
 
 
 def test_read_batches_pandas_with_use_cols_subset(sample_csv_file):
-    batches = list(read_batches_pandas(
+    batches = [batch for batch, _ in read_batches_pandas(
         sample_csv_file,
         batch_size=3,
         use_cols=["country"],
         filter_by=None
-    ))
+    )]
 
     all_rows = pd.concat(batches, ignore_index=True)
     assert list(all_rows.columns) == ["country"]
@@ -110,7 +114,12 @@ def test_read_batches_pandas_with_use_cols_subset(sample_csv_file):
 
 
 def test_read_batches_pandas_no_filter(sample_csv_file):
-    batches = list(read_batches_pandas(sample_csv_file, batch_size=2, use_cols=None, filter_by=None))
+    batches = [batch for batch, _ in read_batches_pandas(
+        sample_csv_file, 
+        batch_size=2, 
+        use_cols=None, 
+        filter_by=None
+    )]
 
     assert len(batches) == 3  # 2 + 2 + 1
     assert isinstance(batches[0], pd.DataFrame)
@@ -119,12 +128,12 @@ def test_read_batches_pandas_no_filter(sample_csv_file):
 
 
 def test_read_batches_pandas_with_filter(sample_csv_file):
-    batches = list(read_batches_pandas(
-        sample_csv_file,
-        batch_size=2,
-        use_cols=None,
+    batches = [batch for batch, _ in read_batches_pandas(
+        sample_csv_file, 
+        batch_size=2, 
+        use_cols=None, 
         filter_by=[{"col": "country", "value": "USA"}]
-    ))
+    )]
 
     all_rows = pd.concat(batches, ignore_index=True)
     assert all(all_rows["country"] == "USA")
@@ -137,7 +146,12 @@ def test_read_batches_pandas_multiple_filters(sample_csv_file):
         {"col": "year", "value": 2020}
     ]
     
-    batches = list(read_batches_pandas(sample_csv_file, batch_size=2, use_cols=None, filter_by=filters))
+    batches = [batch for batch, _ in read_batches_pandas(
+        sample_csv_file, 
+        batch_size=2, 
+        use_cols=None, 
+        filter_by=filters
+    )]
     all_rows = pd.concat(batches)
 
     assert all(all_rows["country"] == "USA")
@@ -147,19 +161,20 @@ def test_read_batches_pandas_multiple_filters(sample_csv_file):
 
 def test_read_batches_pandas_column_missing(sample_csv_file):
     with pytest.raises(RuntimeError) as exc_info:
-        list(read_batches_pandas(
-            sample_csv_file,
-            batch_size=2,
-            use_cols=None,
-            filter_by=[{"col": "nonexistent", "value": "X"}]
-        ))
+        [batch for batch, _ in read_batches_pandas(
+                sample_csv_file, 
+                batch_size=2, 
+                use_cols=None, 
+                filter_by=[{"col": "nonexistent", "value": "X"}]
+            )]
 
     assert "Column 'nonexistent' not found" in str(exc_info.value)
 
 
 def test_read_batches_polars_basic(sample_csv_file):
-    batches = list(read_batches_polars(sample_csv_file, batch_size=2, use_cols=None, filter_by=None))
-    
+    batches = [batch for batch, _ in read_batches_polars(
+        sample_csv_file, batch_size=2, use_cols=None, filter_by=None
+    )]
     assert len(batches) == 3
     assert isinstance(batches[0], pl.DataFrame)
     assert batches[0].shape[0] == 2
@@ -168,12 +183,12 @@ def test_read_batches_polars_basic(sample_csv_file):
 
 
 def test_read_batches_polars_with_use_cols_only(sample_csv_file):
-    batches = list(read_batches_polars(
+    batches = [batch for batch, _ in read_batches_polars(
         sample_csv_file,
         batch_size=2,
         use_cols=["id", "country"],
         filter_by=None
-    ))
+    )]
 
     assert len(batches) == 3  # 2 + 2 + 1
     assert isinstance(batches[0], pl.DataFrame)
@@ -184,12 +199,12 @@ def test_read_batches_polars_with_use_cols_only(sample_csv_file):
 
 
 def test_read_batches_polars_with_use_cols_subset(sample_csv_file):
-    batches = list(read_batches_polars(
+    batches = [batch for batch, _ in read_batches_polars(
         sample_csv_file,
         batch_size=3,
         use_cols=["country"],
         filter_by=[{"col": "country", "value": "USA"}]
-    ))
+    )]
 
     all_rows = pl.concat(batches)
     assert list(all_rows.columns) == ["country"]
@@ -198,7 +213,12 @@ def test_read_batches_polars_with_use_cols_subset(sample_csv_file):
 
 def test_read_batches_polars_with_filter(sample_csv_file):
     filters = [{"col": "country", "value": "USA"}]
-    batches = list(read_batches_polars(sample_csv_file, batch_size=2, use_cols=None, filter_by=filters))
+    batches = [batch for batch, _ in read_batches_polars(
+        sample_csv_file, 
+        batch_size=2, 
+        use_cols=None, 
+        filter_by=filters
+    )]
     
     all_rows = pl.concat(batches)
     assert all(all_rows["country"] == "USA")
@@ -207,7 +227,12 @@ def test_read_batches_polars_with_filter(sample_csv_file):
 
 def test_read_batches_polars_with_no_matching_filter(sample_csv_file):
     filters = [{"col": "country", "value": "Brazil"}]
-    batches = list(read_batches_polars(sample_csv_file, batch_size=2, use_cols=None, filter_by=filters))
+    batches = [batch for batch, _ in read_batches_polars(
+        sample_csv_file, 
+        batch_size=2, 
+        use_cols=None, 
+        filter_by=filters
+    )]
     
     assert len(batches) == 0
 
@@ -217,7 +242,12 @@ def test_read_batches_polars_multiple_filters(sample_csv_file):
         {"col": "country", "value": "USA"},
         {"col": "year", "value": 2020}
     ]
-    batches = list(read_batches_polars(sample_csv_file, batch_size=2, use_cols=None, filter_by=filters))
+    batches = [batch for batch, _ in read_batches_polars(
+        sample_csv_file, 
+        batch_size=2, 
+        use_cols=None, 
+        filter_by=filters
+    )]
     
     all_rows = pl.concat(batches)
     assert all(all_rows["country"] == "USA")
@@ -227,10 +257,10 @@ def test_read_batches_polars_multiple_filters(sample_csv_file):
 
 def test_read_batches_polars_column_missing(sample_csv_file):
     with pytest.raises(RuntimeError) as excinfo:
-        list(read_batches_polars(
+        [batch for batch, _ in read_batches_polars(
             sample_csv_file,
             batch_size=2,
             use_cols=None, 
             filter_by=[{"col": "nonexistent", "value": "X"}]
-        ))
+        )]
     assert 'unable to find column "nonexistent"' in str(excinfo.value)

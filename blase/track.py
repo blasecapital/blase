@@ -165,19 +165,13 @@ class Track:
                 raise RuntimeError("Tracking disabled and no existing '/runs' directory found.")
             
     def __initialize_run_structure(track_path: Path, run_id: str) -> Path:
-        """Create /logs, /assets, /lookup, and initialize run files."""
+        """Create /steps, /assets, and initialize run files."""
         run_path = track_path / run_id
         run_path.mkdir(parents=True, exist_ok=True)
 
         # Subdirectories
-        (run_path / "logs").mkdir(exist_ok=True)
+        (run_path / "steps").mkdir(exist_ok=True)
         (run_path / "assets").mkdir(exist_ok=True)
-        (run_path / "lookup").mkdir(exist_ok=True)
-
-        # Initialize tracking files
-        (run_path / "lookup/hash_to_step.blase").write_text(json.dumps({}, indent=2))
-        (run_path / "lookup/step_index.blase").write_text(json.dumps([], indent=2))
-        (run_path / "lookup/tags.blase").write_text(json.dumps({}, indent=2))
 
         # Global metadata
         (run_path / "run_metadata.blase").write_text(json.dumps({
@@ -259,60 +253,23 @@ class Track:
             "inputs": inputs or {}
         })
 
-        # Lookup
-        hash_to_step_path = run_path / "lookup" / "hash_to_step.blase"
-        step_index_path = run_path / "lookup" / "step_index.blase"
-        hash_to_step = json.loads(hash_to_step_path.read_text()) if hash_to_step_path.exists() else {}
-        step_index = json.loads(step_index_path.read_text()) if step_index_path.exists() else []
+        # New step
+        step_num = len(list((run_path / "steps").glob("step_*.blase"))) + 1
+        step_id = f"step_{step_num:03d}_{function.split('.')[-1]}"
+        step_file_path = run_path / "steps" / f"{step_id}.blase"
 
-        if step_hash in hash_to_step:
-            step_id = hash_to_step[step_hash]
-            step_file_path = run_path / "logs" / f"{step_id}.blase"
+        step_data = {
+            "step_id": step_id,
+            "function": function,
+            "params": params,
+            "inputs": inputs or {},
+            "timestamp_start": timestamp,
+            "status": "in_progress",
+            "step_hash": step_hash
+        }
 
-            # Update existing step with a new replay timestamp
-            with open(step_file_path, "r") as f:
-                step_data = json.load(f)
-
-            if "replays" not in step_data:
-                step_data["replays"] = []
-            step_data["replays"].append(timestamp)
-
-            with open(step_file_path, "w") as f:
-                json.dump(step_data, f, indent=2)
-        else:
-            # New step
-            step_num = len(list((run_path / "logs").glob("step_*.blase"))) + 1
-            step_id = f"step_{step_num:03d}_{function.split('.')[-1]}"
-            step_file_path = run_path / "logs" / f"{step_id}.blase"
-
-            step_data = {
-                "step_id": step_id,
-                "function": function,
-                "params": params,
-                "inputs": inputs or {},
-                "timestamp_start": timestamp,
-                "status": "in_progress",
-                "step_hash": step_hash,
-                "replays": []
-            }
-
-            with open(step_file_path, "w") as f:
-                json.dump(step_data, f, indent=2)
-
-            # Update lookup
-            hash_to_step[step_hash] = step_id
-            step_index.append({
-                "step_id": step_id,
-                "step_hash": step_hash,
-                "timestamp": timestamp,
-                "function": function
-            })
-
-            with open(hash_to_step_path, "w") as f:
-                json.dump(hash_to_step, f, indent=2)
-
-            with open(step_index_path, "w") as f:
-                json.dump(step_index, f, indent=2)
+        with open(step_file_path, "w") as f:
+            json.dump(step_data, f, indent=2)
 
         return step_id, step_file_path
     

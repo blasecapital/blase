@@ -1,4 +1,5 @@
 from typing import Optional, Iterable, List, Dict, Any
+from more_itertools import peekable
 import os
 
 try:
@@ -102,7 +103,8 @@ def read_batches_pandas(
     import pandas as pd
 
     try:
-        chunk_iter = pd.read_csv(file_path, chunksize=batch_size, usecols=use_cols)
+        chunk_iter = peekable(pd.read_csv(file_path, chunksize=batch_size, usecols=use_cols))
+        last_batch = False
 
         for chunk in chunk_iter:
             if filter_by:
@@ -120,7 +122,9 @@ def read_batches_pandas(
                         chunk = chunk[chunk[col] == val]
 
             if not chunk.empty:
-                yield chunk
+                if chunk_iter.peek(None) is None:
+                    last_batch = True
+                yield (chunk, last_batch)
 
     except Exception as e:
         raise RuntimeError(f"[Pandas Backend] Failed to read CSV in batches: {e}")
@@ -183,14 +187,19 @@ def read_batches_polars(
 
         # Lazy streaming in batches
         offset = 0
+        last_batch = False
         while True:
             batch_df = scan_csv.slice(offset, batch_size).collect()
+            num_rows = batch_df.height
             
             # If empty batch is returned, break loop
             if batch_df.is_empty():
                 break
+            
+            if num_rows < batch_size:
+                last_batch = True
 
-            yield batch_df
+            yield (batch_df, last_batch)
 
             # Increment offset by batch size
             offset += batch_size

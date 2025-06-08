@@ -25,7 +25,13 @@ def temp_csv_file(tmp_path):
 
 def test_read_csv_batches(temp_csv_file):
     extractor = Extract()
-    batches = list(extractor.read_csv(file_path=temp_csv_file, mode="manual", batch_size=2, backend="pandas"))
+    batches = [batch for batch, _ in extractor.read_csv(
+        file_path=temp_csv_file, 
+        mode="manual", 
+        batch_size=2, 
+        backend="pandas",
+        track=False
+    )]
     
     # Should split into 3 batches (2+2+1)
     assert len(batches) == 3
@@ -37,7 +43,13 @@ def test_read_csv_batches(temp_csv_file):
 
 def test_read_csv_batches_polars(temp_csv_file):
     extractor = Extract()
-    batches = list(extractor.read_csv(file_path=temp_csv_file, mode="manual", batch_size=2, backend="polars"))
+    batches = [batch for batch, _ in extractor.read_csv(
+        file_path=temp_csv_file, 
+        mode="manual", 
+        batch_size=2, 
+        backend="polars",
+        track=False
+    )]
 
     # Should split into 3 batches (2+2+1)
     assert len(batches) == 3

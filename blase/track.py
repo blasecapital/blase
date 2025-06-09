@@ -172,6 +172,15 @@ class Track:
         # Subdirectories
         (run_path / "steps").mkdir(exist_ok=True)
         (run_path / "assets").mkdir(exist_ok=True)
+        (run_path / "data_lookup").mkdir(exist_ok=True)
+        (run_path / "dag").mkdir(exist_ok=True)
+
+        # Write empty data_lookup and dag .blase files
+        with open(run_path / "data_lookup" / "data_lookup.blase", 'w') as f:
+            json.dump({}, f)
+
+        with open(run_path / "dag" / "dag.blase", 'w') as f:
+            json.dump({}, f)
 
         # Global metadata
         (run_path / "run_metadata.blase").write_text(json.dumps({
@@ -191,7 +200,7 @@ class Track:
         return run_path
 
     @staticmethod
-    def _validate_active_run(track_dir: str) -> Path:
+    def _validate_active_run(track_dir: Path) -> Path:
         """Check run directory for active run, or create a new one."""
         track_path = Path(track_dir)
         active_path = track_path / "active_run.blase"
@@ -277,7 +286,8 @@ class Track:
     def _end_step(
         step_file_path: Path,
         status: str = "completed",
-        outputs: Optional[Dict[str, Any]] = None
+        outputs: Optional[Dict[str, Any]] = None,
+        file_hash: Optional[str] = None,
     ) -> None:
         """
         Finalizes a tracked step by updating its status and outputs.
@@ -286,6 +296,7 @@ class Track:
             step_file_path: Path to the step's JSON file.
             status: Step status ("completed", "failed", etc.).
             outputs: Optional dictionary of output metadata or hashes.
+            file_hash: Optionally update a file's hash in log
         """
         if not step_file_path.exists():
             raise FileNotFoundError(f"Step file not found: {step_file_path}")
@@ -302,9 +313,50 @@ class Track:
         if outputs:
             step_data["outputs"] = outputs
 
+        # Optionally add file hash
+        if file_hash is not None:
+            step_data["inputs"]["file_hash"] = file_hash
+
         # Write back updated log
         with open(step_file_path, "w") as f:
             json.dump(step_data, f, indent=2)
+
+    @staticmethod
+    def _log_data(
+        run_path: Path,
+        file_hash: str,
+        parent_dict: Optional[Dict]
+    ):
+        """
+        Logs metadata for a data file identified by its hash into a structured JSON lookup file.
+
+        If the file hash does not already exist in the lookup file, a new entry is created with
+        the provided metadata. The method expects a specific directory structure and file format.
+
+        Args:
+            run_path (Path): Path to the root directory of the current run.
+            file_hash (str): Unique hash representing the data file to be logged.
+            parent_dict (Optional[Dict]): Metadata dictionary to associate with the file hash.
+                                           If None or empty, defaults to an empty dictionary.
+
+        Raises:
+            FileNotFoundError: If `run_path` or the data lookup file does not exist.
+        """
+        if not run_path.exists():
+            raise FileNotFoundError("The run path does not exist: {run_path}")
+
+        data_log_file = run_path / "data_lookup" / "data_lookup.blase"
+        if not data_log_file.exists:
+            raise FileNotFoundError("The data lookup file does not exist: {data_log_file}")
+
+        with open(data_log_file, 'r') as f:
+            data = json.load(f)
+
+        if file_hash not in data:
+            data[file_hash] = parent_dict if parent_dict else {}
+
+            with open(data_log_file, 'w') as f:
+                json.dump(data, f, indent=2)
 
     def _log_script(self, script_path: str, func: Optional[Callable] = None) -> None:
         """Hash and save a user-defined script or function source code into the run."""

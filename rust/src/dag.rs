@@ -6,13 +6,12 @@
 
 use std::fs;
 use std::collections::HashMap;
-use serde_json::{Result, Value};
+use serde_json::Value;
 use serde::{Deserialize, Serialize};
 
 // -------------- step_reader ---------------
-pub fn step_reader(path: &str) -> Result<Value> {
-    let contents = fs::read_to_string(path)
-        .expect("Should have been able to open step .blase log");
+pub fn step_reader(path: &str) -> Result<Value, Box<dyn std::error::Error>> {
+    let contents = fs::read_to_string(path)?;
     let v: Value = serde_json::from_str(&contents)?;
     Ok(v)
 }
@@ -37,16 +36,21 @@ pub fn to_step(step: Value) -> Step {
 
 // -------------- walk_dir ---------------
 
-pub fn walk_step_dir(dir: &str) -> Result<HashMap<String, Step>> {
+pub fn walk_step_dir(dir: &str) -> Result<HashMap<String, Step>, Box<dyn std::error::Error>> {
     let mut step_map = HashMap::new();
 
-    for entry in fs::read_dir(dir).unwrap(){
-        let path = entry.unwrap().path();
+    for entry_result in fs::read_dir(dir)?{
+        let entry = entry_result?;
+        let path = entry.path();
 
         if path.extension().and_then(|s| s.to_str()) == Some("blase") {
-            let json_val = step_reader(path.to_str().unwrap())?;
-            let step = to_step(json_val);
-            step_map.insert(step.step_id.clone(), step);
+            if let Some(path_str) = path.to_str() {
+                let json_val = step_reader(path_str)?;
+                let step = to_step(json_val);
+                step_map.insert(step.step_id.clone(), step);
+            } else {
+                eprintln!("Warning: Skipping non-UTF8 path: {:?}", path);
+            }
         }
     }
 
@@ -61,9 +65,9 @@ pub struct DataArtifact {
     hash: Option<String>,
 }
 
-pub struct Node {
-    step: Step,
-    data: DataArtifact,
+pub enum Node {
+    Step,
+    DataArtifact,
 }
 
 // -------------- new_graph ---------------

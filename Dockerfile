@@ -51,6 +51,7 @@ RUN conda install -y \
     tqdm \
     lime \
     pytest \
+    more-itertools \
     "numpy=1.19.5" \
     "pandas=1.1.5" && \
     conda clean --all -y

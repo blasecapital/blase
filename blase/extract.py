@@ -1,5 +1,6 @@
 from typing import Callable, Iterable, Dict, Any, Optional, List
 from pathlib import Path
+from concurrent.futures import ThreadPoolExecutor
 
 import numpy as np
 
@@ -153,10 +154,14 @@ class Extract:
             track_dir = Track._validate_run_directory(track=track)
             run_path = Track._validate_active_run(track_dir=track_dir)
 
+            # Hash file in background
             hasher = Hash()
+            executor = ThreadPoolExecutor(max_workers=1)
+            file_hash_future = executor.submit(hasher.hash_file, file_path)
+            
             inputs = {
                 "file_path": str(file_path),
-                "file_hash": hasher.hash_file(file_path),
+                "file_hash": "Pending",
                 "file_size": Path(file_path).stat().st_size
             }
             step_id, step_file_path = Track._start_step(
@@ -196,6 +201,18 @@ class Extract:
                 elif backend == "pandas":
                     yield from read_batches_pandas(file_path, batch_size, use_cols, filter_by)
                 
+                file_hash = file_hash_future.result()
+                parent_dict = {
+                    'parent': {},
+                    'source_path': file_path,
+                    'logged_by': step_id
+                }
+                Track._log_data(
+                    run_path=run_path,
+                    file_hash=file_hash,
+                    parent_dict=parent_dict
+                )
+
                 Track._end_step(
                     step_file_path=step_file_path,
                     status="completed",
@@ -203,8 +220,10 @@ class Extract:
                         "backend": backend,
                         "batch_size": batch_size,
                         "num_columns": len(use_cols) if use_cols else "all"
-                    }
+                    },
+                    file_hash=file_hash
                 )
+
             except Exception as e:
                 Track._end_step(
                     step_file_path=step_file_path,

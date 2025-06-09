@@ -1,4 +1,4 @@
-from typing import Optional, Iterable, List, Dict, Any
+from typing import Optional, Iterable, List, Dict, Any, Union
 from more_itertools import peekable
 import os
 
@@ -75,7 +75,7 @@ def memory_aware_batcher(
 
 def read_batches_pandas(
     file_path: str,
-    batch_size: int,
+    batch_size: Union[int, None],
     use_cols: Optional[List[str]] = None,
     filter_by: Optional[List[Dict[str, Any]]] = None
 ) -> Iterable[Any]:

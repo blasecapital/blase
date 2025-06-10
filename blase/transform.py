@@ -70,10 +70,10 @@ class Transform:
     def apply_function(
         self,
         data: Any,
+        parent_hash: str,
         transform_func: Callable,
         last_batch: bool,
-        track: bool = True,
-        batch_level: bool = False
+        track: bool = True
     ) -> Iterable:
         """
         Applies a user-defined transformation function to batched data.
@@ -83,11 +83,12 @@ class Transform:
             transform_func (Callable): A function that transforms a batch.
             last_batch (bool): Flag from Extract to end tracking step.
             track (bool): Whether to log this transformation step.
-            batch_level (bool): If True, track each batch separately. If False, track the entire transformation once.
 
         Yields:
             Iterable: Transformed batches.
         """
+        step_hash = None
+        run_path = None
 
         # tracking
         if track and not self.tracked:
@@ -96,21 +97,30 @@ class Transform:
 
             track_dir = Track._validate_run_directory(track=track)
             run_path = Track._validate_active_run(track_dir=track_dir)
-            step_id, self.step_file_path = Track._start_step(
+            step_id, step_hash = Track._start_step(
                 run_path=run_path,
                 function=transform_func.__name__,
-                params={"function_hash": self.func_hash},
-                inputs={}  # you could optionally pass file hashes if this depends on any
+                params={
+                    # data is not included
+                    "parent_hash": parent_hash,
+                    "transform_func": transform_func.__name__,
+                    "last_batch": last_batch,
+                    "track": track
+                },
+                parent=parent_hash
             )
             self.tracked = True
 
         # main logic
-        result = transform_func(data)
+        result, step_hash = transform_func(data)
 
         if track and last_batch:
             Track._end_step(
-                step_file_path=self.step_file_path,
-                outputs={"function_hash": self.func_hash}
+                step_hash=step_hash,
+                run_path=run_path,
+                outputs={
+                    "function_hash": self.func_hash
+                }
             )
 
         return result

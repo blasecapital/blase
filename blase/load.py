@@ -80,6 +80,7 @@ class Load:
         subdir: Optional[str] = "csv_data",
         backend: str = "polars",
         track: bool = True,
+        parent: Optional[str],
         use_blase_path: bool = True
     ) -> None:
         """

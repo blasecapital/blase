@@ -159,12 +159,7 @@ class Extract:
             executor = ThreadPoolExecutor(max_workers=1)
             file_hash_future = executor.submit(hasher.hash_file, file_path)
             
-            inputs = {
-                "file_path": str(file_path),
-                "file_hash": "Pending",
-                "file_size": Path(file_path).stat().st_size
-            }
-            step_id, step_file_path = Track._start_step(
+            step_id, step_hash = Track._start_step(
                 run_path=run_path,
                 function="read_csv",
                 params={
@@ -173,9 +168,9 @@ class Extract:
                     "batch_size": batch_size,
                     "use_cols": use_cols,
                     "filter_by": filter_by,
-                    "backend": backend
-                },
-                inputs=inputs
+                    "backend": backend,
+                    "track": track
+                }
             )
 
         # dependency handling
@@ -196,14 +191,19 @@ class Extract:
         if track:
             try:
                 if backend == "polars":
-                    yield from read_batches_polars(file_path, batch_size, use_cols, filter_by)
+                    batch_gen = read_batches_polars(file_path, batch_size, use_cols, filter_by)
+                    wrapped_gen = ((batch, flag, step_hash) for batch, flag in batch_gen)
+                    yield from wrapped_gen
 
                 elif backend == "pandas":
-                    yield from read_batches_pandas(file_path, batch_size, use_cols, filter_by)
+                    batch_gen = read_batches_pandas(file_path, batch_size, use_cols, filter_by)
+                    wrapped_gen = ((batch, flag, step_hash) for batch, flag in batch_gen)
+                    yield from wrapped_gen
                 
                 file_hash = file_hash_future.result()
+                executor.shutdown()
                 parent_dict = {
-                    'parent': {},
+                    'parent': None,
                     'source_path': file_path,
                     'logged_by': step_id
                 }
@@ -214,19 +214,17 @@ class Extract:
                 )
 
                 Track._end_step(
-                    step_file_path=step_file_path,
+                    step_hash=step_hash,
+                    run_path=run_path,
                     status="completed",
-                    outputs={
-                        "backend": backend,
-                        "batch_size": batch_size,
-                        "num_columns": len(use_cols) if use_cols else "all"
-                    },
+                    outputs={},
                     file_hash=file_hash
                 )
 
             except Exception as e:
                 Track._end_step(
-                    step_file_path=step_file_path,
+                    step_hash=step_hash,
+                    run_path=run_path,
                     status="failed",
                     outputs={"error": str(e)}
                 )

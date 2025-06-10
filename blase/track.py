@@ -1,6 +1,7 @@
 from typing import Any, Callable, Dict, Optional, Tuple
 from pathlib import Path
 import json
+import sqlite3
 from datetime import datetime
 import platform
 import sys
@@ -164,23 +165,52 @@ class Track:
             else:
                 raise RuntimeError("Tracking disabled and no existing '/runs' directory found.")
             
+    @staticmethod
     def __initialize_run_structure(track_path: Path, run_id: str) -> Path:
         """Create /steps, /assets, and initialize run files."""
         run_path = track_path / run_id
         run_path.mkdir(parents=True, exist_ok=True)
 
         # Subdirectories
-        (run_path / "steps").mkdir(exist_ok=True)
         (run_path / "assets").mkdir(exist_ok=True)
-        (run_path / "data_lookup").mkdir(exist_ok=True)
-        (run_path / "dag").mkdir(exist_ok=True)
+        (run_path / "nodes").mkdir(exist_ok=True)
 
-        # Write empty data_lookup and dag .blase files
-        with open(run_path / "data_lookup" / "data_lookup.blase", 'w') as f:
-            json.dump({}, f)
-
-        with open(run_path / "dag" / "dag.blase", 'w') as f:
-            json.dump({}, f)
+        # Create nodes and dag sqlite databases
+        node_db_path = run_path / "nodes" / "nodes.db"
+        create_steps_table = """
+        CREATE TABLE IF NOT EXISTS steps (
+            step_hash TEXT PRIMARY KEY,
+            step_id TEXT UNIQUE,
+            function TEXT,
+            parent TEXT,
+            params JSON,
+            timestamp_start TEXT,
+            timestamp_end TEXT,
+            status TEXT,
+            outputs JSON
+        );
+        """
+        create_data_table = """
+        CREATE TABLE IF NOT EXISTS data (
+            data_hash TEXT PRIMARY KEY,
+            source_path TEXT,
+            parent TEXT,
+            logged_by TEXT,
+            metadata JSON
+        );
+        """
+        create_indexes = [
+            "CREATE INDEX IF NOT EXISTS idx_step_parent ON steps(parent);",
+            "CREATE INDEX IF NOT EXISTS idx_data_logged_by ON data(logged_by);",
+            "CREATE INDEX IF NOT EXISTS idx_data_parent ON data(parent);"
+        ]
+        with sqlite3.connect(node_db_path) as conn:
+            cursor = conn.cursor()
+            cursor.execute(create_steps_table)
+            cursor.execute(create_data_table)
+            for idx_sql in create_indexes:
+                cursor.execute(idx_sql)
+            conn.commit()
 
         # Global metadata
         (run_path / "run_metadata.blase").write_text(json.dumps({
@@ -238,8 +268,8 @@ class Track:
         run_path: Path,
         function: str,
         params: Dict[str, Any],
-        inputs: Dict[str, str] = None
-    ) -> Tuple[str, Path]:
+        parent: Optional[str] = None
+    ) -> Tuple[str, str]:
         """
         Starts a new tracked step within a run directory.
 
@@ -247,44 +277,55 @@ class Track:
             run_path: Path to the active run directory.
             function: Name of the function being tracked.
             params: Dictionary of parameters passed to the function.
-            inputs: Optional dictionary of input hashes (e.g. file hashes).
+            parent: Step or data hash.
 
         Returns:
             step_id: The unique identifier for the step.
-            step_file_path: Path to the step log file.
+            step_hash: Hash of function, params, and step number.
         """
-        timestamp = datetime.now().isoformat()
+        node_db_path = run_path / "nodes" / "nodes.db"
+        # Define values
+        with sqlite3.connect(node_db_path) as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT COUNT(*) FROM steps;")
+            count = cursor.fetchone()[0]
 
         hasher = Hash()
         step_hash = hasher.hash_object({
             "function": function,
             "params": params,
-            "inputs": inputs or {}
+            "step_num": count
         })
+        step_id = f"step_{count}_{function.split('.')[-1]}"
+        timestamp_start = datetime.now().isoformat()
+        timestamp_end = None
+        status = "pending"
+        outputs = {}
 
-        # New step
-        step_num = len(list((run_path / "steps").glob("step_*.blase"))) + 1
-        step_id = f"step_{step_num:03d}_{function.split('.')[-1]}"
-        step_file_path = run_path / "steps" / f"{step_id}.blase"
+        # Add entry
+        new_entry = """
+        INSERT INTO steps (
+            step_hash, step_id, function,
+            parent, params, timestamp_start,
+            timestamp_end, status, outputs
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """
+        values = (
+            step_hash, step_id, function,
+            parent, json.dumps(params), timestamp_start,
+            timestamp_end, status, json.dumps(outputs) 
+        )
+        with sqlite3.connect(node_db_path) as conn:
+            cursor = conn.cursor()
+            cursor.execute(new_entry, values)
+            conn.commit()
 
-        step_data = {
-            "step_id": step_id,
-            "function": function,
-            "params": params,
-            "inputs": inputs or {},
-            "timestamp_start": timestamp,
-            "status": "in_progress",
-            "step_hash": step_hash
-        }
-
-        with open(step_file_path, "w") as f:
-            json.dump(step_data, f, indent=2)
-
-        return step_id, step_file_path
+        return step_id, step_hash
     
     @staticmethod
     def _end_step(
-        step_file_path: Path,
+        step_hash: Optional[str],
+        run_path: Optional[Path],
         status: str = "completed",
         outputs: Optional[Dict[str, Any]] = None,
         file_hash: Optional[str] = None,
@@ -293,39 +334,37 @@ class Track:
         Finalizes a tracked step by updating its status and outputs.
 
         Args:
-            step_file_path: Path to the step's JSON file.
+            step_hash: String of step hash returned by _start_step
             status: Step status ("completed", "failed", etc.).
             outputs: Optional dictionary of output metadata or hashes.
             file_hash: Optionally update a file's hash in log
         """
-        if not step_file_path.exists():
-            raise FileNotFoundError(f"Step file not found: {step_file_path}")
+        if run_path is not None:
+            node_db_path = run_path / "nodes" / "nodes.db"
+            # Define values
+            end_time = datetime.now().isoformat()
+            parent = file_hash
 
-        # Load current step log
-        with open(step_file_path, "r") as f:
-            step_data = json.load(f)
-
-        # Update status and end time
-        step_data["status"] = status
-        step_data["timestamp_end"] = datetime.now().isoformat()
-
-        # Optional output logging
-        if outputs:
-            step_data["outputs"] = outputs
-
-        # Optionally add file hash
-        if file_hash is not None:
-            step_data["inputs"]["file_hash"] = file_hash
-
-        # Write back updated log
-        with open(step_file_path, "w") as f:
-            json.dump(step_data, f, indent=2)
+            # Update table
+            query = """
+            UPDATE steps
+            SET status = ?, timestamp_end = ?, outputs = ?, parent = ?
+            WHERE step_hash = ?
+            """
+            values = (
+                status, end_time, json.dumps(outputs), parent, step_hash
+            )
+            with sqlite3.connect(node_db_path) as conn:
+                cursor = conn.cursor()
+                cursor.execute(query, values)
+                conn.commit()
 
     @staticmethod
     def _log_data(
         run_path: Path,
         file_hash: str,
-        parent_dict: Optional[Dict]
+        parent_dict: Dict,
+        metadata: Optional[dict] = None
     ):
         """
         Logs metadata for a data file identified by its hash into a structured JSON lookup file.
@@ -336,27 +375,50 @@ class Track:
         Args:
             run_path (Path): Path to the root directory of the current run.
             file_hash (str): Unique hash representing the data file to be logged.
-            parent_dict (Optional[Dict]): Metadata dictionary to associate with the file hash.
+            parent_dict (Dict): Metadata dictionary to associate with the file hash.
                                            If None or empty, defaults to an empty dictionary.
 
         Raises:
             FileNotFoundError: If `run_path` or the data lookup file does not exist.
         """
-        if not run_path.exists():
-            raise FileNotFoundError("The run path does not exist: {run_path}")
+        node_db_path = run_path / "nodes" / "nodes.db"
 
-        data_log_file = run_path / "data_lookup" / "data_lookup.blase"
-        if not data_log_file.exists:
-            raise FileNotFoundError("The data lookup file does not exist: {data_log_file}")
+        if not node_db_path.exists():
+            raise FileNotFoundError(f"The node database does not exist: {node_db_path}")
 
-        with open(data_log_file, 'r') as f:
-            data = json.load(f)
+        # Define values
+        source_path = str(parent_dict['source_path'])
+        parent = parent_dict['parent']
+        logged_by = parent_dict['logged_by']
+        metadata_json = json.dumps(metadata or {})
 
-        if file_hash not in data:
-            data[file_hash] = parent_dict if parent_dict else {}
+        # Add entry
+        with sqlite3.connect(node_db_path) as conn:
+            cursor = conn.cursor()
 
-            with open(data_log_file, 'w') as f:
-                json.dump(data, f, indent=2)
+            # Check if this hash exists
+            cursor.execute("SELECT 1 FROM data WHERE data_hash = ?", (file_hash,))
+            exists = cursor.fetchone()
+
+            if not exists:
+                query = """
+                INSERT INTO data(
+                    data_hash,
+                    source_path,
+                    parent,
+                    logged_by,
+                    metadata
+                ) VALUES (?, ?, ?, ?, ?)
+                """
+                values = (
+                    file_hash,
+                    source_path,
+                    parent,
+                    logged_by,
+                    metadata_json
+                )
+                cursor.execute(query, values)
+                conn.commit()
 
     def _log_script(self, script_path: str, func: Optional[Callable] = None) -> None:
         """Hash and save a user-defined script or function source code into the run."""

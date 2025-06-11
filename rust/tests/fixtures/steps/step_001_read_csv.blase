@@ -1,0 +1,26 @@
+{
+  "step_id": "step_001_read_csv",
+  "function": "read_csv",
+  "params": {
+    "file_path": "C:\\Users\\brand\\OneDrive\\Desktop\\project1\\data\\House_Rent_Dataset.csv",
+    "mode": "manual",
+    "batch_size": 500,
+    "use_cols": null,
+    "filter_by": null,
+    "backend": "pandas"
+  },
+  "inputs": {
+    "file_path": "C:\\Users\\brand\\OneDrive\\Desktop\\project1\\data\\House_Rent_Dataset.csv",
+    "file_hash": "347368b0b20bf19599307d2d23d0072560e08e5cbf03deb9320c474b63343e57",
+    "file_size": 566961
+  },
+  "timestamp_start": "2025-06-07T14:11:45.341638",
+  "status": "completed",
+  "step_hash": "d3f5069634d2414b54b24bd702cbeffdda48fee5940cf79b91791eb0fc3bba6a",
+  "timestamp_end": "2025-06-07T14:11:45.471948",
+  "outputs": {
+    "backend": "pandas",
+    "batch_size": 500,
+    "num_columns": "all"
+  }
+}

@@ -1,0 +1,2 @@
+[env]
+PYO3_PYTHON = "/opt/conda/bin/python"

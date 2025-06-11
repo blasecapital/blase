@@ -1,0 +1,15 @@
+{
+  "step_id": "step_002_func_pandas",
+  "function": "func_pandas",
+  "params": {
+    "function_hash": "103a02f7ee4788aaddb7068425199339c3638c2ae47f5d85f792cf0a42304d4d"
+  },
+  "inputs": {},
+  "timestamp_start": "2025-06-07T14:11:45.370291",
+  "status": "completed",
+  "step_hash": "f81ee98beb32944f99d6d6de9f0ec538dd271c8e6c3e3a644859c321cc1db68a",
+  "timestamp_end": "2025-06-07T14:11:45.461907",
+  "outputs": {
+    "function_hash": "103a02f7ee4788aaddb7068425199339c3638c2ae47f5d85f792cf0a42304d4d"
+  }
+}

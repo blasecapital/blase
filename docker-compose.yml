@@ -10,7 +10,7 @@ services:
       - .:/workspace
     working_dir: /workspace
     environment:
-      - PYTHONPATH=/workspace/blase
+      - PYTHONPATH=/workspace
       - NVIDIA_DRIVER_CAPABILITIES=compute,utility
       - NVIDIA_VISIBLE_DEVICES=all
     command: sleep infinity

@@ -1,0 +1,23 @@
+{
+  "step_id": "step_003_save_to_csv",
+  "function": "save_to_csv",
+  "params": {
+    "backend": "pandas",
+    "file_path": "runs\\2025-06-07T14-11-43\\assets\\csv_data\\house_rent.csv"
+  },
+  "inputs": {
+    "file_path": "runs\\2025-06-07T14-11-43\\assets\\csv_data\\house_rent.csv",
+    "pre_save_hash": null,
+    "file_exists": false
+  },
+  "timestamp_start": "2025-06-07T14:11:45.370291",
+  "status": "completed",
+  "step_hash": "d2f232aa9e55abf1b6c9cc7eff9293221253e69556d897a324e9e5963f542cb7",
+  "timestamp_end": "2025-06-07T14:11:45.471948",
+  "outputs": {
+    "backend": "pandas",
+    "post_save_hash": "347368b0b20bf19599307d2d23d0072560e08e5cbf03deb9320c474b63343e57",
+    "file_path": "runs\\2025-06-07T14-11-43\\assets\\csv_data\\house_rent.csv",
+    "file_size": 566961
+  }
+}

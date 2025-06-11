@@ -122,9 +122,16 @@ class Track:
         """Return a list of references forming a lineage chain between logged steps."""
         pass
 
-    def restore_step(step_hash):
-        """(For later) Walk DAG backward and rerun steps if assets are missing."""
-        pass
+    def restore_step(
+            self,
+            step_hash
+    ):
+        """Walk DAG backward and rerun steps if assets are missing."""
+        # walk back to last available data node
+
+        # dynamically write restoration functions
+
+        # validate restore
 
     # ──────────────────────────────────────────────────────
     # Protected Methods — For Use Inside ML Modules (e.g., Prepare, Train)
@@ -183,6 +190,7 @@ class Track:
             step_id TEXT UNIQUE,
             function TEXT,
             parent TEXT,
+            parent_type TEXT,
             params JSON,
             timestamp_start TEXT,
             timestamp_end TEXT,
@@ -195,6 +203,7 @@ class Track:
             data_hash TEXT PRIMARY KEY,
             source_path TEXT,
             parent TEXT,
+            parent_type TEXT,
             logged_by TEXT,
             metadata JSON
         );
@@ -328,7 +337,7 @@ class Track:
         run_path: Optional[Path],
         status: str = "completed",
         outputs: Optional[Dict[str, Any]] = None,
-        file_hash: Optional[str] = None,
+        parent: Optional[tuple[str, str]] = None,
     ) -> None:
         """
         Finalizes a tracked step by updating its status and outputs.
@@ -343,16 +352,16 @@ class Track:
             node_db_path = run_path / "nodes" / "nodes.db"
             # Define values
             end_time = datetime.now().isoformat()
-            parent = file_hash
+            parent_hash, parent_type = parent
 
             # Update table
             query = """
             UPDATE steps
-            SET status = ?, timestamp_end = ?, outputs = ?, parent = ?
+            SET status = ?, timestamp_end = ?, outputs = ?, parent = ?, parent_type = ?
             WHERE step_hash = ?
             """
             values = (
-                status, end_time, json.dumps(outputs), parent, step_hash
+                status, end_time, json.dumps(outputs), parent_hash, parent_type, step_hash
             )
             with sqlite3.connect(node_db_path) as conn:
                 cursor = conn.cursor()
@@ -389,6 +398,7 @@ class Track:
         # Define values
         source_path = str(parent_dict['source_path'])
         parent = parent_dict['parent']
+        parent_type = parent_dict['parent_type']
         logged_by = parent_dict['logged_by']
         metadata_json = json.dumps(metadata or {})
 
@@ -406,14 +416,16 @@ class Track:
                     data_hash,
                     source_path,
                     parent,
+                    parent_type,
                     logged_by,
                     metadata
-                ) VALUES (?, ?, ?, ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?)
                 """
                 values = (
                     file_hash,
                     source_path,
                     parent,
+                    parent_type,
                     logged_by,
                     metadata_json
                 )

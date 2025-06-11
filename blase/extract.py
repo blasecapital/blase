@@ -190,38 +190,51 @@ class Extract:
         # main logic
         if track:
             try:
-                if backend == "polars":
-                    batch_gen = read_batches_polars(file_path, batch_size, use_cols, filter_by)
-                    wrapped_gen = ((batch, flag, step_hash) for batch, flag in batch_gen)
-                    yield from wrapped_gen
-
-                elif backend == "pandas":
-                    batch_gen = read_batches_pandas(file_path, batch_size, use_cols, filter_by)
-                    wrapped_gen = ((batch, flag, step_hash) for batch, flag in batch_gen)
-                    yield from wrapped_gen
-                
                 file_hash = file_hash_future.result()
                 executor.shutdown()
                 parent_dict = {
                     'parent': None,
+                    'parent_type': None,
                     'source_path': file_path,
-                    'logged_by': step_id
+                    'logged_by': step_id,
+                    'status': 'complete'
                 }
                 Track._log_data(
                     run_path=run_path,
                     file_hash=file_hash,
                     parent_dict=parent_dict
                 )
+                if backend == "polars":
+                    batch_gen = read_batches_polars(file_path, batch_size, use_cols, filter_by)
+                    wrapped_gen = ((batch, flag, (step_hash, "step")) for batch, flag in batch_gen)
+                    yield from wrapped_gen
 
+                elif backend == "pandas":
+                    batch_gen = read_batches_pandas(file_path, batch_size, use_cols, filter_by)
+                    wrapped_gen = ((batch, flag, (step_hash, "step")) for batch, flag in batch_gen)
+                    yield from wrapped_gen
+                
                 Track._end_step(
                     step_hash=step_hash,
                     run_path=run_path,
                     status="completed",
                     outputs={},
-                    file_hash=file_hash
+                    parent=(file_hash, "data")
                 )
 
             except Exception as e:
+                parent_dict = {
+                    'parent': None,
+                    'parent_type': None,
+                    'source_path': file_path,
+                    'logged_by': step_id,
+                    'status': 'failed'
+                }
+                Track._log_data(
+                    run_path=run_path,
+                    file_hash=file_hash,
+                    parent_dict=parent_dict
+                )
                 Track._end_step(
                     step_hash=step_hash,
                     run_path=run_path,

@@ -59,7 +59,11 @@ class Load:
     """
     def __init__(self):
         self.tracked = False
-        self.step_file_path = None
+        self.run_path = None
+        self.step_hash = None
+        self.step_id = None
+        self.parent_hash = None
+        self.parent_type = None
 
     def save(self, 
              data: Any, 
@@ -75,12 +79,12 @@ class Load:
         self,
         data: Any,
         last_batch: bool,
+        parent: Optional[tuple[str, str]],
         path: Optional[str] = None,
         file_name: Optional[str] = None,
         subdir: Optional[str] = "csv_data",
         backend: str = "polars",
         track: bool = True,
-        parent: Optional[str],
         use_blase_path: bool = True
     ) -> None:
         """
@@ -101,7 +105,6 @@ class Load:
             track (bool): Whether to track the save step.
             use_blase_path (bool): Whether to use Blase run directory structure.
         """
-
         backend = resolve_backend(backend)
 
         # Build save path
@@ -115,15 +118,15 @@ class Load:
                 if not run_id:
                     raise RuntimeError("Missing run_id in active_run.blase.")
 
-            run_path = Path("runs") / run_id / "assets"
+            save_dir = Path("runs") / run_id / "assets"
             if subdir:
-                run_path = run_path / subdir
-            run_path.mkdir(parents=True, exist_ok=True)
+                save_dir = save_dir / subdir
+            save_dir.mkdir(parents=True, exist_ok=True)
 
             if not file_name:
                 raise ValueError("file_name must be provided when using use_blase_path=True")
 
-            path_obj = run_path / file_name
+            path_obj = save_dir / file_name
         else:
             if not path:
                 raise ValueError("Either 'path' must be provided or use_blase_path must be True")
@@ -135,25 +138,22 @@ class Load:
         # Tracking
         if track and not self.tracked:
             track_dir = Track._validate_run_directory(track=track)
-            run_path = Track._validate_active_run(track_dir=track_dir)
+            self.run_path = Track._validate_active_run(track_dir=track_dir)
+            self.parent_hash, self.parent_type = parent
 
-            hasher = Hash()
-            pre_save_hash = hasher.hash_file(path_obj) if file_exists else None
-
-            inputs = {
-                "file_path": str(path_obj),
-                "pre_save_hash": pre_save_hash,
-                "file_exists": file_exists
-            }
-
-            step_id, self.step_file_path = Track._start_step(
-                run_path=run_path,
+            self.step_id, self.step_hash = Track._start_step(
+                run_path=self.run_path,
                 function="save_to_csv",
                 params={
+                    "parent": self.parent_hash,
+                    "path": path,
+                    "file_name": file_name,
+                    "subdir": subdir,
                     "backend": backend,
-                    "file_path": str(path_obj)
+                    "track": track,
+                    "use_blase_path": use_blase_path
                 },
-                inputs=inputs
+                parent=self.parent_hash
             )
             self.tracked = True
 
@@ -165,23 +165,47 @@ class Load:
                 save_path = save_batch_pandas(data, path_obj, file_exists)
 
             if track and last_batch:
-                post_save_hash = Hash().hash_file(save_path)
+                file_hash = Hash().hash_file(save_path)
+                parent_dict = {
+                    'parent': self.step_hash,
+                    'parent_type': self.parent_type,
+                    'source_path': save_path,
+                    'logged_by': self.step_id,
+                    'status': 'complete'
+                }
+                Track._log_data(
+                    run_path=self.run_path,
+                    file_hash=file_hash,
+                    parent_dict=parent_dict
+                )
+
                 Track._end_step(
-                    step_file_path = self.step_file_path,
+                    step_hash=self.step_hash,
+                    run_path=self.run_path,
                     status="completed",
-                    outputs={
-                        "backend": backend,
-                        "post_save_hash": post_save_hash,
-                        "file_path": str(path_obj),
-                        "file_size": save_path.stat().st_size
-                    }
+                    outputs={},
+                    parent=(self.parent_hash, self.parent_type)
                 )
         except Exception as e:
             if track:
+                parent_dict = {
+                    'parent': self.step_hash,
+                    'parent_type': self.parent_type,
+                    'source_path': save_path,
+                    'logged_by': self.step_id,
+                    'status': 'failed'
+                }
+                Track._log_data(
+                    run_path=self.run_path,
+                    file_hash=file_hash,
+                    parent_dict=parent_dict
+                )
                 Track._end_step(
-                    step_file_path = self.step_file_path,
+                    step_hash = self.step_hash,
+                    run_path = self.run_path,
                     status="failed",
-                    outputs={"error": str(e)}
+                    outputs={"error": str(e)},
+                    parent=(self.parent_hash, self.parent_type)
                 )
             raise
 

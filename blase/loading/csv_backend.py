@@ -33,16 +33,9 @@ def save_batch_polars(df: Any, base_path: Path, file_exists: bool):
         base_path (Path): Base file path (e.g., 'data/output.csv').
         file_exists (bool): Flag indicating whether any previous file has been saved.
     """
-    base_dir = base_path.parent
-    base_name = base_path.stem
-    base_ext = base_path.suffix or ".csv"
-
-    base_dir.mkdir(parents=True, exist_ok=True)
-
-    # Determine next available index
-    existing_batches = list(base_dir.glob(f"{base_name}_*.csv"))
-    next_id = len(existing_batches) + 1
-    batch_path = base_dir / f"{base_name}_{next_id:03d}{base_ext}"
-
-    df.write_csv(batch_path)
-    return batch_path
+    if not file_exists:
+        df.write_csv(df)
+    else:
+        with open(base_path, mode="a") as f:
+            df.write_csv(f, include_header=False)
+    return base_path

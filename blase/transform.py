@@ -64,13 +64,16 @@ class Transform:
     """
     def __init__(self):
         self.tracked = False
-        self.step_file_path = None
+        self.run_path = None
+        self.step_hash = None
         self.func_hash = None
+        self.parent_hash = None
+        self.parent_type = None
 
     def apply_function(
         self,
         data: Any,
-        parent_hash: str,
+        parent: tuple[str, str],
         transform_func: Callable,
         last_batch: bool,
         track: bool = True
@@ -87,43 +90,41 @@ class Transform:
         Yields:
             Iterable: Transformed batches.
         """
-        step_hash = None
-        run_path = None
-
         # tracking
         if track and not self.tracked:
             hasher = Hash()
             self.func_hash = hasher.hash_function(transform_func)
+            self.parent_hash, self.parent_type = parent
 
             track_dir = Track._validate_run_directory(track=track)
-            run_path = Track._validate_active_run(track_dir=track_dir)
-            step_id, step_hash = Track._start_step(
-                run_path=run_path,
+            self.run_path = Track._validate_active_run(track_dir=track_dir)
+            step_id, self.step_hash = Track._start_step(
+                run_path=self.run_path,
                 function=transform_func.__name__,
                 params={
                     # data is not included
-                    "parent_hash": parent_hash,
+                    "parent_hash": self.parent_hash,
                     "transform_func": transform_func.__name__,
-                    "last_batch": last_batch,
                     "track": track
                 },
-                parent=parent_hash
+                parent=self.parent_hash
             )
             self.tracked = True
 
         # main logic
-        result, step_hash = transform_func(data)
+        result = transform_func(data)
 
         if track and last_batch:
             Track._end_step(
-                step_hash=step_hash,
-                run_path=run_path,
+                step_hash=self.step_hash,
+                run_path=self.run_path,
                 outputs={
                     "function_hash": self.func_hash
-                }
+                },
+                parent=(self.parent_hash, self.parent_type)
             )
 
-        return result
+        return result, (self.step_hash, "step")
 
     def apply_from_module(self, data: Iterable, module_path: str, function_name: str) -> Iterable: pass
     def apply_standard_transformation(self, data, transformation: str, columns: list): pass

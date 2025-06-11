@@ -83,6 +83,7 @@ class Transform:
 
         Args:
             data (Any): A DataFrames object.
+            parent (tuple[str, str]): Hash and type of parent.
             transform_func (Callable): A function that transforms a batch.
             last_batch (bool): Flag from Extract to end tracking step.
             track (bool): Whether to log this transformation step.
@@ -102,7 +103,6 @@ class Transform:
                 run_path=self.run_path,
                 function=transform_func.__name__,
                 params={
-                    # data is not included
                     "parent_hash": self.parent_hash,
                     "transform_func": transform_func.__name__,
                     "track": track

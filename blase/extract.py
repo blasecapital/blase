@@ -57,8 +57,8 @@ class Extract:
     Example:
     --------
     >>> extractor = Extract()
-    >>> for batch in extractor.read_csv("data.csv", batch_size=1000):
-    >>>     process_batch(batch)  # Handle each batch separately
+    >>> for batch, flag, parent_hash in extractor.read_csv("data.csv", batch_size=1000):
+    >>>     process_batch(batch, parent_hash)  # Handle each batch separately
 
     Extending to Cloud:
     -------------------
@@ -138,8 +138,8 @@ class Extract:
         Example:
         --------
         >>> extractor = Extract()
-        >>> for batch in extractor.read_csv(file_path="data/large.csv", mode="auto", backend="pandas"):
-        >>>     process_batch(batch)
+        >>> for batch, flag, parent_hash in extractor.read_csv(file_path="data/large.csv", mode="auto", backend="pandas"):
+        >>>     process_batch(batch, parent_hash)
 
         Notes:
         ------

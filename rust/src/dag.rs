@@ -1,5 +1,18 @@
 // /rust/dag.rs
 
+//! DAG Utilities for Hash-Based Provenance Tracking
+//!
+//! This module defines the data structures and functions needed to represent and
+//! traverse a directed acyclic graph (DAG) of computational steps and data artifacts.
+//!
+//! It is primarily used to store and query provenance data in a SQLite database.
+//!
+//! # Components
+//! - `Step` and `DataArtifact`: Represent the two types of nodes in the DAG.
+//! - `Node`: Enum wrapper around either a `Step` or `DataArtifact`.
+//! - `read_node`: Reads a node from the database by hash and type.
+//! - `walk_dag`: Traverses the DAG recursively from a given starting node.
+
 use std::error::Error;
 
 use rusqlite::{params, Connection, Result};
@@ -64,6 +77,18 @@ impl Node {
     }
 }
 
+/// Reads a single node (either `Step` or `DataArtifact`) from the SQLite database by its hash.
+///
+/// # Parameters
+/// - `conn`: An active `rusqlite::Connection`.
+/// - `node_hash`: Hash of the node to retrieve.
+/// - `node_type`: Either `"step"` or `"data"`.
+///
+/// # Returns
+/// A `Node` enum containing the corresponding `Step` or `DataArtifact`.
+///
+/// # Errors
+/// Returns an error if the node cannot be found, the type is unknown, or the database read fails.
 pub fn read_node(
     conn: &Connection,
     node_hash: &str,
@@ -123,17 +148,42 @@ pub fn read_node(
     Ok(node)
 }
 
+/// Recursively walks the DAG from a given node, collecting identifiers.
+///
+/// Starts at the given node and follows parent references until the root is reached.
+///
+/// # Parameters
+/// - `db_path`: Path to the SQLite database.
+/// - `start_node`: Hash of the starting node.
+/// - `node_type`: Type of the starting node (`"step"` or `"data"`).
+///
+/// # Returns
+/// A vector of strings containing either step IDs or data source paths, from the
+/// start node up to the root.
+///
+/// # Errors
+/// Returns an error if any database operations fail or if the DAG traversal encounters unknown node types.
+///
+/// # Example
+/// 
+/// let lineage = walk_dag("mydb.sqlite", "abc123", "step").unwrap();
+/// for node in lineage {
+///     println!("{}", node);
+/// }
+/// 
 pub fn walk_dag(
     db_path: &str,
     start_node: &str,
     node_type: &str
 ) -> Result<Vec<String>, Box<dyn Error>> {
-    let mut dag: Vec<String> = Vec::new();
-    // println!("[DEBUG] The dag vec is: {:?}", dag);
-
     let conn: Connection = Connection::open(db_path)?;
+    walk_dag_inner(&conn, start_node, node_type)
+}
+
+fn walk_dag_inner(conn: &Connection, start_node: &str, node_type: &str) -> Result<Vec<String>, Box<dyn Error>> {
+    let mut dag: Vec<String> = Vec::new();
+
     let node: Node = read_node(&conn, &start_node, &node_type)?;
-    // println!("[DEBUG] The node is: {:?}", node);
 
     let parent_hash: Option<String> = match &node {
         Node::Step(step) => step.parent.clone(),
@@ -150,10 +200,9 @@ pub fn walk_dag(
     }
 
     if let (Some(p_hash), Some(p_type)) = (parent_hash, parent_type) {
-        let mut parent_dag = walk_dag(db_path, &p_hash, &p_type)?;
+        let mut parent_dag = walk_dag_inner(conn, &p_hash, &p_type)?;
         dag.extend(parent_dag);
     }
-    // println!("[DEBUG] The dag after adding parent_dag is: {:?}", dag);
 
     Ok(dag)
 }

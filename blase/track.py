@@ -21,7 +21,7 @@ class Track:
     Core Features:
     --------------
     - **Project-based structure**: All tracked runs are organized under a common project namespace.
-    - **Step-level logging**: Each ML step (prepare, train, etc.) gets its own JSON file for traceability.
+    - **Step-level logging**: Each ML step (prepare, train, etc.) is logged in a local SQLite database for traceability.
     - **Hash-based reproducibility**: Code, arguments, and input references are hashed and stored for recovery.
     - **Custom script capture**: Stores user-defined functions and script files with hash-matched filenames.
     - **Artifact indexing**: Models, preprocessed files, and logs are tied to their originating steps.
@@ -43,35 +43,29 @@ class Track:
         /project/
         └── <runs>/
             └── <run_id>_<timestamp>/
-                ├── logs/
-                │   ├── prepare.blase
-                │   ├── train.blase
-                ├── scripts/
-                │   └── model_def.py
-                └── artifacts/
-                    └── model_v1.h5
+                ├── nodes/
+                │   ├── nodes.db
+                └── assets/
+                    ├── data/
+                    └── scripts/
 
-    Each JSON log contains:
-    - Step name
-    - Timestamp
-    - Hashes of inputs, outputs, and scripts
-    - References to prior steps (if any)
+    Each Step entry contains:
+    - Step hash, id, function name
+    - Timestamps
+    - Parent and parent type
+    - References to dependencies
     - Status flags (e.g., complete, failed)
 
     Usage:
     ------
-    >>> track = Track(project="diabetes_prediction")
-    >>> track.start_run()
-    >>> track.start_step("prepare", args={"source": "data.csv"})
-    >>> track.log_script("prepare_target.py", func=custom_target_function)
-    >>> track.log_artifact("prep_data.npy")
-    >>> track.finalize_step()
+    >>> track = Track()
+    >>> track.restore_step(db_path, start_node, node_type)
 
     CLI Integration:
     ----------------
     The `Track` system is compatible with the `blase` CLI for headless workflows:
 
-        $ blase run --project diabetes_prediction --step prepare
+        $ blase restore --db <db_path> --start <start_node> --type <node_type>
 
     Notes:
     ------

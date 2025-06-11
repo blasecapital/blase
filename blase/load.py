@@ -98,6 +98,7 @@ class Load:
         Args:
             data (Any): A pandas or polars DataFrame.
             last_batch (bool): Flag from Extract to end tracking step.
+            parent (tuple[str, str], optional): Hash and type of parent.
             path (str, optional): Custom file path for saving (ignored if use_blase_path=True).
             file_name (str, optional): File name when using Blase run context.
             subdir (str, optional): Subdirectory under assets/ for organization.

@@ -6,7 +6,7 @@ build-backend = "hatchling.build"
 name = "blase"
 version = "0.1.0"
 description = "Train deep learning models locally"
-authors = [{ name = "Blase Capital Management, LLC", email = "bblase@blasecapital.com" }]
+authors = [{ name = "Blase Labs LLC", email = "brandon@blaselabs.ai" }]
 license = { text = "BSD-3-Clause" }
 readme = "README.md"
 requires-python = ">=3.9"

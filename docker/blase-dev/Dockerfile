@@ -1,37 +1,37 @@
-FROM ubuntu:20.04
+FROM nvidia/cuda:11.2.2-cudnn8-runtime-ubuntu20.04
 
 ENV DEBIAN_FRONTEND=noninteractive
 ENV TZ=Etc/UTC
 
 RUN apt-get update && apt-get install -y \
     wget \
-    python3.9 \
-    python3-pip \
     tzdata \
+    sqlite3 \
     libsqlite3-dev \
     && ln -fs /usr/share/zoneinfo/Etc/UTC /etc/localtime && \
     echo "Etc/UTC" > /etc/timezone && \
     dpkg-reconfigure -f noninteractive tzdata
 
-RUN wget --quiet https://repo.anaconda.com/miniconda/Miniconda3-latest-Linux-aarch64.sh && \
-    bash Miniconda3-latest-Linux-aarch64.sh -b -p /opt/conda && \
-    rm Miniconda3-latest-Linux-aarch64.sh && \
-    /opt/conda/bin/conda config --add channels https://conda.anaconda.org/conda-forge && \
-    /opt/conda/bin/conda config --remove channels defaults && \
-    /opt/conda/bin/conda tos accept --channel https://repo.anaconda.com/pkgs/main && \
-    /opt/conda/bin/conda tos accept --channel https://repo.anaconda.com/pkgs/r && \
-    /opt/conda/bin/conda install -y python=3.9 pip && \
-    /opt/conda/bin/conda clean --all -y
+RUN wget --quiet https://repo.anaconda.com/miniconda/Miniconda3-py39_23.11.0-1-Linux-x86_64.sh && \
+    bash Miniconda3-py39_23.11.0-1-Linux-x86_64.sh -b -p /opt/conda && \
+    rm Miniconda3-py39_23.11.0-1-Linux-x86_64.sh
 
 ENV PATH="/opt/conda/bin:$PATH"
 
-RUN pip install --no-cache-dir \
-  https://storage.googleapis.com/tensorflow/versions/2.19.0/tensorflow-2.19.0-cp39-cp39-manylinux_2_17_aarch64.manylinux2014_aarch64.whl
+RUN conda install -y pip && conda clean --all -y
 
-RUN conda tos accept --channel https://repo.anaconda.com/pkgs/main && \
-    conda tos accept --channel https://repo.anaconda.com/pkgs/r
+RUN conda config --add channels conda-forge
+
+RUN pip install --no-cache-dir tensorflow-gpu==2.5.0
+RUN pip install --no-cache-dir torch==1.10.1+cu111 \
+    torchvision==0.11.2+cu111 \
+    torchaudio==0.10.1 -f https://download.pytorch.org/whl/cu111/torch_stable.html
 
 RUN conda install -y \
+    transformers \
+    xgboost \
+    lightgbm \
+    jupyter \
     pyarrow \
     duckdb \
     polars \
@@ -39,6 +39,7 @@ RUN conda install -y \
     librosa \
     joblib \
     matplotlib \
+    mplfinance \
     pickleshare \
     pillow \
     python-dateutil \
@@ -51,14 +52,15 @@ RUN conda install -y \
     lime \
     pytest \
     more-itertools \
-    numpy=2.0.2 \
-    pandas && \
+    "numpy=1.19.5" \
+    "pandas=1.1.5" && \
     conda clean --all -y
 
 ENV CONDA_DEFAULT_ENV=base
 ENV PATH="/opt/conda/bin:$PATH"
 
 RUN python -c "import tensorflow as tf; print('TensorFlow:', tf.__version__)"
+RUN python -c "import torch; print('PyTorch:', torch.__version__)"
 RUN python -c "import numpy as np; print('NumPy:', np.__version__)"
 RUN python -c "import pandas as pd; print('Pandas:', pd.__version__)"
 
@@ -77,15 +79,9 @@ ENV PATH="/root/.cargo/bin:${PATH}"
 RUN pip install maturin
 
 RUN python -c "import tensorflow as tf; print('TensorFlow:', tf.__version__)"
+RUN python -c "import torch; print('PyTorch:', torch.__version__)"
 RUN python -c "import numpy as np; print('NumPy:', np.__version__)"
 RUN python -c "import pandas as pd; print('Pandas:', pd.__version__)"
-
-COPY . /workspace
-WORKDIR /workspace/rust
-
-RUN maturin build --release && \
-    pip install target/wheels/rust-*.whl
-
 # -------- end Rust setup ---------
 
 WORKDIR /workspace

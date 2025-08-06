@@ -79,13 +79,6 @@ RUN pip install maturin
 RUN python -c "import tensorflow as tf; print('TensorFlow:', tf.__version__)"
 RUN python -c "import numpy as np; print('NumPy:', np.__version__)"
 RUN python -c "import pandas as pd; print('Pandas:', pd.__version__)"
-
-COPY . /workspace
-WORKDIR /workspace/rust
-
-RUN maturin build --release && \
-    pip install target/wheels/rust-*.whl
-
 # -------- end Rust setup ---------
 
 WORKDIR /workspace

@@ -1,11 +1,7 @@
-import importlib
-import logging
-import os
-from typing import Callable, Iterable, Any, Optional
-from pathlib import Path
+from __future__ import annotations
+from typing import Callable, Iterable, Any, Optional, Dict
 
 from blase.track import Track
-from blase.utils.hashing import Hash
 
 class Transform:
     """
@@ -63,68 +59,72 @@ class Transform:
     - Provides flexibility to use **either inline functions, classes, or external scripts** for transformations.
     """
     def __init__(self):
-        self.tracked = False
-        self.run_path = None
-        self.step_hash = None
-        self.func_hash = None
-        self.parent_hash = None
-        self.parent_type = None
+        self._stream = None
+        self._fn_tag = None
 
     def apply_function(
         self,
-        data: Any,
-        parent: tuple[str, str],
-        transform_func: Callable,
-        last_batch: bool,
-        track: bool = True
-    ) -> Iterable:
+        *,
+        data,
+        transform_func,
+        last_batch,
+        meta=None,
+        track=True
+    ):
         """
-        Applies a user-defined transformation function to batched data.
-
-        Args:
-            data (Any): A DataFrames object.
-            parent (tuple[str, str]): Hash and type of parent.
-            transform_func (Callable): A function that transforms a batch.
-            last_batch (bool): Flag from Extract to end tracking step.
-            track (bool): Whether to log this transformation step.
-
-        Yields:
-            Iterable: Transformed batches.
+        Apply a user-supplied transform to a stream of batches.
+        Records enough info in the step params so restore can faithfully replay.
         """
-        # tracking
-        if track and not self.tracked:
-            hasher = Hash()
-            self.func_hash = hasher.hash_function(transform_func)
-            self.parent_hash, self.parent_type = parent
+        tracker = Track.get(track)
 
-            track_dir = Track._validate_run_directory(track=track)
-            self.run_path = Track._validate_active_run(track_dir=track_dir)
-            step_id, self.step_hash = Track._start_step(
-                run_path=self.run_path,
-                function=transform_func.__name__,
-                params={
-                    "parent_hash": self.parent_hash,
-                    "transform_func": transform_func.__name__,
-                    "track": track
-                },
-                parent=self.parent_hash
-            )
-            self.tracked = True
+        # Untracked path: just run the function and propagate meta.
+        if tracker is None:
+            out = transform_func(data)
+            return out, last_batch, (meta or {})
 
-        # main logic
-        result = transform_func(data)
+        # Identify the callable for stream grouping (one step per function per stream)
+        fn_qual = getattr(transform_func, "__qualname__", getattr(transform_func, "__name__", "callable"))
 
-        if track and last_batch:
-            Track._end_step(
-                step_hash=self.step_hash,
-                run_path=self.run_path,
-                outputs={
-                    "function_hash": self.func_hash
-                },
-                parent=(self.parent_hash, self.parent_type)
-            )
+        # If new stream or function changed, (re)open a StreamStep and stash replay hints
+        if getattr(self, "_stream", None) is None or getattr(self, "_fn_tag", None) != fn_qual:
+            # Close any prior open step cleanly
+            if getattr(self, "_stream", None) is not None:
+                self._stream.close_ok()
 
-        return result, (self.step_hash, "step")
+            # Pull replay hints from meta (provided by Extract.read_csv) — all optional
+            m = meta or {}
+            params = {
+                "fn_qualname": fn_qual,
+                # pull from Extract meta; ok if None, restore will still have a fallback
+                "batch_size": m.get("chunk_size"),
+                "reader_backend": m.get("reader_backend"),
+                "use_cols": m.get("use_cols"),
+                "filter_by": m.get("filter_by"),
+            }
+
+            # Open one tracked step for the whole stream; snapshot code/env once
+            self._stream = tracker.stream("blase.Transform.apply_function", params, code_fn=transform_func)
+            self._fn_tag = fn_qual
+
+        # Execute user code
+        try:
+            out = transform_func(data)
+        except Exception as e:
+            # mark failed/aborted and reset stream state
+            self._stream.close_error(type(e), e, e.__traceback__)
+            self._stream = None
+            self._fn_tag = None
+            raise
+
+        # Record upstream lineage for this batch; seal on last
+        new_meta = self._stream.emit(last_batch=last_batch, meta=meta)
+
+        if last_batch:
+            self._stream.close_ok()
+            self._stream = None
+            self._fn_tag = None
+
+        return out, last_batch, new_meta
 
     def apply_from_module(self, data: Iterable, module_path: str, function_name: str) -> Iterable: pass
     def apply_standard_transformation(self, data, transformation: str, columns: list): pass

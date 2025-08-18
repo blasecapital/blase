@@ -1,0 +1,21 @@
+project: my-project
+python: "3.11"
+cas:
+  root: "./runs"            # CAS lives under each run by default
+  algo: "sha256"
+retention:
+  cap_gb: 50
+  grace_days: 7
+  pin_kinds: ["model", "json_manifest", "code", "env"]
+storage_policy:
+  inputs:
+    raw_data: "snapshot"    # or "reference"
+  outputs:
+    shards: "evictable"     # parquet/npz/tfrecord shards
+    manifest: "pinned"
+    model: "pinned"
+determinism:
+  seeds: {py: 123, np: 123, torch: 123}
+  torch_deterministic: true
+logging:
+  level: "INFO"

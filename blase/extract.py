@@ -1,14 +1,13 @@
+from __future__ import annotations
 from typing import Callable, Iterable, Dict, Any, Optional, List
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor
 
 import numpy as np
 
-from blase.track import Track
-from blase.utils.hashing import Hash
-
 from blase.extracting.csv_backend import memory_aware_batcher, read_batches_pandas, read_batches_polars
 from blase.utils.backends import resolve_backend
+from blase.track import Track
 
 
 class Extract:
@@ -149,105 +148,57 @@ class Extract:
         - Backends must be installed separately (e.g., `pip install polars`).
         """
 
-        # tracking
-        if track:
-            track_dir = Track._validate_run_directory(track=track)
-            run_path = Track._validate_active_run(track_dir=track_dir)
-
-            # Hash file in background
-            hasher = Hash()
-            executor = ThreadPoolExecutor(max_workers=1)
-            file_hash_future = executor.submit(hasher.hash_file, file_path)
-            
-            step_id, step_hash = Track._start_step(
-                run_path=run_path,
-                function="read_csv",
-                params={
-                    "file_path": str(file_path),
-                    "mode": mode,
-                    "batch_size": batch_size,
-                    "use_cols": use_cols,
-                    "filter_by": filter_by,
-                    "backend": backend,
-                    "track": track
-                }
-            )
-
         # dependency handling
         backend = resolve_backend(backend)
 
-        # error handling
+        # argument checks
         if mode not in ("auto", "manual"):
-            raise ValueError(f"Unsupported mode: {mode}. Must be 'auto' or 'manual'.")
+            raise ValueError("Unsupported mode: %r. Must be 'auto' or 'manual'." % mode)
         if mode == "manual" and not batch_size:
-            raise ValueError("When mode is 'manual', batch_size must be specified.")
+            raise ValueError("When mode='manual', batch_size must be specified.")
         if mode == "auto":
             batch_size = memory_aware_batcher(file_path, backend)
 
-        if isinstance(filter_by, dict):
+        if isinstance(filter_by, dict):  # allow single dict
             filter_by = [filter_by]
 
-        # main logic
-        if track:
-            try:
-                file_hash = file_hash_future.result()
-                executor.shutdown()
-                parent_dict = {
-                    'parent': None,
-                    'parent_type': None,
-                    'source_path': file_path,
-                    'logged_by': step_id,
-                    'status': 'complete'
-                }
-                Track._log_data(
-                    run_path=run_path,
-                    file_hash=file_hash,
-                    parent_dict=parent_dict
-                )
-                if backend == "polars":
-                    batch_gen = read_batches_polars(file_path, batch_size, use_cols, filter_by)
-                    wrapped_gen = ((batch, flag, (step_hash, "step")) for batch, flag in batch_gen)
-                    yield from wrapped_gen
+        tracker = Track.get(track)
 
-                elif backend == "pandas":
-                    batch_gen = read_batches_pandas(file_path, batch_size, use_cols, filter_by)
-                    wrapped_gen = ((batch, flag, (step_hash, "step")) for batch, flag in batch_gen)
-                    yield from wrapped_gen
-                
-                Track._end_step(
-                    step_hash=step_hash,
-                    run_path=run_path,
-                    status="completed",
-                    outputs={},
-                    parent=(file_hash, "data")
-                )
-
-            except Exception as e:
-                parent_dict = {
-                    'parent': None,
-                    'parent_type': None,
-                    'source_path': file_path,
-                    'logged_by': step_id,
-                    'status': 'failed'
-                }
-                Track._log_data(
-                    run_path=run_path,
-                    file_hash=file_hash,
-                    parent_dict=parent_dict
-                )
-                Track._end_step(
-                    step_hash=step_hash,
-                    run_path=run_path,
-                    status="failed",
-                    outputs={"error": str(e)}
-                )
-                raise
-        else:
+        # untracked path (no DAG/CAS)
+        if tracker is None:
             if backend == "polars":
-                yield from read_batches_polars(file_path, batch_size, use_cols, filter_by)
+                yield from ((b, last, None) for (b, last) in read_batches_polars(file_path, batch_size, use_cols, filter_by))
+            else:
+                yield from ((b, last, None) for (b, last) in read_batches_pandas(file_path, batch_size, use_cols, filter_by))
+            return
 
-            elif backend == "pandas":
-                yield from read_batches_pandas(file_path, batch_size, use_cols, filter_by)
+        # tracked path
+        params = {"file_path": str(file_path), "batch_size": batch_size, "backend": backend}
+        impl = read_batches_pandas if backend == "pandas" else read_batches_polars
+
+        stream = tracker.stream("blase.Extract.read_csv", params, code_fn=impl)
+
+        # register the source file as data + input binding
+        src_hash = stream.step.register_data(kind="csv", version="1", path_or_bytes=file_path, metadata={})
+        stream.step.add_input(src_hash, role="source", arg_name="file_path")
+
+        try:
+            for i, (batch, is_last) in enumerate(impl(file_path, batch_size, use_cols, filter_by), 1):
+                meta = {
+                    "upstream": [{"id": src_hash, "role": "source"}],
+                    "producer_step": stream.step.step_hash,  # <-- fix
+                    "ordinal": i,
+                    "chunk_size": batch_size,
+                    "reader_backend": backend,
+                    "use_cols": use_cols,
+                    "filter_by": filter_by,
+                }
+                new_meta = stream.emit(last_batch=is_last, meta=meta)
+                yield (batch, is_last, new_meta)
+            stream.close_ok()
+        except Exception as e:
+            stream.close_error(type(e), e, e.__traceback__)
+            raise
 
     def read_json(
         self,

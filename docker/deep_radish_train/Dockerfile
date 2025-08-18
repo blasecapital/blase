@@ -59,6 +59,7 @@ ENV PATH="/opt/conda/bin:$PATH"
 RUN python -c "import tensorflow as tf; print('TensorFlow:', tf.__version__)"
 RUN python -c "import numpy as np; print('NumPy:', np.__version__)"
 RUN python -c "import pandas as pd; print('Pandas:', pd.__version__)"
+RUN python -c "import blase; print(blase.__version__)"
 
 # -------- Rust + maturin setup --------
 RUN apt-get update && apt-get install -y \
@@ -75,6 +76,7 @@ ENV PATH="/root/.cargo/bin:${PATH}"
 RUN pip install maturin
 
 RUN python -c "import tensorflow as tf; print('TensorFlow:', tf.__version__)"
+RUN python -c "import torch; print('PyTorch:', torch.__version__)"
 RUN python -c "import numpy as np; print('NumPy:', np.__version__)"
 RUN python -c "import pandas as pd; print('Pandas:', pd.__version__)"
 # -------- end Rust setup ---------

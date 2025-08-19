@@ -283,6 +283,11 @@ class StepOps:
             if isinstance(dh, str):
                 self.add_input(dh, role=role)
 
+    def remove_inputs_by_role(self, role: str) -> None:
+        with _conn(self.db) as c:
+            c.execute("DELETE FROM step_inputs WHERE step_hash=? AND role=?", (self.step_hash, role))
+            c.commit()
+
 class StepContext(contextlib.AbstractContextManager[StepOps]):
     def __init__(self, run_path: Path, function_fqn: str, params: Dict[str, Any], run_id: Optional[str] = None):
         self.run_path = run_path

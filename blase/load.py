@@ -159,6 +159,15 @@ class Load:
             self._target_path = target
             self._backend = backend
 
+            # If target exists, snapshot its current bytes as a "seed" input
+            self._stream.step.remove_inputs_by_role("seed")
+            if target.exists():
+                seed_hash = self._stream.step.register_data(
+                    kind="csv", version="1", path_or_bytes=target,
+                    metadata={"role": "seed", "target": str(target)}
+                )
+                self._stream.step.add_input(seed_hash, role="seed", arg_name=None)
+
         # 1) write the shard via your csv_backend functions (exactly like original)
         file_exists = target.exists()
         try:

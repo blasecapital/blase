@@ -2,7 +2,7 @@ from __future__ import annotations
 from pathlib import Path
 import sqlite3
 from typing import Dict, List, Optional, Literal, Tuple
-from . import store  # your existing store.load_* helpers
+from . import store
 
 def _db(run_path: Path) -> Path:
     return (run_path / "nodes" / "nodes.db").resolve()
@@ -91,23 +91,24 @@ def plan_for_step(run_path: Path, tip_step_hash: str) -> List[str]:
 Action = Dict[str, str]  # keep it simple: {"type": "...", ...}
 
 def plan_data(run_path: Path, target_data_hash: str, policy: Literal["reuse","replay"]="replay") -> List[Action]:
-    """
-    Return a forward plan (actions) to materialize `target_data_hash`.
-    Uses 'reuse' when a materialization exists; otherwise 'replay'.
-    """
-    # 1) If materialization exists and policy allows reuse, just copy/link it.
+    # If we can reuse, do it
     mats = store.find_materializations(run_path, target_data_hash)
     if mats and policy == "reuse":
         return [{"type": "reuse", "data_hash": target_data_hash, "path": mats[0]["path"]}]
 
-    # 2) Walk backwards to anchors (data.source_path exists) and collect producing steps
-    #    Build a forward topological order of steps to replay.
-    graph = store.build_dependency_graph(run_path, target_data_hash)
-    steps_in_order = store.toposort_steps(graph)  # implement minimal toposort using edges
+    # Build back-edge graph and compute forward order
+    graph = store.build_dependency_graph(run_path, target_data_hash)  # implement as in prior guidance
+    steps_in_order = store.toposort_steps(graph)
 
     actions: List[Action] = []
     for sh in steps_in_order:
         st = store.load_step(run_path, sh)
         actions.append({"type": "replay_step", "step_hash": sh, "function_fqn": st["function_fqn"]})
+
+    prod = store.producer_step_for_data(run_path, target_data_hash)
+    if prod and (not steps_in_order or prod != steps_in_order[-1]):
+        st = store.load_step(run_path, prod)
+        actions.append({"type": "replay_step", "step_hash": prod, "function_fqn": st["function_fqn"]})
+
     actions.append({"type": "verify", "data_hash": target_data_hash})
     return actions

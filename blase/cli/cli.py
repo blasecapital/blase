@@ -36,6 +36,9 @@ def main():
 
     blase restore run --step <STEP_HASH> --mode verify
     blase restore run --step <STEP_HASH> --mode replay
+
+    blase restore run --data <DATA_HASH> --mode materialize
+    blase restore run --data <DATA_HASH> --mode replay --to <PATH>
     """
     parser = argparse.ArgumentParser(prog="blase")
     subparsers = parser.add_subparsers(dest="command")
@@ -67,13 +70,23 @@ def main():
     pl.set_defaults(func=cmd_plan)
 
     rn = rst_sub.add_parser("run", help="Execute restore")
+
+    # Shared options
     rn.add_argument("--run")
-    rn.add_argument("--step", required=True)
     rn.add_argument("--mode", choices=["verify", "materialize", "replay"], default="verify")
     rn.add_argument("--to", help="Destination path or directory")
     rn.add_argument("--on-conflict", choices=["fail", "rename", "overwrite"])
+    rn.add_argument("--keep-intermediates", action="store_true",
+                help="Keep intermediate materializations created during replay.")
     rn.add_argument("--limit-batches", type=int)
-    rn.add_argument("--backend", choices=["pandas", "polars"], help="Override backend when replaying Load.save_to_csv")
+    rn.add_argument("--backend", choices=["pandas", "polars"],
+                    help="Override backend when replaying Load.save_to_csv")
+
+    # Mutually exclusive: exactly one of --step or --data
+    target_group = rn.add_mutually_exclusive_group(required=True)
+    target_group.add_argument("--step", help="Restore by step hash")
+    target_group.add_argument("--data", help="Restore by data hash")
+
     rn.set_defaults(func=cmd_run)
 
     args = parser.parse_args()

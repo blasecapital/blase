@@ -32,6 +32,26 @@ def _active_run_id(run_root: Path) -> Optional[str]:
         return None
 
 def _resolve_run_path(run_arg: Optional[str]) -> Path:
+    """
+    Resolve a run argument to a filesystem path.
+
+    Parameters
+    ----------
+    run_arg : str or None
+        Either a run ID, a direct path to a run directory, or ``None``.
+        If ``None``, the currently active run is used.
+
+    Returns
+    -------
+    Path
+        Filesystem path to the resolved run directory.
+
+    Raises
+    ------
+    SystemExit
+        If the run argument does not correspond to an existing run
+        or if no active run is found when `run_arg` is None.
+    """
     rr = _runs_root()
     if run_arg:
         p = Path(run_arg)
@@ -60,30 +80,6 @@ def _assert_path_matches_hash(path: Path, expected_hash: str, what: str) -> None
     got = Hash().hash_file(path)
     if got != expected_hash:
         raise SystemExit(f"restore: {what} hash mismatch: got {got}, expected {expected_hash}")
-    
-def _is_anchor_like(p: Path) -> bool:
-    name = p.name.lower()
-    return ("dataset" in name) or name.endswith("_restored.csv")
-
-def _is_seed_like(p: Path) -> bool:
-    # common seed names: 'house_rent_transformed.csv' (first run output)
-    # and not the final replayed name that has a replay timestamp or equals the requested hash target name
-    # tune this predicate to your naming scheme
-    name = p.name.lower()
-    return ("transformed.csv" in name) and ("replayed_" not in name)
-
-def _delete_file_safely(p: Path) -> None:
-    try:
-        if p.exists():
-            p.unlink()
-    except Exception:
-        pass
-
-def _drop_materialization(run_path: Path, data_hash: str, path: Path) -> None:
-    try:
-        store.drop_materialization(run_path, data_hash, str(path))
-    except Exception:
-        pass
 
 def _resolve_source_no_copy(
     run_path: Path,
@@ -94,7 +90,7 @@ def _resolve_source_no_copy(
 ) -> Tuple[Path, bool]:
     """
     Return a path to the recorded source without copying when possible.
-    If the original source_path exists and matches the recorded hash → use it.
+    If the original source_path exists and matches the recorded hash, use it.
     Else replay/materialize (this will copy into /restored); we return that path and mark created=True.
     """
     # Try original source_of_truth path first (no copy)
@@ -163,6 +159,32 @@ def _resolve_seed_no_copy_or_ephemeral(
 
     return tmpfile, True
 
+def _upstream_gen_for_sink(run_path: Path, target_step_hash: str):
+    """
+    Build an upstream (batch,last) generator for a Load.save_to_csv step by scanning
+    its plan backward to the nearest Transform.apply_function (preferred) or Extract.read_csv.
+    """
+    raw_plan = planner.plan_for_step(run_path, target_step_hash) or []
+    nodes = _normalize_plan_nodes(run_path, raw_plan)
+    try:
+        idx = next(i for i, n in enumerate(nodes) if n["step_hash"] == target_step_hash)
+    except StopIteration:
+        raise SystemExit("restore: target sink step not found in plan")
+
+    upstream = None
+    for j in range(idx - 1, -1, -1):
+        if nodes[j]["function_fqn"].endswith("Transform.apply_function"):
+            upstream = nodes[j]; break
+    if upstream is None:
+        for j in range(idx - 1, -1, -1):
+            if nodes[j]["function_fqn"].endswith("Extract.read_csv"):
+                upstream = nodes[j]; break
+    if upstream is None:
+        raise SystemExit("No upstream compute step found for sink replay.")
+
+    from blase import restore as restore_mod
+    return restore_mod.step(run_path, upstream["step_hash"], kind="csv")
+
 # --------- pretty helpers ---------
 
 def _print_rows(rows):
@@ -185,16 +207,6 @@ def _print_step(con, step_hash: str):
     print("  outputs:")
     for r in outs:
         print(f"    - {r['name']:8s} {r['data_hash']}")
-
-def _latest_completed_step(con, like_fqn: str) -> Optional[str]:
-    row = con.execute("""
-        SELECT step_hash
-        FROM steps
-        WHERE function_fqn LIKE ?
-          AND status IN ('completed','complete','done','success','ok')
-        ORDER BY ts_start DESC LIMIT 1
-    """, (like_fqn,)).fetchone()
-    return row["step_hash"] if row else None
 
 # --------- list/show/plan ---------
 
@@ -238,6 +250,73 @@ def _data_present(con, run_path: Path, data_hash: str) -> Dict[str, Any]:
     }
 
 def cmd_plan(args):
+    """
+    Display a restore plan for a recorded step.
+
+    This command inspects the run database and prints the execution plan for
+    a given step hash. The plan shows which inputs are already available
+    (in CAS or materialized locally), which require replay from a producer
+    step, and which are missing entirely. It also enumerates the outputs of
+    the step and their availability status.
+
+    Parameters
+    ----------
+    args : argparse.Namespace
+        Parsed CLI options. Expected attributes:
+
+        run : str or None
+            Run identifier or path. If omitted, the active run is resolved.
+        step : str
+            Step hash to inspect.
+
+    Returns
+    -------
+    None
+        The plan is printed to stdout. No explicit return value.
+
+    Raises
+    ------
+    SystemExit
+        If the step is not found in the run database, or if the run cannot be
+        resolved/opened.
+
+    Notes
+    -----
+    **Inputs**
+
+    * If an input data hash is present in CAS, it is marked with a ✓ and
+      labeled ``CAS``.
+    * If an input data hash is materialized locally, it is marked with a ✓
+      and labeled ``MAT``.
+    * If the input is not present but has a known producer step, it is marked
+      with a ↻ indicating that replay is required.
+    * If the input is missing entirely (no CAS, no materialization, and no
+      known producer), it is marked with ✗.
+
+    **Outputs**
+
+    * Outputs are listed under an ``outputs:`` block.
+    * Each output data hash is annotated as one of:
+      - ``CAS`` if stored in content-addressable storage,
+      - ``MAT`` if materialized locally,
+      - ``MISSING`` if neither.
+
+    Examples
+    --------
+    Print the plan for a step::
+
+        blase restore plan --step deadbeef1234
+
+    Example output::
+
+        Plan for step deadbeef1234 (blase.Transform.apply_fn):
+          ✓ input data      abc123...  (CAS)
+          ↻ need replay for input labels   def456...  (producer step cafebabe...)
+          ✗ missing input metadata  7890ab...  (no CAS/materialization; unknown producer)
+          outputs:
+            - out.csv   13579df...  (MAT)
+            - log.json  24680ac...  (MISSING)
+    """
     run_path = _resolve_run_path(args.run)
     con = _open_db(run_path)
     s = con.execute("SELECT function_fqn FROM steps WHERE step_hash=?", (args.step,)).fetchone()
@@ -266,17 +345,6 @@ def cmd_plan(args):
             print(f"    - {r['name']:<8s} {r['data_hash']}  ({src})")
 
 # --------- run (verify/materialize/replay) ---------
-
-def _resolve_to_path(to: Optional[str], default_name: str) -> Path:
-    if to:
-        p = Path(to)
-        if p.is_dir():
-            p = p / default_name
-        p.parent.mkdir(parents=True, exist_ok=True)
-        return p.resolve()
-    # default: config default dir + name
-    RESTORE_DEFAULT_DIR.mkdir(parents=True, exist_ok=True)
-    return (RESTORE_DEFAULT_DIR / default_name).resolve()
 
 def _exec_plan_for_step(
     run_path: Path,
@@ -369,11 +437,15 @@ def _exec_plan_for_step(
                 target_override_this_sink = str((RESTORE_DEFAULT_DIR / default_name).resolve())
                 conflict_policy = "overwrite"
 
+            upstream_gen = upstream
+            if upstream_gen is None:
+                upstream_gen = _upstream_gen_for_sink(run_path, sh)
+
             out = bindings.run_save_to_csv_replay(
                 run_path=run_path,
                 params=st["params"],
                 realized={},
-                upstream_gen=upstream,
+                upstream_gen=upstream_gen,
                 target_override=target_override_this_sink,
                 backend_override=backend_override,
                 preseed_path=preseed_path,
@@ -402,7 +474,7 @@ def _ensure_data_local_or_replay(
     run_path: Path,
     data_hash: str,
     kind: str,
-    *,                                  # <-- keyword-only from here
+    *,
     seen_steps: Optional[Set[str]] = None,
     created_paths: Optional[List[Path]] = None,
 ) -> Tuple[Path, bool]:
@@ -452,69 +524,6 @@ def _pick_viable_seed(run_path: Path, ins: list[dict]) -> Optional[str]:
         except Exception:
             pass
     return None
-    
-def _exec_replay(run_path: Path, tip_step_hash: str, to_path: Optional[str], backend_override: Optional[str]):
-    plan = planner.plan_for_step(run_path, tip_step_hash)
-    upstream = None  # used only to feed the sink
-
-    for sh in plan:
-        st = store.load_step(run_path, sh)
-        fqn = st["function_fqn"]
-
-        # Transform needs its snapshot function + a realized source file
-        if fqn == "blase.Transform.apply_function":
-            ins = store.load_step_inputs(run_path, sh)
-            fn  = code.load_callable_from_blob(cas.path_for(run_path, "code", store.pick_code_hash(ins)))
-            src_hash = next((i["data_hash"] for i in ins if i["role"] == "source"), None)
-            if not src_hash:
-                raise SystemExit("replay: Transform.apply_function missing 'source' input")
-            src_kind = store.get_data_kind(run_path, src_hash) or "csv"
-            src_path, _ = _ensure_data_local_or_replay(run_path, src_hash, src_kind)
-
-            upstream = bindings.run_apply_function_restore(
-                run_path=run_path,
-                params=st["params"],
-                realized={"source": src_path},
-                transform_fn=fn,
-            )
-            continue
-
-        if fqn == "blase.Extract.read_csv":
-            # read directly from the recorded file_path / params
-            upstream = bindings.run_read_csv_restore(
-                run_path=run_path, params=st["params"], realized={}, transform_fn=None
-            )
-            continue
-
-        if fqn == "blase.Load.save_to_csv":
-            ins  = store.load_step_inputs(run_path, sh)
-            outs = store.load_step_outputs(run_path, sh)
-            expected_out_hash = outs[0]["data_hash"] if outs else None
-
-            # resolve a viable seed (skip dead ones)
-            preseed_path = None
-            seed_hash = _pick_viable_seed(run_path, ins)
-            if seed_hash:
-                seed_kind = store.get_data_kind(run_path, seed_hash) or "csv"
-                preseed_path, _ = _ensure_data_local_or_replay(run_path, seed_hash, seed_kind)  # may replay run-1
-
-            out = bindings.run_save_to_csv_replay(
-                run_path=run_path,
-                params=st["params"],
-                realized={},
-                upstream_gen=upstream,
-                target_override=to_path,
-                backend_override=backend_override,
-                preseed_path=preseed_path,
-                expected_out_hash=expected_out_hash,
-            )
-            print(f"Replayed: {out}")
-            upstream = None
-            continue
-
-        # Fallback
-        from blase import restore
-        restore.step(run_path, sh)
 
 def _normalize_plan_nodes(run_path: Path, plan):
     """
@@ -548,6 +557,115 @@ def _normalize_plan_nodes(run_path: Path, plan):
     return out
 
 def cmd_run(args):
+    """
+    Execute the ``blase restore run`` command for either a data hash or a step hash.
+
+    This is the CLI backend for the ``restore run`` subcommand. It supports two
+    mutually exclusive targets:
+
+    * **Data-centric** (``--data <DATA_HASH>``): Attempt a fast-path materialization
+      from CAS/materializations; if unavailable, replay the producer plan to
+      reproduce the exact bytes for the requested data hash.
+    * **Step-centric** (``--step <STEP_HASH>``): Perform one of the modes
+      (materialize, verify, replay) against a specific recorded step, wiring
+      an upstream generator when the step is a sink (``blase.Load.save_to_csv``).
+
+    Parameters
+    ----------
+    args : argparse.Namespace
+        Parsed CLI options. Expected attributes include:
+
+        General
+            run : str or None
+                Run identifier or path. If omitted, the active run is resolved.
+            mode : {"verify", "materialize", "replay"}
+                Execution mode; defaults depend on path.
+            to : str or None
+                Destination path (file or directory) for outputs; parents are
+                created as needed.
+            on_conflict : {"fail", "rename", "overwrite"} or None
+                Conflict behavior for writing outputs. If not provided, the
+                default configured policy is used.
+            keep_intermediates : bool
+                If ``True``, do not delete intermediate files produced during
+                replay; otherwise intermediates are cleaned up on success.
+            limit_batches : int or None
+                Optional maximum number of batches to consume in verify paths.
+            backend : {"pandas", "polars"} or None
+                Optional backend override for sink replay.
+
+        Target selection (mutually exclusive)
+            step : str or None
+                Target step hash for step-centric operations.
+            data : str or None
+                Target data hash for data-centric operations.
+
+    Returns
+    -------
+    int
+        Conventional CLI exit code.
+
+        * ``0`` : success (materialized, verified, or replayed)
+        * ``2`` : no recorded outputs for the step in materialize mode
+        * ``3`` : materialization would require replay (instructional hint printed)
+
+    Raises
+    ------
+    SystemExit
+        Raised for usage or state errors, including (non-exhaustive):
+
+        * No active run and no ``--run`` provided.
+        * Missing or unreadable ``nodes.db`` for the resolved run.
+        * Neither ``--step`` nor ``--data`` provided (or both provided).
+        * No producer step recorded for a data hash that requires replay.
+        * Final output does not exist after replay, or content hash mismatch.
+        * Unknown/unsupported ``--mode`` value.
+
+    Notes
+    -----
+    **Data-centric path (``--data``)**
+
+    1. **Fast-path materialization**: Attempts to bring the artifact back from
+       CAS/materializations via :func:`blase.restoring.materialize.ensure_local`.
+       On success, verifies bytes against the requested data hash, prints
+       ``Materialized: <path>``, and returns ``0``.
+    2. **Replay**: If fast path is unavailable (``NeedReplay``), the producer
+       step is looked up and its forward plan executed via
+       :func:`_exec_plan_for_step`. The final artifact is verified against the
+       requested data hash. Intermediate files created during replay are deleted
+       unless ``--keep_intermediates`` is set.
+
+    **Step-centric path (``--step``)**
+
+    * ``materialize``: Bring back the recorded output for the step without
+      replay. Returns ``0`` on success, ``3`` if replay would be required.
+    * ``verify``: Stream the step’s output without writing it. For sink steps
+      (``blase.Load.save_to_csv``), a nearest upstream Transform/Extract
+      generator is constructed to feed the sink, printing per-batch progress.
+    * ``replay``: For sink steps, builds an upstream generator and writes the
+      sink output to ``--to`` (or a default path); for non-sink steps, streams
+      restored batches.
+
+    **Seeds and append semantics**
+
+    During sink replay, a viable seed (e.g., prior run’s output) may be used to
+    support append/overwrite semantics, resolved without unnecessary copying when
+    possible. Ephemeral seeds are cleaned up unless ``--keep_intermediates`` is set.
+
+    Examples
+    --------
+    Materialize by data hash to a specific file::
+
+        blase restore run --data 0123abcd... --mode materialize --to out.csv
+
+    Replay a sink step to a path, overwriting if it exists::
+
+        blase restore run --step deadbeef... --mode replay --to restored.csv --on-conflict overwrite
+
+    Verify a transform step without writing (limit batches)::
+
+        blase restore run --step cafe... --mode verify --limit-batches 5
+    """
     run_path = _resolve_run_path(args.run)
     if not getattr(args, "on_conflict", None):
         args.on_conflict = DEFAULT_CONFLICT
@@ -574,6 +692,7 @@ def cmd_run(args):
                                             on_conflict=args.on_conflict)
             _assert_path_matches_hash(Path(out), data_hash, "fast-path materialize")
             print(f"Materialized: {out}")
+            return 0
         except NeedReplay:
             pass  # fall through to replay
 

@@ -154,6 +154,42 @@ def step_signature_hash(payload_bytes: bytes) -> str:
 # --- StepOps + StepContext ---
 
 class StepOps:
+    """
+    Low-level operations for recording a single step’s lineage and artifacts.
+
+    ``StepOps`` is the imperative API used by step contexts to:
+    - register inputs/outputs in the tracking DB,
+    - snapshot code/environment,
+    - index/copy/link artifacts into the CAS,
+    - manage datasets and step status.
+
+    Instances are created by :class:`StepContext` and used internally by
+    :class:`StreamStep`. Library users typically do not instantiate this class
+    directly; they interact through :meth:`Track.step` / :meth:`Track.stream`.
+
+    Parameters
+    ----------
+    run_path : Path
+        Path to the run directory (``runs/<run_id>``).
+    step_hash : str
+        Identifier of the step row being mutated.
+    cas_policy : {"index", "link", "copy"}, optional
+        How to persist artifacts into CAS. Defaults to ``"index"``:
+        - ``"index"``: do not copy; record references and metadata.
+        - ``"link"``: hard-link into CAS when possible, else copy.
+        - ``"copy"``: always copy the file bytes into CAS.
+
+    Attributes
+    ----------
+    db : Path
+        SQLite database path (``nodes/nodes.db``).
+    run_path : Path
+        Run directory for this step.
+    step_hash : str
+        Unique identifier of the step this ops object modifies.
+    cas_policy : str
+        CAS policy in effect for this step (see above).
+    """
     def __init__(self, run_path: Path, step_hash: str, cas_policy: str = "index"):
         self.run_path = run_path
         self.step_hash = step_hash
@@ -161,6 +197,24 @@ class StepOps:
         self.cas_policy = cas_policy  # "index" | "link" | "copy"
 
     def add_input(self, data_hash: str, role: str, arg_name: Optional[str] = None) -> None:
+        """
+        Record an input edge for this step.
+
+        Parameters
+        ----------
+        data_hash : str
+            Hash of the input artifact (CSV/data/code/env/etc.).
+        role : str
+            Semantic role of this input (e.g., ``"source"``, ``"seed"``,
+            ``"upstream"``, ``"code"``, ``"env"``).
+        arg_name : str or None, optional
+            Name of the target function argument that receives this input,
+            if applicable.
+
+        Returns
+        -------
+        None
+        """
         with _conn(self.db) as c:
             c.execute("""INSERT OR REPLACE INTO step_inputs(step_hash,data_hash,role,arg_name)
                         VALUES(?,?,?,?)""",
@@ -168,6 +222,20 @@ class StepOps:
             c.commit()
 
     def add_output(self, data_hash: str, name: str) -> None:
+        """
+        Record an output edge for this step.
+
+        Parameters
+        ----------
+        data_hash : str
+            Hash of the produced artifact.
+        name : str
+            Logical name of the output (e.g., filename or label).
+
+        Returns
+        -------
+        None
+        """
         with _conn(self.db) as c:
             c.execute("INSERT OR IGNORE INTO step_outputs(step_hash,data_hash,name) VALUES(?,?,?)",
                       (self.step_hash, data_hash, name))
@@ -175,6 +243,36 @@ class StepOps:
 
     def register_data(self, *, kind: str, version: str, path_or_bytes, metadata: Optional[Dict[str, Any]] = None,
                       source_path: Optional[str] = None) -> str:
+        """
+        Register data in CAS and the tracking DB, returning its content hash.
+
+        If ``path_or_bytes`` is bytes, the payload is written into CAS.
+        If it is a path, behavior depends on ``cas_policy``:
+        - ``"index"``: do not copy; index the path + metadata.
+        - ``"link"``: hard-link into CAS if possible, else copy.
+        - ``"copy"``: copy bytes into CAS.
+
+        Also records a materialization row (path on disk) when a source path
+        is used, enabling fast future restores.
+
+        Parameters
+        ----------
+        kind : str
+            Logical kind/category (e.g., ``"csv"``, ``"data"``, ``"code"``, ``"env"``).
+        version : str
+            Logical version for the kind (schema/format hint).
+        path_or_bytes : (bytes | bytearray | str | Path)
+            Either raw bytes to store or a filesystem path to index/copy/link.
+        metadata : dict or None, optional
+            Extra metadata to persist alongside the data row.
+        source_path : str or None, optional
+            Explicit source path to record (normally inferred from ``path_or_bytes``).
+
+        Returns
+        -------
+        str
+            The computed content hash (hex).
+        """
         policy = self.cas_policy  # "index" | "link" | "copy"
 
         cas_root = self.run_path / "cas" / "sha256" / kind
@@ -221,6 +319,22 @@ class StepOps:
         return data_hash
 
     def add_dataset_member(self, dataset_id: str, data_hash: str, ordinal: int) -> None:
+        """
+        Append an item to a logical dataset (ordered collection of data hashes).
+
+        Parameters
+        ----------
+        dataset_id : str
+            Dataset identifier.
+        data_hash : str
+            Member data hash to add.
+        ordinal : int
+            Position/order of this member within the dataset.
+
+        Returns
+        -------
+        None
+        """
         with _conn(self.db) as c:
             c.execute("INSERT OR IGNORE INTO datasets(dataset_id) VALUES (?)", (dataset_id,))
             c.execute("""INSERT OR IGNORE INTO dataset_members(dataset_id,data_hash,ordinal)
@@ -228,7 +342,14 @@ class StepOps:
             c.commit()
 
     def mark_completed(self) -> None:
-        """Seal this step as completed and stamp ts_end. Idempotent."""
+        """
+        Mark this step as completed.
+
+        Notes
+        -----
+        Idempotent: a previously-completed step remains completed.
+        Stamps ``ts_end`` if not already present.
+        """
         with _conn(self.db) as c:
             # Don't downgrade an already-completed step, and don't flip explicit failures.
             c.execute("""
@@ -243,6 +364,13 @@ class StepOps:
             c.commit()
 
     def mark_aborted(self) -> None:
+        """
+        Mark this step as aborted (unless already completed).
+
+        Notes
+        -----
+        Does not downgrade a completed step. Stamps ``ts_end``.
+        """
         with _conn(self.db) as c:
             c.execute("""
                 UPDATE steps
@@ -256,6 +384,19 @@ class StepOps:
             c.commit()
 
     def snapshot_callable(self, fn) -> str:
+        """
+        Snapshot a Python callable into CAS and register it as a ``code`` input.
+
+        Parameters
+        ----------
+        fn : callable
+            Function object to serialize for lineage/provenance.
+
+        Returns
+        -------
+        str
+            Content hash of the code blob, or ``""`` if snapshot fails.
+        """
         try:
             blob, meta = build_code_blob(fn)
             code_hash = self.register_data(kind="code", version="1", path_or_bytes=blob, metadata=meta)
@@ -265,6 +406,14 @@ class StepOps:
             return ""
 
     def snapshot_env(self) -> str:
+        """
+        Snapshot the current environment manifest and register it as an ``env`` input.
+
+        Returns
+        -------
+        str
+            Content hash of the environment manifest, or ``""`` if snapshot fails.
+        """
         try:
             blob, meta = build_env_manifest()
             env_hash = self.register_data(kind="env", version="1", path_or_bytes=blob, metadata=meta)
@@ -274,6 +423,19 @@ class StepOps:
             return ""
 
     def add_upstream_from_meta(self, meta: Optional[Dict[str, Any]]) -> None:
+        """
+        Add upstream inputs from a propagated meta payload.
+
+        Parameters
+        ----------
+        meta : dict or None
+            Metadata containing optional ``"upstream"`` list
+            with items like ``{"id": <data_hash>, "role": "seed"}``.
+
+        Returns
+        -------
+        None
+        """
         if not meta: return
         ups = meta.get("upstream")
         if not isinstance(ups, list): return
@@ -284,11 +446,55 @@ class StepOps:
                 self.add_input(dh, role=role)
 
     def remove_inputs_by_role(self, role: str) -> None:
+        """
+        Delete all inputs for this step matching a given role.
+
+        Parameters
+        ----------
+        role : str
+            Role name to remove (e.g., ``"seed"``).
+
+        Returns
+        -------
+        None
+        """
         with _conn(self.db) as c:
             c.execute("DELETE FROM step_inputs WHERE step_hash=? AND role=?", (self.step_hash, role))
             c.commit()
 
 class StepContext(contextlib.AbstractContextManager[StepOps]):
+    """
+    Context manager that opens a step, exposes :class:`StepOps`, and seals it on exit.
+
+    Entering the context inserts a row into ``steps`` with status ``"running"``.
+    Exiting the context updates status and ``ts_end`` based on outcome:
+
+    - normal exit → ``"completed"``
+    - exception (not ``GeneratorExit``) → ``"failed"``
+    - ``GeneratorExit`` → ``"aborted"``
+
+    It also computes and stores a canonical signature hash that includes:
+    function FQN, normalized parameters, inputs (including code/env if present),
+    and optional materials/seeds when available.
+
+    Parameters
+    ----------
+    run_path : Path
+        Path to ``runs/<run_id>`` for DB and CAS roots.
+    function_fqn : str
+        Fully-qualified function name of the recorded step.
+    params : dict
+        Parameters to persist as the step’s parameter payload.
+    run_id : str or None, optional
+        Run identifier; defaults to ``run_path.name`` if omitted.
+
+    Attributes
+    ----------
+    step_hash : str
+        Step identifier (also used as ``attempt_id``).
+    ops : StepOps
+        Operational surface to record inputs/outputs/metadata.
+    """
     def __init__(self, run_path: Path, function_fqn: str, params: Dict[str, Any], run_id: Optional[str] = None):
         self.run_path = run_path
         self.db = run_path / "nodes" / "nodes.db"
@@ -303,6 +509,14 @@ class StepContext(contextlib.AbstractContextManager[StepOps]):
         self._env_hash = None
 
     def __enter__(self) -> StepOps:
+        """
+        Insert the step row and return the :class:`StepOps` interface.
+
+        Returns
+        -------
+        StepOps
+            Operational helper bound to this step.
+        """
         with _conn(self.db) as c:
             c.execute("""
             INSERT INTO steps(step_hash,run_id,step_id,function_fqn,params_json,seeds_json,ts_start,status,attempt_id)
@@ -338,6 +552,19 @@ class StepContext(contextlib.AbstractContextManager[StepOps]):
             c.commit()
 
     def __exit__(self, exc_type, exc, tb) -> bool:
+        """
+        Finalize signature and transition step status based on outcome.
+
+        Parameters
+        ----------
+        exc_type, exc, tb
+            Exception triplet provided by the context protocol.
+
+        Returns
+        -------
+        bool
+            Always ``False`` to propagate exceptions to callers.
+        """
         self._finalize_signature()
         # Read current status to avoid downgrades
         with _conn(self.db) as c:
@@ -364,11 +591,31 @@ class StepContext(contextlib.AbstractContextManager[StepOps]):
     
 class StreamStep:
     """
-    Manages one StepContext over a stream of batches. Handles:
-      - code/env snapshot once
-      - per-batch upstream recording (dedup via PK)
-      - sealing on last batch
-      - proper close on success/error
+    Manage a single step over a stream of batches.
+
+    Responsibilities
+    ----------------
+    - Create and hold an underlying :class:`StepContext`.
+    - Snapshot code/environment once at construction.
+    - For each batch, record upstream lineage and propagate downstream meta.
+    - Mark the step completed when the caller flags the last batch.
+    - Provide explicit close paths for success or error.
+
+    Parameters
+    ----------
+    tracker : Track
+        The run tracker providing :meth:`Track.step`.
+    function_fqn : str
+        Fully-qualified function name associated with this stream.
+    params : dict
+        Parameters persisted for the step.
+    code_fn : callable or None, keyword-only
+        Optional function to snapshot as the code lineage.
+
+    Attributes
+    ----------
+    step : StepOps
+        Operational surface of the underlying step.
     """
     def __init__(self, tracker, function_fqn: str, params: Dict[str, Any], *, code_fn=None):
         self._cm = tracker.step(function_fqn, params)
@@ -380,13 +627,36 @@ class StreamStep:
 
     @property
     def step_hash(self) -> str:
+        """
+        Identifier of the underlying step.
+
+        Returns
+        -------
+        str
+            The step hash.
+        """
         return self.step.step_hash
 
     def emit(self, *, last_batch: bool, meta: Optional[Dict[str, Any]]) -> Dict[str, Any]:
         """
-        Call per batch after you compute outputs.
-        Records upstream; seals step if last_batch.
-        Returns downstream meta to propagate.
+        Record per-batch lineage and produce downstream metadata.
+
+        Adds upstream edges from ``meta`` (if any), mirrors caller metadata,
+        annotates the current step hash, and, when ``last_batch`` is True,
+        seals the step as completed.
+
+        Parameters
+        ----------
+        last_batch : bool
+            Whether this is the final batch for the step.
+        meta : dict or None
+            Metadata propagated from upstream (may include ``"upstream"`` list).
+
+        Returns
+        -------
+        dict
+            Downstream metadata for the batch (includes ``"producer_step"`` and
+            preserves caller-provided ``"ordinal"`` if present).
         """
         # record lineage
         self.step.add_upstream_from_meta(meta)
@@ -403,7 +673,26 @@ class StreamStep:
         return out
 
     def close_ok(self) -> None:
+        """
+        Close the underlying context as a successful completion.
+
+        Returns
+        -------
+        None
+        """
         self._cm.__exit__(None, None, None)
 
     def close_error(self, exc_type, exc, tb) -> None:
+        """
+        Close the underlying context with an error classification.
+
+        Parameters
+        ----------
+        exc_type, exc, tb
+            Exception triplet describing the failure.
+
+        Returns
+        -------
+        None
+        """
         self._cm.__exit__(exc_type, exc, tb)

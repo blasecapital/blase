@@ -27,18 +27,78 @@ def create_project(template_type, project_name):
 
 def main():
     """
-    Command:
-    blase create <template_subdir_name> <project_name>
+    Entry point for the ``blase`` command-line interface (CLI).
 
-    blase restore list --limit 10
-    blase restore show --step <STEP_HASH>
-    blase restore plan --step <STEP_HASH>
+    This function sets up the top-level CLI parser, defines all subcommands,
+    and dispatches execution to the appropriate backend function.
 
-    blase restore run --step <STEP_HASH> --mode verify
-    blase restore run --step <STEP_HASH> --mode replay
+    Supported commands
+    ------------------
+    **Project creation**
 
-    blase restore run --data <DATA_HASH> --mode materialize
-    blase restore run --data <DATA_HASH> --mode replay --to <PATH>
+    * ``blase create <template> <name>``  
+      Create a new project directory from a built-in template.
+
+    **Restore/inspection**
+
+    * ``blase restore list [--run <RUN>] [--like-fqn <FQN>] [--limit N]``  
+      List recent steps recorded in a run.
+
+    * ``blase restore show --step <STEP_HASH> [--run <RUN>]``  
+      Show details for a specific step.
+
+    * ``blase restore plan --step <STEP_HASH> [--run <RUN>]``  
+      Display the restore plan for a step, including input/output availability.
+
+    * ``blase restore run --step <STEP_HASH> [options]``  
+      Execute restore by step. Modes include:
+        - ``verify``: stream/inspect output without writing
+        - ``materialize``: attempt to materialize outputs without replay
+        - ``replay``: re-execute the step to reproduce outputs
+
+    * ``blase restore run --data <DATA_HASH> [options]``  
+      Execute restore by data hash. Modes include:
+        - ``materialize``: attempt to retrieve the artifact from CAS/materializations
+        - ``replay``: re-execute the producer step if replay is required
+
+    Parameters
+    ----------
+    None
+
+    Returns
+    -------
+    None
+        Executes the requested CLI command. May call ``SystemExit`` for usage errors.
+
+    Notes
+    -----
+    Shared options for ``restore run`` include:
+
+    * ``--mode {verify, materialize, replay}``
+    * ``--to <PATH>``: destination for outputs
+    * ``--on-conflict {fail, rename, overwrite}``
+    * ``--keep-intermediates``: retain temporary files during replay
+    * ``--limit-batches N``: cap number of batches in verify mode
+    * ``--backend {pandas, polars}``: override sink replay backend
+    * ``--step`` vs ``--data``: mutually exclusive targets
+
+    Example usage
+    -------------
+    Create a project::
+
+        blase create standard my_project
+
+    Inspect a step::
+
+        blase restore show --step deadbeef...
+
+    Plan a restore::
+
+        blase restore plan --step cafebabe...
+
+    Materialize by data hash::
+
+        blase restore run --data abc123... --mode materialize --to out.csv
     """
     parser = argparse.ArgumentParser(prog="blase")
     subparsers = parser.add_subparsers(dest="command")

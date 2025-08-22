@@ -4,3 +4,10 @@ __pycache__/
 
 # Rust target build directory
 rust/target/
+
+# Pytest artifacts
+.pytest_cache
+.coverage
+.coverage.*
+htmlcov/
+coverage.xml

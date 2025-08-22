@@ -20,85 +20,71 @@ def _write_active(run_root: Path, run_id: str, status: str = "active") -> None:
 
 class Track:
     """
-    Run lifecycle manager and single entry point for tracking steps/streams.
+    Run lifecycle manager and entry point for CAS + lineage tracking.
 
-    ``Track`` encapsulates creation and management of a *run* directory
-    (``runs/<run_id>``), including initialization of the content-addressable
-    store (``cas/``) and the tracking database (``nodes/nodes.db``). It exposes
-    public APIs to start/end runs and to create recorded step contexts for both
-    single-call steps and streaming (batch) steps.
-
-    The class is **intended as the public API** for tracking and is commonly
-    used internally by higher-level objects (e.g., ``Extract``, ``Transform``,
-    ``Load``) to record lineage automatically.
+    `Track` sets up a run directory (``runs/<run_id>``) with
+    a content-addressable store (``cas/``) and a tracking DB (``nodes/nodes.db``).
+    It exposes public APIs to:
+      * initialize/label a run,
+      * open single-call step contexts (:meth:`step`),
+      * manage streamed/batched steps (:meth:`stream`).
 
     Parameters
     ----------
     runs_dir : Path or None, optional
-        Directory that contains all run subdirectories. If ``None``, defaults
-        to ``<cwd>/runs``. The directory (and nested structure) is created
-        on first use.
+        Directory containing all runs. Defaults to ``<cwd>/runs``.
     reuse : bool, optional
-        If ``True`` (default), reuse an existing ``active_run.blase`` pointer
-        when present; otherwise create a new run and update the pointer.
+        If True (default), reuse the existing ``active_run.blase`` when present;
+        otherwise create a new run and update the pointer.
 
     Attributes
     ----------
     runs_dir : Path
-        Root directory for all runs (contains subdirectories per ``run_id``).
+        Root directory for all runs.
     run_root : Path
-        Alias of ``runs_dir`` for convenience.
+        Alias to ``runs_dir`` (kept for historical reasons).
     run_id : str
-        The identifier of the active run (e.g., timestamp-based).
+        Identifier of the active run.
     run_path : Path
-        Filesystem path to the active run: ``runs_dir / run_id``.
+        Absolute path to ``runs_dir / run_id``.
     _active_meta : dict
-        Metadata loaded/stored with the active run pointer.
+        The JSON payload stored in ``active_run.blase``.
 
     Notes
     -----
-    - On initialization, ``Track`` ensures the following structure exists:
-      ``runs/<run_id>/cas/`` and ``runs/<run_id>/nodes/``, then calls
-      :func:`ensure_schema` to initialize the tracking DB schema.
-    - A singleton instance is optionally maintained via :meth:`Track.get` to
-      avoid repeated setup in library code. ``Track.get(enable=False)``
-      returns ``None`` for code paths where tracking is disabled.
-    - ``Track.step`` creates a *non-streaming* step context (single call),
-      whereas ``Track.stream`` creates a *streaming* step that records batches.
+    On construction, this ensures the directory structure exists and
+    calls :func:`ensure_schema` to initialize the SQLite schema.
 
     Examples
     --------
-    Create a tracker and record a single step::
-
-        trk = Track()               # creates runs/<run_id>/...
-        trk.start_run("etl-run")    # optional label
-
-        with trk.step("blase.Extract.read_csv", params={"file_path": "data.csv"}) as s:
-            # ... your work ...
-            s.record_output(data_hash=..., kind="csv", name="raw.csv")
-
-        trk.end_run()
-
-    Create a streaming step and record batches::
+    Basic usage::
 
         trk = Track()
-        ss = trk.stream("blase.Transform.apply_function", params={"fn": "my_fn"})
-        for batch, last in upstream:
-            with ss.next_batch(last=last) as sb:
-                out = transform(batch)
-                sb.record_output_batch(out_hash=..., kind="csv")
-        trk.end_run()
+        trk.start_run("example")
 
-    See Also
-    --------
-    StepContext
-        Context manager used for non-streaming step recording.
-    StreamStep
-        Streaming/batched step helper used by :meth:`Track.stream`.
+        with trk.step("blase.Extract.read_csv", params={"path": "data.csv"}) as s:
+            # do work, then record outputs via s.ops
+
+        trk.end_run()
     """
     _singleton: Optional["Track"] = None
 
     def __init__(self, runs_dir: Optional[Path] = None, reuse: bool = True):
+        """
+        Initialize a tracker and ensure run directories/DB exist.
+
+        Parameters
+        ----------
+        runs_dir : Path or None, optional
+            Root directory for runs (default: ``Path.cwd() / 'runs'``).
+        reuse : bool, optional
+            Reuse existing active run if found; otherwise create a new one.
+
+        Side Effects
+        ------------
+        - Creates directories: ``runs_dir``, ``run_path/cas/``, ``run_path/nodes/``.
+        - Initializes the DB schema under ``run_path/nodes/nodes.db``.
+        """
         self.runs_dir = Path(runs_dir or (Path.cwd() / "runs"))
         self.runs_dir.mkdir(parents=True, exist_ok=True)
         self.run_root = self.runs_dir
@@ -113,22 +99,26 @@ class Track:
     @classmethod
     def get(cls, enable: bool, *, runs_dir: Optional[Path] = None, reuse: bool = True) -> Optional["Track"]:
         """
-        Return a process-wide tracker singleton if ``enable`` is True.
+        Return a process-wide singleton tracker if enabled.
 
         Parameters
         ----------
         enable : bool
-            If ``False``, return ``None`` (tracking disabled). If ``True``,
-            return a singleton ``Track`` instance, creating it if necessary.
+            If False, returns ``None`` (tracking disabled).
         runs_dir : Path or None, optional
-            Root directory for runs. Passed through to the constructor on first use.
+            Root directory to use on first creation of the singleton.
         reuse : bool, optional
-            Whether to reuse an existing active run pointer when creating.
+            Whether to reuse an existing active run pointer.
 
         Returns
         -------
         Track or None
-            The singleton tracker or ``None`` if tracking is disabled.
+            The singleton instance when enabled, else ``None``.
+
+        Notes
+        -----
+        On first creation, this also calls :meth:`start_run` to ensure
+        the run pointer/metadata exist.
         """
         if not enable:
             return None

@@ -73,5 +73,18 @@ minversion = "6.0"
 addopts = "-ra -q"
 testpaths = ["tests"]
 
+[tool.coverage.run]
+branch = true
+source = ["blase"]
+omit = [
+    "blase/tests/*",
+]
+parallel = true
+data_file = "/workspace/.coverage"
+
+[tool.coverage.report]
+show_missing = true
+skip_covered = false
+
 [tool.flake8]
 max-line-length = 88

@@ -113,8 +113,87 @@ class Load:
         use_blase_path: bool = True,
     ) -> Tuple[str, bool, Dict[str, Any]]:
         """
-        Append a batch to a CSV target. On the final batch, register the file in CAS
-        and mark the step completed. Returns (target_path, last_batch, new_meta).
+        Write one batch of data to a CSV target with optional tracking and lineage.
+
+        This method appends ``data`` to a target CSV file in either *tracked* or
+        *untracked* mode. In tracked mode, a single `Load.save_to_csv` stream is opened
+        per unique (target, backend) combination, recording upstream lineage, seed
+        inputs (if the file already exists), and registering the final materialized file
+        in CAS on the last batch. In untracked mode, the file is simply written using
+        backend I/O and no lineage is recorded.
+
+        Parameters
+        ----------
+        data : Any
+            A batch of records to append to the CSV file. Typically a `pandas.DataFrame`
+            or `polars.DataFrame`, depending on the backend chosen.
+        last_batch : bool
+            Whether this batch is the final batch in the stream. If ``True``, the stream
+            is sealed and the completed file is registered as an output.
+        meta : dict, optional
+            Metadata propagated from upstream steps (e.g., from Extract or Transform).
+            This information is recorded per batch when tracking is enabled.
+        path : str, optional
+            Absolute or relative path to the output file. Mutually exclusive with
+            ``file_name``/``subdir`` if ``use_blase_path=True``.
+        file_name : str, optional
+            Optional explicit file name to use under ``subdir`` when resolving the target.
+        subdir : str, default="csv_data"
+            Subdirectory under the run’s output root to place the CSV target. Ignored if
+            ``use_blase_path=False`` and ``path`` is explicitly provided.
+        backend : {"pandas", "polars"}, default="pandas"
+            Backend library to use for writing CSV shards. Controls both the file-writing
+            logic and the identity of the stream step.
+        track : bool, default=True
+            Whether to engage the Blase tracking system. If ``False``, no DAG lineage or
+            CAS registration is performed.
+        use_blase_path : bool, default=True
+            If ``True``, resolve the target path relative to the Blase run output root
+            using ``subdir``/``file_name``. If ``False``, use ``path`` directly.
+
+        Returns
+        -------
+        tuple of (str, bool, dict)
+            A 3-tuple containing:
+            - ``target_path`` : str  
+            Filesystem path of the CSV file being written to.
+            - ``last_batch`` : bool  
+            Echo of the input flag, enabling downstream flow control.
+            - ``new_meta`` : dict  
+            Metadata returned by the tracking system’s emit call if tracking is enabled,
+            otherwise the input ``meta`` or an empty dict.
+
+        Notes
+        -----
+        - **Stream semantics:** One `Load.save_to_csv` stream is maintained per unique
+        (target, backend). If the target path or backend changes mid-run, the previous
+        stream is cleanly closed and a new stream is opened.
+        - **Seed inputs:** If the target file already exists when the stream is opened,
+        its contents are snapshotted and registered as a "seed" input. This allows
+        append semantics to be faithfully restored during replay.
+        - **Lineage:** Each batch inherits upstream metadata via ``meta`` and is logged
+        through the stream step’s emit call.
+        - **Finalization:** On ``last_batch=True``, the completed file is registered in CAS
+        as an output artifact of kind "csv", then the step is sealed.
+        - **Untracked path:** When ``track=False``, this method only writes the data to
+        the target file using the chosen backend. No tracking, CAS registration, or
+        lineage propagation occurs.
+
+        Raises
+        ------
+        Exception
+            Any exception raised during CSV writing propagates upward. In tracked mode,
+            the current stream is marked failed/aborted and internal state is reset.
+
+        Examples
+        --------
+        >>> loader = Load()
+        >>> for batch, is_last, meta in pipeline:
+        ...     target, last, out_meta = loader.save_to_csv(
+        ...         data=batch, last_batch=is_last, meta=meta,
+        ...         file_name="output.csv", backend="pandas"
+        ...     )
+        >>> print("Final output:", target)
         """
         backend = resolve_backend(backend)
         tracker = Track.get(track)

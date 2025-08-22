@@ -22,6 +22,67 @@ def _read_function_source(fn) -> Optional[str]:
         return None
 
 def build_code_blob(fn: Any) -> Tuple[bytes, Dict[str, Any]]:
+    """
+    Build a serialized code snapshot for a given function.
+
+    This function captures the structural and source-level
+    information of a Python function along with its defining module.
+    It produces a canonical JSON-encoded blob suitable for
+    content-addressable storage (CAS) and a companion metadata
+    dictionary for quick inspection.
+
+    Parameters
+    ----------
+    fn : Any
+        Python function (or callable object) to snapshot. The function
+        must be importable and have an associated module.
+
+    Returns
+    -------
+    Tuple[bytes, Dict[str, Any]]
+        - **blob** : bytes
+            Canonical JSON-encoded representation of the snapshot.
+            Includes:
+            
+            * `v`: Schema version.
+            * `entry`: Dict with `module` name and function
+              `qualname`.
+            * `module_source`: Source text of the defining module,
+              if available.
+            * `function_source`: Extracted source code of the function,
+              if available.
+
+        - **meta** : dict
+            Companion metadata for lightweight inspection.
+            Includes:
+
+            * `v`: Schema version.
+            * `entry`: Same entry dict (module and qualname).
+            * `has_module`: Boolean indicating if module source
+              was captured.
+            * `has_function`: Boolean indicating if function source
+              was captured.
+
+    Notes
+    -----
+    - The blob is normalized with sorted keys and compact separators,
+      ensuring reproducible hashing.
+    - Capturing both module and function source enables replay or
+      re-materialization of steps even if the live code changes.
+    - If the module source cannot be read (e.g., builtins or C
+      extensions), `module_source` will be `None`.
+
+    Examples
+    --------
+    >>> def foo(x): return x + 1
+    >>> blob, meta = build_code_blob(foo)
+    >>> isinstance(blob, bytes)
+    True
+    >>> meta["entry"]["qualname"]
+    'foo'
+    >>> meta["has_function"]
+    True
+    """
     mod = inspect.getmodule(fn)
     doc = {
         "v": 1,
@@ -38,6 +99,55 @@ def build_code_blob(fn: Any) -> Tuple[bytes, Dict[str, Any]]:
     return blob, meta
 
 def build_env_manifest() -> Tuple[bytes, Dict[str, Any]]:
+    """
+    Build a serialized manifest of the current Python environment.
+
+    This function inspects installed distributions (via
+    ``importlib.metadata.distributions``) and produces a
+    canonical JSON-encoded manifest of package names and versions.
+    The result is suitable for environment reproducibility,
+    dependency tracking, and content-addressable storage.
+
+    Parameters
+    ----------
+    None
+
+    Returns
+    -------
+    Tuple[bytes, Dict[str, Any]]
+        - **blob** : bytes
+            Canonical JSON-encoded representation of the environment
+            manifest. Includes:
+            
+            * `v`: Schema version.
+            * `packages`: List of dicts with fields
+              `{"name": str, "version": str}`.
+
+        - **meta** : dict
+            Companion metadata with summary information. Includes:
+            
+            * `v`: Schema version.
+            * `count`: Number of packages captured.
+
+    Notes
+    -----
+    - Package list is sorted case-insensitively by name and then by
+      version for deterministic output.
+    - Compatible with Python 3.9+ using the standard library; falls
+      back to `importlib_metadata` on older versions.
+    - If a package does not expose `Name` or `Version` metadata, it
+      is skipped.
+
+    Examples
+    --------
+    >>> blob, meta = build_env_manifest()
+    >>> isinstance(blob, bytes)
+    True
+    >>> meta["count"] > 0
+    True
+    >>> "numpy" in [p["name"].lower() for p in json.loads(blob.decode())["packages"]]
+    True
+    """
     try:
         from importlib.metadata import distributions  # py39 ok via backport if needed
     except Exception:

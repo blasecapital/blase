@@ -12,6 +12,25 @@ class NeedReplay(FileNotFoundError):
     """Raised when a data hash has no valid local copy; caller should replay."""
 
 def _valid_local_candidates(run_path: Path, data_hash: str) -> List[Path]:
+    """
+    Return valid local file paths that match a given data hash.
+
+    This helper checks known materializations and original source paths
+    associated with a run. Only paths that exist and hash correctly are
+    returned. Stale records are pruned if hash mismatches are detected.
+
+    Parameters
+    ----------
+    run_path : Path
+        Root path of the run containing metadata and materializations.
+    data_hash : str
+        Expected hash identifier of the data artifact.
+
+    Returns
+    -------
+    List[Path]
+        List of valid local file paths that match the hash.
+    """
     hasher = Hash()
     out: List[Path] = []
 
@@ -39,6 +58,73 @@ def ensure_local(run_path: Path, data_hash: str, *, kind: str = "data",
                  policy: str = "reuse", to_dir: Optional[Path] = None,
                  target_name: Optional[str] = None,
                  on_conflict: Optional[str] = None) -> Path:
+    """
+    Ensure a data, code, or environment artifact is locally materialized.
+
+    This function resolves a local copy of an artifact (by hash) from a run.
+    For data artifacts, it prefers existing materializations or source-of-truth
+    files; for code and environment blobs, it retrieves the content-addressable
+    storage (CAS) path. If no valid local copy is available, the caller is
+    expected to trigger a replay to regenerate the artifact.
+
+    Parameters
+    ----------
+    run_path : Path
+        Root path of the run containing CAS, metadata, and materialization logs.
+    data_hash : str
+        Expected hash identifier of the artifact to restore.
+    kind : {"data", "code", "env"}, default="data"
+        Type of artifact to materialize. Code and environment blobs always
+        resolve to CAS paths, while data is restored from materializations.
+    policy : str, default="reuse"
+        Currently unused placeholder for higher-level reuse policies.
+    to_dir : Path, optional
+        Directory where the artifact should be materialized. Defaults to
+        ``config.RESTORE_DEFAULT_DIR`` if not provided.
+    target_name : str, optional
+        Filename to use for the restored artifact. If not given, the basename
+        of the source file is reused.
+    on_conflict : {"rename", "overwrite", "fail"}, optional
+        File conflict policy for the target. Falls back to
+        ``config.RESTORE_CONFLICT`` if not provided.
+
+    Returns
+    -------
+    Path
+        Path to the ensured local artifact (hardlinked or copied into place).
+
+    Raises
+    ------
+    FileNotFoundError
+        If the requested code or environment blob is missing from CAS.
+    NeedReplay
+        If no valid local data materialization exists for the hash.
+    IOError
+        If the materialized file’s hash does not match the expected hash.
+
+    Notes
+    -----
+    - Data artifacts are attempted first via known materializations or
+      recorded source paths.
+    - On conflict, the output path is resolved via
+      :func:`resolve_conflict_path`.
+    - The function prefers hardlinking to avoid duplication, falling back
+      to a full copy if hardlinking fails.
+    - Successfully materialized files are re-recorded into the run’s
+      materialization index for future reuse.
+
+    Examples
+    --------
+    >>> from pathlib import Path
+    >>> ensure_local(Path("runs/2024-08-01T12-00-00"), "abc123hash")
+    PosixPath('restore/output/data.csv')
+
+    If no valid data exists locally:
+    >>> ensure_local(Path("runs/2024-08-01T12-00-00"), "missinghash")
+    Traceback (most recent call last):
+        ...
+    NeedReplay: no local materialization for data missinghash
+    """
     hasher = Hash()
 
     # Code/env blobs still come from CAS

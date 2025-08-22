@@ -4,9 +4,65 @@ import json, types
 
 def load_callable_from_blob(blob_path: Path):
     """
-    Load a callable from a snapshot blob (built by snapshot.build_code_blob).
-    Safe: executes code under a synthetic module name (not __main__).
-    Robust: handles <locals> in qualname and resolves from module/globals.
+    Load a Python callable from a serialized code snapshot blob.
+
+    This function reconstructs a callable that was previously stored with
+    ``snapshot.build_code_blob``. It executes the stored module and function
+    source under a synthetic module namespace (not ``__main__``), and then
+    attempts to resolve the recorded callable by walking its qualified name.
+    It also gracefully handles cases where the function was originally defined
+    inside a closure (``<locals>``) or where qualified name resolution fails,
+    by falling back to globals or parsing the function source.
+
+    Parameters
+    ----------
+    blob_path : Path
+        Path to the JSON blob file produced by ``snapshot.build_code_blob``.
+        The file is expected to contain:
+        
+        - ``entry``: metadata about the callable (qualname, module).
+        - ``module_source``: source code for helper symbols and imports.
+        - ``function_source``: source code for the target callable.
+
+    Returns
+    -------
+    callable
+        The reconstructed Python function, method, or callable object
+        restored from the blob.
+
+    Raises
+    ------
+    AttributeError
+        If the callable cannot be resolved from the snapshot.
+    json.JSONDecodeError
+        If the blob file is not valid JSON.
+    OSError
+        If the blob file cannot be read.
+
+    Notes
+    -----
+    Resolution strategy:
+    1. Create a synthetic module named ``blase_restored.<mod_hint>``.
+    2. Execute ``module_source`` in its globals to establish context.
+    3. Execute ``function_source`` to define the target callable.
+    4. Attempt to resolve the callable by walking ``qualname`` as attributes.
+       - ``<locals>`` segments are ignored to tolerate nested function names.
+    5. If that fails, fall back to looking up the last name segment in globals.
+    6. As a last resort, parse the first line of ``function_source`` to extract
+       the defined function name and check for a callable in globals.
+
+    Security
+    --------
+    The blob is executed with ``exec`` under a synthetic namespace. While it
+    avoids polluting ``__main__``, loading untrusted blobs may still execute
+    arbitrary code and should be avoided in hostile contexts.
+
+    Examples
+    --------
+    >>> path = Path("snapshots/my_func.blob.json")
+    >>> fn = load_callable_from_blob(path)
+    >>> fn(5)
+    42
     """
     data = json.loads(Path(blob_path).read_text("utf-8"))
     entry = data.get("entry") or {}

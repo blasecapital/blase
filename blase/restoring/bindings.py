@@ -2,11 +2,11 @@ from __future__ import annotations
 from typing import Dict, Any, Iterator, Tuple, Optional, Iterable
 from pathlib import Path
 from datetime import datetime
-import os, shutil
+import os
 
 from blase.extracting.csv_backend import read_batches_pandas, read_batches_polars
 from blase.load import Load
-from blase.restoring import store, materialize
+from blase.restoring import store
 from blase.utils.hashing import Hash
 
 # simple arg mapping: role -> kwarg
@@ -15,6 +15,18 @@ REGISTRY = {
 }
 
 def apply_registry(function_fqn: str, realized_by_role: Dict[str, Any], kwargs: Dict[str, Any]) -> None:
+    """
+    Apply argument mapping from REGISTRY to kwargs.
+
+    Parameters
+    ----------
+    function_fqn : str
+        Fully-qualified function name (e.g., ``"blase.Extract.read_csv"``).
+    realized_by_role : dict of str -> Any
+        Mapping of realized role names to values.
+    kwargs : dict
+        Keyword arguments to be updated in-place.
+    """
     mapping = REGISTRY.get(function_fqn)
     if not mapping:
         return
@@ -28,6 +40,25 @@ def _pick_replay_target(params: Dict[str, Any],
                         target_override: Optional[str],
                         on_conflict: str,
                         allow_append: bool) -> Path:
+    """
+    Choose an output file path for replay with conflict handling.
+
+    Parameters
+    ----------
+    params : dict
+        Original recorded parameters, may include ``"target"``.
+    target_override : str, optional
+        Override target path, if provided.
+    on_conflict : {"overwrite", "fail", "rename"}
+        Policy if target already exists.
+    allow_append : bool
+        Whether appending to existing output is permitted.
+
+    Returns
+    -------
+    Path
+        Resolved replay output path.
+    """
     base = Path(target_override or params.get("target", ""))
     if not base:
         # derive from original name if available; else fallback
@@ -58,10 +89,34 @@ def run_read_csv_restore(
     transform_fn=None,   # unused; signature kept for uniformity
 ) -> Iterator[Tuple[Any, bool]]:
     """
-    Replays Extract.read_csv by calling the backend reader with recorded params.
-    Does NOT pass unexpected kwargs to the csv backends.
+    Replay an ``Extract.read_csv`` step from a prior run.
 
-    Prefers realized['source'] (materialized from DB) and falls back to params['file_path'].
+    This function replays a CSV extraction by invoking the recorded backend
+    (`pandas` or `polars`) with parameters captured during the original run.  
+    It verifies source hashes when available, ensuring deterministic restores.
+
+    Parameters
+    ----------
+    run_path : Path
+        Path to the recorded run directory.
+    params : dict
+        Recorded parameters (e.g., ``backend``, ``batch_size``, ``use_cols``,
+        ``filter_by``).
+    realized : dict
+        Realized inputs/materializations, including ``"source"``.
+    transform_fn : callable, optional
+        Unused. Present for uniformity across replay signatures.
+
+    Yields
+    ------
+    tuple
+        Two-element tuple ``(batch, is_last)`` where ``batch`` is a DataFrame-like
+        object from the backend and ``is_last`` is a bool indicating the final batch.
+
+    Raises
+    ------
+    RuntimeError
+        If a provided expected source hash mismatches the current file contents.
     """
     backend     = params.get("backend", "pandas")
     file_path   = str(realized.get("source") or params.get("file_path"))
@@ -108,11 +163,32 @@ def run_apply_function_restore(
     transform_fn,   # loaded from the code blob for this step
 ) -> Iterator[Tuple[Any, bool]]:
     """
-    Replays Transform.apply_function without tracking:
-      - materialize upstream 'source'
-      - re-read in batches using original params
-      - apply the restored transform_fn
-      - yield (batch, is_last)
+    Replay a ``Transform.apply_function`` step without tracking.
+
+    Loads upstream materialized data, applies the restored transformation
+    function batch-by-batch, and yields transformed outputs.
+
+    Parameters
+    ----------
+    run_path : Path
+        Path to the run directory.
+    params : dict
+        Recorded parameters controlling extraction (backend, batch_size, etc.).
+    realized : dict
+        Realized upstream inputs. Must contain ``"source"`` path.
+    transform_fn : callable
+        User-defined transform function restored from recorded code.
+
+    Yields
+    ------
+    tuple
+        Two-element tuple ``(batch, is_last)`` where ``batch`` is the transformed
+        batch object and ``is_last`` indicates end of stream.
+
+    Raises
+    ------
+    RuntimeError
+        If ``"source"`` is missing from realized inputs.
     """
     backend    = params.get("backend", "pandas")
     batch_size = params.get("batch_size")
@@ -131,29 +207,6 @@ def run_apply_function_restore(
     for batch, is_last in gen:
         yield transform_fn(batch), is_last
 
-def run_save_to_csv_materialize_output(
-    *,
-    run_path: Path,
-    params: Dict[str, Any],
-    realized: Dict[str, Any],
-    outputs: Optional[list[Dict[str, Any]]] = None,
-    ensure_local,   # pass restore.materialize.ensure_local from caller
-) -> Path | list[Path]:
-    """
-    Preferred restore for a sink: materialize the recorded outputs and return paths.
-    If multiple outputs exist, return a list (e.g., shards).
-    """
-    if not outputs:
-        raise RuntimeError("restore: no recorded outputs for Load.save_to_csv")
-
-    paths: list[Path] = []
-    for out in outputs:
-        data_hash = out["data_hash"]
-        # You may want to infer kind='csv' here or store 'kind' on outputs.
-        p = ensure_local(run_path, data_hash=data_hash, kind="csv", policy="reuse", to_dir=None)
-        paths.append(Path(p))
-    return paths[0] if len(paths) == 1 else paths
-
 def run_save_to_csv_replay(
     *,
     run_path,
@@ -170,9 +223,48 @@ def run_save_to_csv_replay(
     record_materialization: bool = True,
 ) -> str:
     """
-    Replays a Load.save_to_csv step by consuming an upstream generator of (batch, last)
-    and writing to a temp file that is then moved into place. If a 'seed' input exists,
-    we pre-seed the temp file with those exact bytes to reproduce append semantics.
+    Replay a ``Load.save_to_csv`` step.
+
+    Consumes an upstream generator of data batches, writes output to a temp file,
+    verifies against expected output hashes, and moves the result into place with
+    conflict policies. Supports pre-seeding for append semantics.
+
+    Parameters
+    ----------
+    run_path : Path
+        Path to the run directory.
+    params : dict
+        Recorded step parameters (backend, etc.).
+    realized : dict, optional
+        Reserved for future use.
+    transform_fn : callable, optional
+        Not used. Present for uniformity across replay signatures.
+    upstream_gen : iterable of (Any, bool), optional
+        Upstream generator yielding (batch, is_last). Required.
+    target_override : str, optional
+        Explicit path for output file.
+    backend_override : str, optional
+        Backend to force ("pandas" or "polars"), overrides params.
+    on_conflict : {"overwrite", "fail", "rename"}
+        Policy if target exists.
+    allow_append : bool
+        Whether appending is allowed.
+    preseed_path : Path, optional
+        File to seed the temporary output (used to reproduce append semantics).
+    expected_out_hash : str, optional
+        Expected output hash for verification.
+    record_materialization : bool
+        If True, record final materialization in store.
+
+    Returns
+    -------
+    str
+        Path to the final replayed CSV file.
+
+    Raises
+    ------
+    RuntimeError
+        If no upstream generator is provided or output hash mismatches.
     """
     if upstream_gen is None:
         raise RuntimeError("Load.save_to_csv replay requires an upstream generator of (batch, last).")

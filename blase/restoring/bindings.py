@@ -59,11 +59,8 @@ def _pick_replay_target(params: Dict[str, Any],
     Path
         Resolved replay output path.
     """
-    base = Path(target_override or params.get("target", ""))
-    if not base:
-        # derive from original name if available; else fallback
-        base = Path("data/working/replayed/output.csv")
-
+    raw = target_override or params.get("target")
+    base = Path(raw) if raw else Path("data/working/replayed/output.csv")
     base.parent.mkdir(parents=True, exist_ok=True)
 
     if base.exists():
@@ -118,38 +115,21 @@ def run_read_csv_restore(
     RuntimeError
         If a provided expected source hash mismatches the current file contents.
     """
-    backend     = params.get("backend", "pandas")
-    file_path   = str(realized.get("source") or params.get("file_path"))
+    backend   = params.get("backend", "pandas")
+    file_path = str(realized.get("source") or params.get("file_path"))
 
-    # Verify the SOT matches the recorded 'source' data_hash (if any)
-    try:
-        # The caller's step hash isn't passed, so we inspect the latest read_csv step
-        # in the current replay plan via inputs
-        # (You can pass 'step_hash' via params if you want exact)
-        # Here, we derive by looking up the 'source' hash among inputs of the latest step that used this file.
-        # Simpler: use store.load_step_inputs on the immediate caller’s step if available.
-        # Best: pass the step hash in params when calling.
-        pass
-    except Exception:
-        pass
+    # Strict verification if the caller provides the expected source hash.
+    expected_src_hash = realized.get("__expected_source_hash__")
+    if expected_src_hash is not None:
+        actual = Hash().hash_file(Path(file_path))
+        if actual != expected_src_hash:
+            raise RuntimeError(
+                "Source file hash mismatch vs recorded input; aborting nondeterministic restore."
+            )
 
-    # Minimal, robust verification using recorded hash if it was resolved upstream:
-    # If the caller resolved a 'source' hash in realized, verify it here too:
-    # (Optionally skip if not provided)
-    try:
-        expected_src_hash = realized.get("__expected_source_hash__")
-        if expected_src_hash:
-            if Hash().hash_file(Path(file_path)) != expected_src_hash:
-                raise RuntimeError(
-                    "Source file hash mismatch vs recorded input; aborting nondeterministic restore."
-                )
-    except Exception:
-        # if no expected hash provided, continue (best-effort)
-        pass
-
-    batch_size  = params.get("batch_size")
-    use_cols    = params.get("use_cols")
-    filter_by   = params.get("filter_by")
+    batch_size = params.get("batch_size")
+    use_cols   = params.get("use_cols")
+    filter_by  = params.get("filter_by")
 
     impl = read_batches_pandas if backend == "pandas" else read_batches_polars
     for batch, is_last in impl(file_path, batch_size, use_cols, filter_by):

@@ -15,25 +15,45 @@ from blase.utils.config import cas_policy as _cas_policy_default
 # --- CAS and DAG local storage helpers ---
 
 DDL = [
-    # runs (optional)
+    # ----------------------------------------------------------------------
+    # runs
+    # Holds high-level runs; useful for grouping steps and audit trails.
+    # ----------------------------------------------------------------------
     """CREATE TABLE IF NOT EXISTS runs (
-         run_id TEXT PRIMARY KEY, created_at TEXT NOT NULL, label TEXT, metadata_json TEXT
+         run_id        TEXT PRIMARY KEY,
+         created_at    TEXT NOT NULL,
+         label         TEXT,
+         metadata_json TEXT
        )""",
-    # steps
+    # ----------------------------------------------------------------------
+    # steps (DAG nodes)
+    # Each executed function call is a step. Steps reference inputs/outputs in CAS.
+    # For restore, we walk from a target output back to a materialized checkpoint.
+    # ----------------------------------------------------------------------
     """CREATE TABLE IF NOT EXISTS steps (
-         step_hash TEXT PRIMARY KEY,
-         run_id    TEXT NOT NULL,
-         step_id   TEXT,
-         function_fqn TEXT NOT NULL,
-         params_json  TEXT NOT NULL,
-         seeds_json   TEXT,
-         ts_start     TEXT NOT NULL,
-         ts_end       TEXT,
-         attempt_id   TEXT,
-         sig_hash     TEXT,
-         status       TEXT NOT NULL CHECK (status IN ('running','completed','failed','aborted'))
+         step_hash     TEXT PRIMARY KEY,
+         run_id        TEXT NOT NULL,
+         step_id       TEXT,
+         function_fqn  TEXT NOT NULL,
+         params_json   TEXT NOT NULL,
+         seeds_json    TEXT,
+         ts_start      TEXT NOT NULL,
+         ts_end        TEXT,
+         attempt_id    TEXT,
+         sig_hash      TEXT,
+         status        TEXT NOT NULL CHECK (status IN ('running','completed','failed','aborted'))
        )""",
-    # data blobs
+    # ----------------------------------------------------------------------
+    # data (CAS)
+    # Logical, content-addressed "blobs" (SMALL descriptors only in this design).
+    # Examples:
+    #   - code.blob:v1            (stored source snapshot)
+    #   - image.file.meta:v1      (header-only per-image JSON: width/height/mode/bytes/corrupt)
+    #   - image.manifest:v1       (manifest descriptor: scan params + stats)
+    #   - image.batch.meta:v1     (batch descriptor: membership/limits/seeds)
+    #   - dataset.checkpoint:v1   (descriptor for a materialized dataset file/dir)
+    # The ACTUAL BYTES for checkpoints live on disk and are linked via materializations.
+    # ----------------------------------------------------------------------
     """CREATE TABLE IF NOT EXISTS data (
          data_hash     TEXT PRIMARY KEY,
          kind          TEXT NOT NULL,
@@ -42,36 +62,91 @@ DDL = [
          source_path   TEXT,
          metadata_json TEXT
        )""",
-    # edges
+
+    # ----------------------------------------------------------------------
+    # step_inputs / step_outputs (edges in the compute DAG)
+    # Restore uses these to plan which steps to re-run after jumping to a checkpoint.
+    # ----------------------------------------------------------------------
     """CREATE TABLE IF NOT EXISTS step_inputs (
-         step_hash TEXT NOT NULL, data_hash TEXT NOT NULL, role TEXT NOT NULL, arg_name TEXT,
+         step_hash TEXT NOT NULL,
+         data_hash TEXT NOT NULL,
+         role      TEXT NOT NULL, 
+         arg_name  TEXT,
          PRIMARY KEY (step_hash, data_hash, role)
        )""",
+
     """CREATE TABLE IF NOT EXISTS step_outputs (
-         step_hash TEXT NOT NULL, data_hash TEXT NOT NULL, name TEXT NOT NULL,
-         PRIMARY KEY (step_hash, name),
-         UNIQUE (data_hash)
+         step_hash TEXT NOT NULL,
+         data_hash TEXT NOT NULL,
+         name      TEXT NOT NULL,
+         PRIMARY KEY (step_hash, name)
        )""",
-    # datasets
+    # ----------------------------------------------------------------------
+    # datasets (MANIFESTS)
+    # Make datasets first-class "manifests". One row per manifest/batch-like collection.
+    # Used heavily by Inspect/CLI for integrity summaries and by restore as a stable anchor.
+    # - 'kind' distinguishes manifests (image.manifest:v1), batches (image.batch.meta:v1), etc.
+    # - 'manifest_hash' optionally points at a CAS descriptor in 'data' (e.g., a saved parquet manifest).
+    #   If you also materialize to disk, link that via 'materializations'.
+    # ----------------------------------------------------------------------
     """CREATE TABLE IF NOT EXISTS datasets (
-         dataset_id TEXT PRIMARY KEY, name TEXT, metadata_json TEXT
+         dataset_id     TEXT PRIMARY KEY,
+         name           TEXT,
+         kind           TEXT NOT NULL DEFAULT 'generic',
+         created_at     TEXT,
+         manifest_hash  TEXT,
+         metadata_json  TEXT
        )""",
+    # ----------------------------------------------------------------------
+    # dataset_members (membership list with ORDER)
+    # Ordered membership enables deterministic batching and reproducible replays.
+    # We optionally cache a few fields (is_corrupt/width/height) to power fast CLI
+    # "health checks" without JSON parsing over thousands of rows. These are hints
+    # copied from data.metadata_json (image.file.meta:v1) at scan time.
+    # ----------------------------------------------------------------------
     """CREATE TABLE IF NOT EXISTS dataset_members (
-         dataset_id TEXT NOT NULL, data_hash TEXT NOT NULL, ordinal INTEGER NOT NULL,
+         dataset_id   TEXT NOT NULL,
+         data_hash    TEXT NOT NULL,
+         ordinal      INTEGER NOT NULL,
+         role         TEXT DEFAULT 'item',
+         is_corrupt   INTEGER,
+         width        INTEGER,
+         height       INTEGER,
          PRIMARY KEY (dataset_id, ordinal),
          UNIQUE (dataset_id, data_hash)
        )""",
-    # materializations (optional)
+    # ----------------------------------------------------------------------
+    # materializations
+    # Map logical CAS data_hash to on-disk path(s). This is THE checkpoint anchor
+    # for restore: we jump to the newest suitable materialization upstream,
+    # then replay steps forward using code blobs + params.
+    # ----------------------------------------------------------------------
     """CREATE TABLE IF NOT EXISTS materializations (
-         data_hash TEXT NOT NULL, path TEXT NOT NULL, ts TEXT NOT NULL,
+         data_hash TEXT NOT NULL,
+         path      TEXT NOT NULL,
+         ts        TEXT NOT NULL,
          PRIMARY KEY (data_hash, path)
        )""",
-    # indexes
-    "CREATE INDEX IF NOT EXISTS idx_inputs_data  ON step_inputs(data_hash)",
-    "CREATE INDEX IF NOT EXISTS idx_outputs_data ON step_outputs(data_hash)",
-    "CREATE INDEX IF NOT EXISTS idx_outputs_step ON step_outputs(step_hash)",
-    "CREATE INDEX IF NOT EXISTS idx_steps_sig ON steps(sig_hash)",
-    "CREATE INDEX IF NOT EXISTS idx_data_kind    ON data(kind)"
+    # ----------------------------------------------------------------------
+    # Indexes (query speed for planners, inspectors, and CLIs)
+    # ----------------------------------------------------------------------
+    "CREATE INDEX IF NOT EXISTS idx_inputs_data           ON step_inputs(data_hash)",
+    "CREATE INDEX IF NOT EXISTS idx_outputs_data          ON step_outputs(data_hash)",
+    "CREATE INDEX IF NOT EXISTS idx_outputs_step          ON step_outputs(step_hash)",
+    "CREATE INDEX IF NOT EXISTS idx_steps_sig             ON steps(sig_hash)",
+    "CREATE INDEX IF NOT EXISTS idx_data_kind             ON data(kind)",
+
+    # Helpful for CLI/Inspect: quick scan of all members of a dataset,
+    # and reverse lookups from an item to its containing datasets.
+    "CREATE INDEX IF NOT EXISTS idx_dataset_members_ds    ON dataset_members(dataset_id)",
+    "CREATE INDEX IF NOT EXISTS idx_dataset_members_data  ON dataset_members(data_hash)",
+
+    # Quickly filter manifests/batches by kind (images vs generic).
+    "CREATE INDEX IF NOT EXISTS idx_datasets_kind         ON datasets(kind)",
+
+    # If you often jump from a dataset to its materialized path (restore),
+    # this accelerates the lookup via datasets.manifest_hash.
+    "CREATE INDEX IF NOT EXISTS idx_materializations_hash ON materializations(data_hash)"
 ]
 
 def _conn(db: Path) -> sqlite3.Connection:

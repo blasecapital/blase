@@ -1,5 +1,5 @@
 from __future__ import annotations
-from typing import Callable, Iterable, Dict, Any, Optional, List
+from typing import Callable, Iterable, Dict, Any, Optional, List, Literal, Iterator
 
 import numpy as np
 
@@ -239,6 +239,63 @@ class Extract:
             stream.close_error(type(e), e, e.__traceback__)
             raise
 
+    def read_images(
+        self,
+        directory: str,
+        pattern: str = "**/*.jpg",
+        backend: Literal["pil", "cv2"] = "pil",
+        return_type: Literal["np", "pil", "tensor"] = "np",
+        batch_size: Optional[int] = None,             # max number of items per batch
+        target_batch_bytes: Optional[int] = None,     # soft memory cap (decoded bytes)
+        filename_filter: Optional[Callable[[str], bool]] = None,
+        shuffle: bool = False,
+        seed: Optional[int] = None,
+        recursive: bool = True,
+        color: Literal["rgb", "gray"] = "rgb",
+        max_side: Optional[int] = None,               # optional downscale to cap image size
+    ) -> Iterator[dict]:
+        """
+        Yield memory-aware batches of images from a directory.
+
+        Parameters
+        ----------
+        directory : str
+            Root directory containing image files.
+        pattern : str, default="**/*.jpg"
+            Glob pattern to match files.
+        backend : {"pil", "cv2"}, default="pil"
+            Which image decoding library to use.
+        return_type : {"np", "pil", "tensor"}, default="np"
+            Format of returned images.
+        batch_size : int, optional
+            Max number of images per batch. Mutually combinable with `target_batch_bytes`.
+        target_batch_bytes : int, optional
+            Approximate memory budget (in decoded bytes) for each batch.
+        filename_filter : callable, optional
+            Function(path) -> bool; include only if True.
+        shuffle : bool, default=False
+            Shuffle file order before batching.
+        seed : int, optional
+            RNG seed for reproducible shuffling.
+        recursive : bool, default=True
+            Recurse into subdirectories.
+        color : {"rgb", "gray"}, default="rgb"
+            Convert images to this color mode.
+        max_side : int, optional
+            Downscale longer side to this length to cap image size.
+
+        Yields
+        ------
+        dict
+            {
+            "paths": [list of str],
+            "images": [list/array of decoded images],
+            "meta": pandas.DataFrame or list of dicts with header info
+            }
+        """
+        # resolve backend
+        pass
+
     def read_json(
         self,
         file_path: str,
@@ -294,7 +351,7 @@ class Extract:
         """
 
         backend = resolve_backend(backend)
-
+    
     def read_parquet(self, file_path: str, batch_size: int = None) -> Iterable[Any]: pass
     def read_hdf5(self, file_path: str, batch_size: int = None) -> Iterable[np.ndarray]: pass
     def read_orc(self, file_path: str, batch_size: int = None) -> Iterable[Any]: pass
@@ -304,7 +361,6 @@ class Extract:
     def read_audio(self, file_path: str, batch_size: int = None) -> Iterable[np.ndarray]: pass
     def read_npy(self, file_path: str, batch_size: int) -> Iterable[np.ndarray]: pass
     def read_sql(self, query: str, connection, batch_size: int) -> Iterable[Any]: pass
-    def read_images(self, directory: str, batch_size: int = None, filename_filter: Callable[[str], bool] = None): pass
     def read_api(
         self, 
         endpoint: str, 

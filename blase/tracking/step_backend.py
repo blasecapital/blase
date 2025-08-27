@@ -1,6 +1,9 @@
 import uuid
 from typing import Dict, Optional, Any, Tuple, List
-import contextlib, json, sqlite3, time
+import contextlib
+import json
+import sqlite3
+import time
 from pathlib import Path
 import shutil
 import os
@@ -436,9 +439,11 @@ class StepOps:
         -------
         None
         """
-        if not meta: return
+        if not meta: 
+            return
         ups = meta.get("upstream")
-        if not isinstance(ups, list): return
+        if not isinstance(ups, list): 
+            return
         for u in ups:
             dh = u.get("id")
             role = u.get("role", "upstream")

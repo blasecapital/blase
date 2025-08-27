@@ -1,7 +1,5 @@
 from __future__ import annotations
 from typing import Callable, Iterable, Dict, Any, Optional, List
-from pathlib import Path
-from concurrent.futures import ThreadPoolExecutor
 
 import numpy as np
 

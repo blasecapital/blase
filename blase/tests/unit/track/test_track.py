@@ -154,7 +154,6 @@ def test_stream_snapshots_code_and_env(tracker: Track):
     assert meta_out["ordinal"] == 0
 
     # finish
-    meta_out2 = ss.emit(last_batch=True, meta={"ordinal": 1})
     ss.close_ok()
 
     # assert step status
@@ -228,7 +227,7 @@ def test_step_failure_and_abort(tracker: Track):
     assert _q(db, "SELECT status FROM steps ORDER BY rowid DESC LIMIT 1")[0]["status"] == "failed"
 
     cm = tracker.step("f.q.n2", params={})
-    ctx = cm.__enter__()
+    cm.__enter__()
     cm.__exit__(GeneratorExit, GeneratorExit(), None)
     assert _q(db, "SELECT status FROM steps ORDER BY rowid DESC LIMIT 1")[0]["status"] == "aborted"
 
@@ -282,7 +281,6 @@ def test_register_data_path_index_and_copy_policies(tracker: Track, tmp_path: Pa
     db = _db_path(tracker)
     mats = _q(db, "SELECT path FROM materializations WHERE data_hash=?", (h_idx,))
     assert mats and mats[0]["path"] == str(src)
-    cas_file = tracker.run_path / "cas" / "sha256" / "csv" / h_idx[:2] / h_idx[2:]
     # index → we did not copy bytes; file may or may not exist; don't assert existence
 
     # copy policy: copy file into CAS + materialization
@@ -330,7 +328,6 @@ def test_stream_emit_propagation_and_status(tracker: Track):
     status = _q(db, "SELECT status FROM steps WHERE step_hash=?", (ss.step_hash,))[0]["status"]
     assert status == "running"
 
-    m1 = ss.emit(last_batch=True, meta={"ordinal": 1})
     ss.close_ok()
     status2 = _q(db, "SELECT status FROM steps WHERE step_hash=?", (ss.step_hash,))[0]["status"]
     assert status2 == "completed"

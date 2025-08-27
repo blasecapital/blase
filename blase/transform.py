@@ -1,5 +1,5 @@
 from __future__ import annotations
-from typing import Callable, Iterable, Any, Optional, Dict
+from typing import Iterable
 
 from blase.track import Track
 

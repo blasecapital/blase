@@ -113,11 +113,11 @@ def main():
     rst = subparsers.add_parser("restore", help="Restore/inspect recorded steps and data")
     rst_sub = rst.add_subparsers(dest="sub")
 
-    l = rst_sub.add_parser("list", help="List recent steps")
-    l.add_argument("--run", help="Run id or path")
-    l.add_argument("--like-fqn")
-    l.add_argument("--limit", type=int, default=20)
-    l.set_defaults(func=cmd_list)
+    ls = rst_sub.add_parser("list", help="List recent steps")
+    ls.add_argument("--run", help="Run id or path")
+    ls.add_argument("--like-fqn")
+    ls.add_argument("--limit", type=int, default=20)
+    ls.set_defaults(func=cmd_list)
 
     sh = rst_sub.add_parser("show", help="Show a step's details")
     sh.add_argument("--run")

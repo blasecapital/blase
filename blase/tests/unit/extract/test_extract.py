@@ -1,12 +1,12 @@
 import pytest
 import warnings
 
-warnings.filterwarnings("ignore", category=DeprecationWarning)
-
 import pandas as pd
 import polars as pl
 
 from blase.extract import Extract
+
+warnings.filterwarnings("ignore", category=DeprecationWarning)
 
 # Temporary CSV content for testing
 TEST_CSV_CONTENT = """id,value

@@ -2,7 +2,6 @@ from types import SimpleNamespace
 from pathlib import Path
 import shutil
 import pytest
-from _pytest.monkeypatch import MonkeyPatch
 
 import blase.restoring.bindings as b
 
@@ -96,7 +95,8 @@ def test_run_read_csv_restore_backend_and_hash_check(tmp_path, monkeypatch, back
     assert called["used"] == backend
 
 def test_run_read_csv_restore_hash_mismatch_raises(tmp_path, monkeypatch):
-    f = tmp_path / "src.csv"; f.write_text("x\n")
+    f = tmp_path / "src.csv"
+    f.write_text("x\n")
     monkeypatch.setattr(b.Hash, "hash_file", lambda self, p: "BAD")
     # reader stub (won't be reached due to error)
     monkeypatch.setattr(b, "read_batches_pandas", lambda *a, **k: iter([]))
@@ -111,7 +111,8 @@ def test_run_read_csv_restore_hash_mismatch_raises(tmp_path, monkeypatch):
 # --------------- run_apply_function_restore ---------------
 
 def test_run_apply_function_restore_happy(tmp_path, monkeypatch):
-    f = tmp_path / "src.csv"; f.write_text("x\n")
+    f = tmp_path / "src.csv"
+    f.write_text("x\n")
 
     # make the batch reader yield two batches
     def reader(path, batch_size, use_cols, filter_by):
@@ -119,7 +120,8 @@ def test_run_apply_function_restore_happy(tmp_path, monkeypatch):
         yield (["r2"], True)
     monkeypatch.setattr(b, "read_batches_pandas", reader)
 
-    fn = lambda batch: [x.upper() for x in batch]
+    def fn(batch):
+        return [x.upper() for x in batch]
     out = list(b.run_apply_function_restore(
         run_path=tmp_path,
         params={"backend": "pandas"},

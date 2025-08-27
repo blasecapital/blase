@@ -1,6 +1,7 @@
 from __future__ import annotations
 from pathlib import Path
-import json, types
+import json
+import types
 
 def load_callable_from_blob(blob_path: Path):
     """

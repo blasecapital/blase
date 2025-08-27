@@ -258,14 +258,13 @@ def run_save_to_csv_replay(
     # If a seed input was recorded and provided, start tmp as that exact seed bytes
     if preseed_path:
         import shutil
-        if tmp.exists(): tmp.unlink()
+        if tmp.exists(): 
+            tmp.unlink()
         shutil.copy2(preseed_path, tmp)
 
     # consume to tmp (append semantics preserved if seed existed)
     ld = Load()
-    last_seen = False
     for (b, last) in upstream_gen:
-        last_seen = last
         ld.save_to_csv(
             data=b, last_batch=last, meta={},
             path=str(tmp), backend=backend, track=False, use_blase_path=False,

@@ -1,7 +1,8 @@
 from __future__ import annotations
 from typing import Optional, List
 from pathlib import Path
-import os, shutil
+import os
+import shutil
 
 from blase.utils.hashing import Hash
 from blase.utils import config

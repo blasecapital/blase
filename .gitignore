@@ -11,3 +11,6 @@ rust/target/
 .coverage.*
 htmlcov/
 coverage.xml
+
+# Linting artifacts
+.ruff_cache

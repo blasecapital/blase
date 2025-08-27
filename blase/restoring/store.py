@@ -1,11 +1,10 @@
 from __future__ import annotations
 from typing import Dict, Any, List, Optional
 from pathlib import Path
-import sqlite3, json
-from collections import deque, defaultdict
+import sqlite3
+import json
 from time import strftime
 
-from blase.restoring.materialize import _valid_local_candidates
 
 def _conn(db: Path) -> sqlite3.Connection:
     c = sqlite3.connect(db)

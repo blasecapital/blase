@@ -1,6 +1,8 @@
 from __future__ import annotations
 from typing import Any, Dict, Tuple, Optional, List
-import inspect, json, textwrap, sys
+import inspect
+import json
+import textwrap
 from pathlib import Path
 
 def _read_module_source(mod) -> Optional[str]:

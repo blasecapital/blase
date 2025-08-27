@@ -1,5 +1,6 @@
 from __future__ import annotations
-import json, sqlite3
+import json
+import sqlite3
 from pathlib import Path
 from typing import Optional, Dict, Any, Tuple, Set, List
 import tempfile
@@ -174,11 +175,13 @@ def _upstream_gen_for_sink(run_path: Path, target_step_hash: str):
     upstream = None
     for j in range(idx - 1, -1, -1):
         if nodes[j]["function_fqn"].endswith("Transform.apply_function"):
-            upstream = nodes[j]; break
+            upstream = nodes[j]
+            break
     if upstream is None:
         for j in range(idx - 1, -1, -1):
             if nodes[j]["function_fqn"].endswith("Extract.read_csv"):
-                upstream = nodes[j]; break
+                upstream = nodes[j]
+                break
     if upstream is None:
         raise SystemExit("No upstream compute step found for sink replay.")
 
@@ -766,7 +769,8 @@ def cmd_run(args):
             for i, (b, last) in enumerate(gen, 1):
                 n = len(b) if hasattr(b, "__len__") else "?"
                 print(f"[verify] batch {i}: {n} rows  last={last}")
-                if isinstance(n, int): total += n
+                if isinstance(n, int): 
+                    total += n
                 if getattr(args, "limit_batches", None) and i >= args.limit_batches:
                     break
             print(f"[verify] total rows (best-effort): {total}")

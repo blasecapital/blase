@@ -1,4 +1,6 @@
-import json, sqlite3, shutil
+import json
+import sqlite3
+import shutil
 from types import SimpleNamespace
 from pathlib import Path
 import pytest
@@ -72,7 +74,8 @@ def run_dir(tmp_path):
     # minimal nodes.db
     db = run_path / "nodes" / "nodes.db"
     with sqlite3.connect(db) as c:
-        for stmt in DDL: c.execute(stmt)
+        for stmt in DDL: 
+            c.execute(stmt)
         c.commit()
     return run_path
 
@@ -116,8 +119,10 @@ def test__assert_path_matches_hash_ok_and_mismatch(tmp_path):
 
 def test__resolve_source_no_copy_happy(run_dir, monkeypatch, tmp_path):
     # store.load_data_source_path -> existing path with matching hash
-    src = tmp_path / "src.csv"; src.write_text("x\n", encoding="utf-8")
-    from blase.utils.hashing import Hash; h = Hash().hash_file(src)
+    src = tmp_path / "src.csv"
+    src.write_text("x\n", encoding="utf-8")
+    from blase.utils.hashing import Hash
+    h = Hash().hash_file(src)
 
     class Store:
         @staticmethod
@@ -131,10 +136,6 @@ def test__resolve_source_no_copy_happy(run_dir, monkeypatch, tmp_path):
     assert path == src and created is False
 
 def test__resolve_source_no_copy_fallback_replay(run_dir, monkeypatch, tmp_path):
-    # No original; ensure_local via helper
-    called = {}
-    def ensure(run_path, data_hash, kind, **_): 
-        called["ok"]=True; p = tmp_path / f"{data_hash}.csv"; p.write_text("y\n"); return p
     monkeypatch.setattr(
         rc,
         "_ensure_data_local_or_replay",
@@ -149,7 +150,8 @@ def test__resolve_source_no_copy_fallback_replay(run_dir, monkeypatch, tmp_path)
 
 def test__resolve_seed_no_copy_or_ephemeral_order(run_dir, monkeypatch, tmp_path):
     # 1) materialized path ok
-    mat = tmp_path / "m.csv"; mat.write_text("z\n")
+    mat = tmp_path / "m.csv"
+    mat.write_text("z\n")
     h = rc.Hash().hash_file(mat)
     monkeypatch.setattr(rc.store, "get_materialized_path", lambda *_: mat)
     monkeypatch.setattr(rc.Hash(), "hash_file", lambda *_: h)  # shortcut not strictly needed
@@ -164,12 +166,14 @@ def test__resolve_seed_ephemeral_replay(run_dir, monkeypatch, tmp_path):
 
     # Write the expected temp file inside _exec_plan_for_step
     def fake_exec(run_path, prod, to_path, **_):
-        p = Path(to_path); p.write_text("seed\n")
+        p = Path(to_path)
+        p.write_text("seed\n")
         return {}
     monkeypatch.setattr(rc, "_exec_plan_for_step", fake_exec)
 
     # compute expected hash from what fake_exec writes
-    tmp = tmp_path / "probe.csv"; tmp.write_text("seed\n")
+    tmp = tmp_path / "probe.csv"
+    tmp.write_text("seed\n")
     h = rc.Hash().hash_file(tmp)
 
     created_paths = []
@@ -257,7 +261,8 @@ def test__exec_plan_for_step_runs_all_kinds(run_dir, monkeypatch, tmp_path):
     monkeypatch.setattr(rc.code, "load_callable_from_blob", lambda *_: (lambda x: x))
 
     # source path
-    src = tmp_path / "src.csv"; src.write_text("a\n")
+    src = tmp_path / "src.csv"
+    src.write_text("a\n")
     monkeypatch.setattr(rc.store, "load_data_source_path", lambda *_: str(src))
 
     # make the hash check pass for the source
@@ -280,19 +285,22 @@ def test__exec_plan_for_step_runs_all_kinds(run_dir, monkeypatch, tmp_path):
 # ----- _ensure_data_local_or_replay paths -----
 
 def test__ensure_data_local_or_replay_fast(run_dir, monkeypatch, tmp_path):
-    f = tmp_path / "x.csv"; f.write_text("ok\n")
+    f = tmp_path / "x.csv"
+    f.write_text("ok\n")
     h = rc.Hash().hash_file(f)
     monkeypatch.setattr(rc.materialize, "ensure_local", lambda *a, **k: f)
     p, created = rc._ensure_data_local_or_replay(run_dir, h, "csv")
     assert p == f and not created
 
 def test__ensure_data_local_or_replay_replay(run_dir, monkeypatch, tmp_path):
-    class Need(rc.NeedReplay): pass
+    class Need(rc.NeedReplay): 
+        pass
     def ensure_fail(*a, **k): raise Need()
     monkeypatch.setattr(rc.materialize, "ensure_local", ensure_fail)
     monkeypatch.setattr(rc.store, "producer_step_for_data", lambda *_: "S")
     # _exec_plan_for_step returns mapping with our hash
-    out = tmp_path / "out.csv"; out.write_text("ok\n")
+    out = tmp_path / "out.csv"
+    out.write_text("ok\n")
     h = rc.Hash().hash_file(out)
     monkeypatch.setattr(rc, "_exec_plan_for_step", lambda *a, **k: {h: out})
     p, created = rc._ensure_data_local_or_replay(run_dir, h, "csv")

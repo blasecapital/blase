@@ -1,8 +1,7 @@
 from __future__ import annotations
 from pathlib import Path
 import sqlite3
-from typing import Dict, List, Optional, Literal, Tuple
-from . import store
+from typing import List, Optional, Tuple
 
 def _db(run_path: Path) -> Path:
     return (run_path / "nodes" / "nodes.db").resolve()
@@ -115,7 +114,8 @@ def plan_for_step(run_path: Path, tip_step_hash: str) -> List[str]:
             tr = _latest_with_source_before(db, "%blase.Transform.apply_function%", src, ts)
             if tr:
                 ex = _latest_with_source_before(db, "%blase.Extract.read_csv%", src, _step_row(db, tr)["ts_start"])
-                if ex: plan.append(ex)
+                if ex: 
+                    plan.append(ex)
                 plan.append(tr)
         plan.append(tip_step_hash)
         return plan
@@ -124,7 +124,8 @@ def plan_for_step(run_path: Path, tip_step_hash: str) -> List[str]:
         plan = []
         if src:
             ex = _latest_with_source_before(db, "%blase.Extract.read_csv%", src, ts)
-            if ex: plan.append(ex)
+            if ex: 
+                plan.append(ex)
         plan.append(tip_step_hash)
         return plan
 

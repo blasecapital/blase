@@ -1,9 +1,9 @@
 import pytest
 import warnings
 
-warnings.filterwarnings("ignore", category=DeprecationWarning)
-
 from blase.utils import backends
+
+warnings.filterwarnings("ignore", category=DeprecationWarning)
 
 def test_is_available_known_libs():
     # Should not raise errors

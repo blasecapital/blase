@@ -1,14 +1,12 @@
-from typing import Any, Callable, Optional
+from __future__ import annotations
+from typing import Any, Optional, Dict, Tuple, Callable
 from pathlib import Path
-import json
 
 import numpy as np
 
-from blase.track import Track
-from blase.utils.hashing import Hash
-from blase.utils.backends import resolve_backend
 from blase.loading.csv_backend import save_batch_pandas, save_batch_polars
-
+from blase.utils.backends import resolve_backend
+from blase.track import Track
 
 class Load:
     """
@@ -58,12 +56,37 @@ class Load:
     - Schema validation and metadata logging are optional but enhance pipeline safety and traceability.
     """
     def __init__(self):
-        self.tracked = False
-        self.run_path = None
-        self.step_hash = None
-        self.step_id = None
-        self.parent_hash = None
-        self.parent_type = None
+        self._stream = None
+        self._target_path: Optional[Path] = None
+        self._wrote_header: bool = False
+        self._backend: Optional[str] = None
+
+    def _resolve_target_path(
+        self,
+        *,
+        tracker: Track,
+        use_blase_path: bool,
+        path: Optional[str],
+        file_name: Optional[str],
+        subdir: Optional[str],
+    ) -> Path:
+        if use_blase_path:
+            # project working dir, not runs/*
+            base = tracker.paths["data_working"]
+            if subdir:
+                base = base / subdir
+            base.mkdir(parents=True, exist_ok=True)
+            if not file_name:
+                raise ValueError("file_name must be provided when use_blase_path=True")
+            return (base / file_name).resolve()
+        else:
+            if not path:
+                raise ValueError("path is required when use_blase_path=False")
+            p = Path(path).resolve()
+            p.parent.mkdir(parents=True, exist_ok=True)
+            return p
+    
+    # --- Main API ---
 
     def save(self, 
              data: Any, 
@@ -77,138 +100,184 @@ class Load:
 
     def save_to_csv(
         self,
+        *,
         data: Any,
         last_batch: bool,
-        parent: Optional[tuple[str, str]],
+        meta: Optional[Dict[str, Any]] = None,   # pass upstream lineage from Extract/Transform
         path: Optional[str] = None,
         file_name: Optional[str] = None,
         subdir: Optional[str] = "csv_data",
-        backend: str = "polars",
+        backend: str = "pandas",
         track: bool = True,
-        use_blase_path: bool = True
-    ) -> None:
+        use_blase_path: bool = True,
+    ) -> Tuple[str, bool, Dict[str, Any]]:
         """
-        Saves a Pandas or Polars DataFrame to a CSV file.
+        Write one batch of data to a CSV target with optional tracking and lineage.
 
-        If using a Blase pipeline (use_blase_path=True), automatically saves to:
-        ./runs/<active_run>/assets/[subdir/]<file_name>
+        This method appends ``data`` to a target CSV file in either *tracked* or
+        *untracked* mode. In tracked mode, a single `Load.save_to_csv` stream is opened
+        per unique (target, backend) combination, recording upstream lineage, seed
+        inputs (if the file already exists), and registering the final materialized file
+        in CAS on the last batch. In untracked mode, the file is simply written using
+        backend I/O and no lineage is recorded.
 
-        If a custom path is provided, saves directly to that location.
+        Parameters
+        ----------
+        data : Any
+            A batch of records to append to the CSV file. Typically a `pandas.DataFrame`
+            or `polars.DataFrame`, depending on the backend chosen.
+        last_batch : bool
+            Whether this batch is the final batch in the stream. If ``True``, the stream
+            is sealed and the completed file is registered as an output.
+        meta : dict, optional
+            Metadata propagated from upstream steps (e.g., from Extract or Transform).
+            This information is recorded per batch when tracking is enabled.
+        path : str, optional
+            Absolute or relative path to the output file. Mutually exclusive with
+            ``file_name``/``subdir`` if ``use_blase_path=True``.
+        file_name : str, optional
+            Optional explicit file name to use under ``subdir`` when resolving the target.
+        subdir : str, default="csv_data"
+            Subdirectory under the run’s output root to place the CSV target. Ignored if
+            ``use_blase_path=False`` and ``path`` is explicitly provided.
+        backend : {"pandas", "polars"}, default="pandas"
+            Backend library to use for writing CSV shards. Controls both the file-writing
+            logic and the identity of the stream step.
+        track : bool, default=True
+            Whether to engage the Blase tracking system. If ``False``, no DAG lineage or
+            CAS registration is performed.
+        use_blase_path : bool, default=True
+            If ``True``, resolve the target path relative to the Blase run output root
+            using ``subdir``/``file_name``. If ``False``, use ``path`` directly.
 
-        Args:
-            data (Any): A pandas or polars DataFrame.
-            last_batch (bool): Flag from Extract to end tracking step.
-            parent (tuple[str, str], optional): Hash and type of parent.
-            path (str, optional): Custom file path for saving (ignored if use_blase_path=True).
-            file_name (str, optional): File name when using Blase run context.
-            subdir (str, optional): Subdirectory under assets/ for organization.
-            backend (str): Either 'pandas' or 'polars'.
-            track (bool): Whether to track the save step.
-            use_blase_path (bool): Whether to use Blase run directory structure.
+        Returns
+        -------
+        tuple of (str, bool, dict)
+            A 3-tuple containing:
+            - ``target_path`` : str  
+            Filesystem path of the CSV file being written to.
+            - ``last_batch`` : bool  
+            Echo of the input flag, enabling downstream flow control.
+            - ``new_meta`` : dict  
+            Metadata returned by the tracking system’s emit call if tracking is enabled,
+            otherwise the input ``meta`` or an empty dict.
+
+        Notes
+        -----
+        - **Stream semantics:** One `Load.save_to_csv` stream is maintained per unique
+        (target, backend). If the target path or backend changes mid-run, the previous
+        stream is cleanly closed and a new stream is opened.
+        - **Seed inputs:** If the target file already exists when the stream is opened,
+        its contents are snapshotted and registered as a "seed" input. This allows
+        append semantics to be faithfully restored during replay.
+        - **Lineage:** Each batch inherits upstream metadata via ``meta`` and is logged
+        through the stream step’s emit call.
+        - **Finalization:** On ``last_batch=True``, the completed file is registered in CAS
+        as an output artifact of kind "csv", then the step is sealed.
+        - **Untracked path:** When ``track=False``, this method only writes the data to
+        the target file using the chosen backend. No tracking, CAS registration, or
+        lineage propagation occurs.
+
+        Raises
+        ------
+        Exception
+            Any exception raised during CSV writing propagates upward. In tracked mode,
+            the current stream is marked failed/aborted and internal state is reset.
+
+        Examples
+        --------
+        >>> loader = Load()
+        >>> for batch, is_last, meta in pipeline:
+        ...     target, last, out_meta = loader.save_to_csv(
+        ...         data=batch, last_batch=is_last, meta=meta,
+        ...         file_name="output.csv", backend="pandas"
+        ...     )
+        >>> print("Final output:", target)
         """
         backend = resolve_backend(backend)
+        tracker = Track.get(track)
 
-        # Build save path
-        if use_blase_path:
-            run_info_path = Path("runs/active_run.blase")
-            if not run_info_path.exists():
-                raise RuntimeError("No active run found. Expected 'runs/active_run.blase'.")
-
-            with open(run_info_path) as f:
-                run_id = json.load(f).get("run_id")
-                if not run_id:
-                    raise RuntimeError("Missing run_id in active_run.blase.")
-
-            save_dir = Path("runs") / run_id / "assets"
-            if subdir:
-                save_dir = save_dir / subdir
-            save_dir.mkdir(parents=True, exist_ok=True)
-
-            if not file_name:
-                raise ValueError("file_name must be provided when using use_blase_path=True")
-
-            path_obj = save_dir / file_name
-        else:
-            if not path:
-                raise ValueError("Either 'path' must be provided or use_blase_path must be True")
-            path_obj = Path(path)
-            path_obj.parent.mkdir(parents=True, exist_ok=True)
-
-        file_exists = path_obj.exists()
-
-        # Tracking
-        if track and not self.tracked:
-            track_dir = Track._validate_run_directory(track=track)
-            self.run_path = Track._validate_active_run(track_dir=track_dir)
-            self.parent_hash, self.parent_type = parent
-
-            self.step_id, self.step_hash = Track._start_step(
-                run_path=self.run_path,
-                function="save_to_csv",
-                params={
-                    "parent": self.parent_hash,
-                    "path": path,
-                    "file_name": file_name,
-                    "subdir": subdir,
-                    "backend": backend,
-                    "track": track,
-                    "use_blase_path": use_blase_path
-                },
-                parent=self.parent_hash
+        # ---------- Untracked fast-path ----------
+        if tracker is None:
+            target = self._resolve_target_path(
+                tracker=Track.get(True),  # for path resolution only
+                use_blase_path=use_blase_path,
+                path=path, file_name=file_name, subdir=subdir,
             )
-            self.tracked = True
+            file_exists = target.exists()
+            (save_batch_pandas if backend == "pandas" else save_batch_polars)(data, target, file_exists)
+            return str(target), last_batch, (meta or {})
 
-        # Write logic
+        # ---------- Tracked path ----------
+        target = self._resolve_target_path(
+            tracker=tracker,
+            use_blase_path=use_blase_path,
+            path=path,
+            file_name=file_name,
+            subdir=subdir,
+        )
+
+        # One StreamStep per (target, backend)
+        new_target = (self._target_path is None) or (self._target_path != target)
+        new_backend = (self._backend is None) or (self._backend != backend)
+
+        if self._stream is None or new_target or new_backend:
+            # close any prior stream cleanly
+            if self._stream is not None:
+                self._stream.close_ok()
+
+            params = {
+                "target": str(target),
+                "backend": backend,
+                "subdir": subdir,
+                "use_blase_path": bool(use_blase_path),
+            }
+            # snapshot the callable/env once per stream
+            self._stream = tracker.stream("blase.Load.save_to_csv", params, code_fn=self.save_to_csv)
+            self._target_path = target
+            self._backend = backend
+
+            # If target exists, snapshot its current bytes as a "seed" input
+            self._stream.step.remove_inputs_by_role("seed")
+            if target.exists():
+                seed_hash = self._stream.step.register_data(
+                    kind="csv", version="1", path_or_bytes=target,
+                    metadata={"role": "seed", "target": str(target)}
+                )
+                self._stream.step.add_input(seed_hash, role="seed", arg_name=None)
+
+        # 1) write the shard via your csv_backend functions (exactly like original)
+        file_exists = target.exists()
         try:
-            if backend == "polars":
-                save_path = save_batch_polars(data, path_obj, file_exists)
-            elif backend == "pandas":
-                save_path = save_batch_pandas(data, path_obj, file_exists)
-
-            if track and last_batch:
-                file_hash = Hash().hash_file(save_path)
-                parent_dict = {
-                    'parent': self.step_hash,
-                    'parent_type': self.parent_type,
-                    'source_path': save_path,
-                    'logged_by': self.step_id,
-                    'status': 'complete'
-                }
-                Track._log_data(
-                    run_path=self.run_path,
-                    file_hash=file_hash,
-                    parent_dict=parent_dict
-                )
-
-                Track._end_step(
-                    step_hash=self.step_hash,
-                    run_path=self.run_path,
-                    status="completed",
-                    outputs={},
-                    parent=(self.parent_hash, self.parent_type)
-                )
+            if backend == "pandas":
+                save_batch_pandas(data, target, file_exists)
+            else:
+                save_batch_polars(data, target, file_exists)
         except Exception as e:
-            if track:
-                parent_dict = {
-                    'parent': self.step_hash,
-                    'parent_type': self.parent_type,
-                    'source_path': save_path,
-                    'logged_by': self.step_id,
-                    'status': 'failed'
-                }
-                Track._log_data(
-                    run_path=self.run_path,
-                    file_hash=file_hash,
-                    parent_dict=parent_dict
-                )
-                Track._end_step(
-                    step_hash = self.step_hash,
-                    run_path = self.run_path,
-                    status="failed",
-                    outputs={"error": str(e)},
-                    parent=(self.parent_hash, self.parent_type)
-                )
+            # record failure and close context
+            if self._stream is not None:
+                self._stream.close_error(type(e), e, e.__traceback__)
+                self._stream = None
+                self._target_path = None
+                self._backend = None
             raise
+
+        # 2) per-batch lineage + seal on last batch
+        new_meta = self._stream.emit(last_batch=last_batch, meta=meta)
+
+        # 3) on final batch, register final file and close the stream
+        if last_batch:
+            out_hash = self._stream.step.register_data(
+                kind="csv", version="1", path_or_bytes=target, metadata={"target": str(target)}
+            )
+            self._stream.step.add_output(out_hash, name="csv")
+
+            self._stream.close_ok()
+            self._stream = None
+            self._target_path = None
+            self._backend = None
+
+        return str(target), last_batch, new_meta
 
     def save_to_parquet(self, data: Any, path: str, mode: str = "overwrite"):
         pass

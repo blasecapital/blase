@@ -1,12 +1,12 @@
 import pytest
 import warnings
 
-warnings.filterwarnings("ignore", category=DeprecationWarning)
-
 import pandas as pd
 import polars as pl
 
 from blase.extract import Extract
+
+warnings.filterwarnings("ignore", category=DeprecationWarning)
 
 # Temporary CSV content for testing
 TEST_CSV_CONTENT = """id,value
@@ -25,7 +25,7 @@ def temp_csv_file(tmp_path):
 
 def test_read_csv_batches(temp_csv_file):
     extractor = Extract()
-    batches = [batch for batch, _ in extractor.read_csv(
+    batches = [batch for batch, _, _ in extractor.read_csv(
         file_path=temp_csv_file, 
         mode="manual", 
         batch_size=2, 
@@ -43,7 +43,7 @@ def test_read_csv_batches(temp_csv_file):
 
 def test_read_csv_batches_polars(temp_csv_file):
     extractor = Extract()
-    batches = [batch for batch, _ in extractor.read_csv(
+    batches = [batch for batch, _, _ in extractor.read_csv(
         file_path=temp_csv_file, 
         mode="manual", 
         batch_size=2, 

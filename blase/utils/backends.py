@@ -1,24 +1,17 @@
-_HAS_POLARS = False
-_HAS_PANDAS = False
-_HAS_PYARROW = False
+import importlib.util
 
-try:
-    import polars as pl
+_HAS_POLARS = importlib.util.find_spec("polars") is not None
+_HAS_PANDAS = importlib.util.find_spec("pandas") is not None
+_HAS_PYARROW = importlib.util.find_spec("pyarrow") is not None
+
+if _HAS_POLARS:
     _HAS_POLARS = True
-except ImportError:
-    pass
 
-try:
-    import pandas as pd
+if _HAS_PANDAS:
     _HAS_PANDAS = True
-except ImportError:
-    pass
 
-try:
-    import pyarrow as pa
+if _HAS_PYARROW:
     _HAS_PYARROW = True
-except ImportError:
-    pass
 
 
 def is_available(lib: str) -> bool:

@@ -1,4 +1,4 @@
-from typing import Callable, Optional, Dict
+from typing import Callable, Optional
 
 
 class Update:

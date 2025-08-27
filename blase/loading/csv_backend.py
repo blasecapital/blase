@@ -34,7 +34,7 @@ def save_batch_polars(df: Any, base_path: Path, file_exists: bool):
         file_exists (bool): Flag indicating whether any previous file has been saved.
     """
     if not file_exists:
-        df.write_csv(df)
+        df.write_csv(base_path)
     else:
         with open(base_path, mode="a") as f:
             df.write_csv(f, include_header=False)

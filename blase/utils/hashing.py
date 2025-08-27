@@ -141,6 +141,19 @@ class Hash:
         serialized = pickle.dumps(obj)
         obj_hash = byte_hasher(serialized)
         return obj_hash
+    
+    def hash_bytes(self, bytes: bytes) -> str:
+        """
+        Generate a hash of any collection of bytes.
+
+        Args:
+            bytes (bytes): The bytes to hash.
+
+        Returns:
+            str: Hash digest string.
+        """
+        obj_hash = byte_hasher(bytes)
+        return obj_hash
 
     def compare_hashes(self, hash1: str, hash2: str) -> bool:
         """

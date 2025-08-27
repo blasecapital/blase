@@ -1,14 +1,11 @@
+from __future__ import annotations
 from typing import Callable, Iterable, Dict, Any, Optional, List
-from pathlib import Path
-from concurrent.futures import ThreadPoolExecutor
 
 import numpy as np
 
-from blase.track import Track
-from blase.utils.hashing import Hash
-
 from blase.extracting.csv_backend import memory_aware_batcher, read_batches_pandas, read_batches_polars
 from blase.utils.backends import resolve_backend
+from blase.track import Track
 
 
 class Extract:
@@ -94,160 +91,153 @@ class Extract:
         track: bool = True
     ) -> Iterable[Any]:
         """
-        Read a CSV file in memory-safe batches using the specified backend.
+        Stream a CSV in memory-safe batches with optional lineage tracking.
 
-        This method streams data in chunks, allowing for efficient processing of large CSV files
-        that may not fit into memory. It supports auto-calculated or manually specified batch sizes,
-        and filters can be applied to restrict which rows are read.
+        This generator reads a CSV file incrementally using either the Polars or
+        Pandas backend and yields `(batch, is_last, meta)` tuples. When `track=True`,
+        the read is recorded as a tracked step (via `Track`), the source file is
+        registered (CAS/DB), and the emitted `meta` includes upstream lineage
+        (e.g., the source data hash and producer step). When `track=False`, no
+        tracking side-effects occur and `meta` is `None`.
 
-        Parameters:
-        -----------
+        Parameters
+        ----------
         file_path : str
-            Path to the CSV file.
+            Path to the CSV file on disk.
 
-        mode : {"auto", "manual"}, default="auto"
-            Determines how batch size is handled:
-            - "auto": Uses a backend memory estimator to determine optimal batch size.
-            - "manual": Uses the provided `batch_size` parameter (required in this mode).
+        mode : {"auto", "manual"}, default "auto"
+            Batch-size selection mode.
+            - ``"auto"``: Determine a batch size via a backend-specific memory
+            heuristic.
+            - ``"manual"``: Use the provided ``batch_size`` (must be a positive int).
 
         batch_size : int, optional
-            Number of rows per batch (required if mode is "manual").
+            Number of rows per batch when ``mode="manual"``. Ignored if
+            ``mode="auto"``.
 
-        use_cols : ["col1", "col2"], optional
-            A list of column name strings.
-            Filters what columns to read.
+        use_cols : list of str, optional
+            Subset of column names to read. If ``None``, all columns are read.
 
-        filter_by : list, optional
-            A list of column-level filters (e.g., [{"col": "country", "value": "USA"}]).
-            Applied after each chunk is read. May be ignored by some backends.
+        filter_by : list[dict] or dict, optional
+            Row-level filters to apply per batch *after* reading. Each filter is a
+            dict (implementation-dependent) such as
+            ``{"col": "City", "value": "SF"}``. A single dict is also accepted and
+            treated as a one-element list. Order is preserved.
 
-        backend : {"pandas", "polars"}, default="polars"
-            The data handling library to use for reading and parsing.
-            - "polars": Optimized for speed and memory efficiency.
-            - "pandas": Standard and robust.
-            
-        track : bool, default=True
-            Whether to log the operation via the `Track` system (if initialized).
+        backend : {"pandas", "polars"}, default "polars"
+            Backend to use for batch reading/parsing.
 
-        Returns:
-        --------
-        Iterable[Any]
-            An iterator over data chunks, where each chunk is a DataFrame-like object
-            (either `pandas.DataFrame` or `polars.DataFrame`, depending on backend).
+        track : bool, default True
+            If ``True``, record a tracked step:
+            - Registers the source CSV in CAS/metadata and binds it as input
+            (role ``"source"``).
+            - Emits lineage-rich ``meta`` containing ``upstream`` (source data hash),
+            ``producer_step``, ``ordinal``, and other hints.
+            If ``False``, yields `(batch, is_last, None)` without any side-effects.
 
-        Example:
-        --------
-        >>> extractor = Extract()
-        >>> for batch, flag, parent_hash in extractor.read_csv(file_path="data/large.csv", mode="auto", backend="pandas"):
-        >>>     process_batch(batch, parent_hash)
-
-        Notes:
+        Yields
         ------
-        - This function does not read the entire dataset into memory.
-        - Users can apply filters post-read in custom transformation steps if needed.
-        - filter_by filters the data in the order of the dicts
-        - Backends must be installed separately (e.g., `pip install polars`).
+        tuple
+            A 3-tuple ``(batch, is_last, meta)``:
+            - ``batch`` : DataFrame-like batch (``pandas.DataFrame`` or
+            ``polars.DataFrame`` depending on backend).
+            - ``is_last`` : bool indicating the final batch for this stream.
+            - ``meta`` : dict with lineage/step info when ``track=True``; ``None``
+            when ``track=False``. When tracked, ``meta`` includes (at minimum):
+            ``{"upstream": [{"id": <data_hash>, "role": "source"}],
+                "producer_step": <step_hash>, "ordinal": <int>, "chunk_size": <int>,
+                "reader_backend": <str>, "use_cols": <list|None>, "filter_by": <list|None>}``.
+
+        Raises
+        ------
+        ValueError
+            If ``mode`` is not one of {"auto", "manual"} or if ``mode="manual"`` and
+            ``batch_size`` is missing/invalid.
+        FileNotFoundError
+            If ``file_path`` does not exist or is not readable.
+        Exception
+            Any backend-specific parsing errors are propagated.
+
+        Notes
+        -----
+        - In tracked mode, the function opens a `StreamStep`, snapshots code/env
+        once, records the source file as input (role ``"source"``), and seals the
+        step on the final batch (or marks aborted on error).
+        - Filtering semantics are post-read and backend-dependent; they operate on
+        each batch independently.
+        - ``mode="auto"`` delegates to a memory-aware batch estimator; exact
+        heuristic may vary by backend.
+        - This function **does not** load the entire dataset into memory.
+
+        Examples
+        --------
+        Basic (untracked) streaming:
+
+        >>> ex = Extract()
+        >>> for batch, is_last, meta in ex.read_csv("data.csv", backend="pandas", track=False):
+        ...     do_something(batch)
+
+        Tracked run with manual batching and column subset:
+
+        >>> ex = Extract()
+        >>> for batch, is_last, meta in ex.read_csv(
+        ...         "data.csv", mode="manual", batch_size=10_000,
+        ...         use_cols=["colA", "colB"], backend="polars", track=True):
+        ...     # meta contains source data hash and step metadata
+        ...     consume(batch)
         """
-
-        # tracking
-        if track:
-            track_dir = Track._validate_run_directory(track=track)
-            run_path = Track._validate_active_run(track_dir=track_dir)
-
-            # Hash file in background
-            hasher = Hash()
-            executor = ThreadPoolExecutor(max_workers=1)
-            file_hash_future = executor.submit(hasher.hash_file, file_path)
-            
-            step_id, step_hash = Track._start_step(
-                run_path=run_path,
-                function="read_csv",
-                params={
-                    "file_path": str(file_path),
-                    "mode": mode,
-                    "batch_size": batch_size,
-                    "use_cols": use_cols,
-                    "filter_by": filter_by,
-                    "backend": backend,
-                    "track": track
-                }
-            )
 
         # dependency handling
         backend = resolve_backend(backend)
 
-        # error handling
+        # argument checks
         if mode not in ("auto", "manual"):
-            raise ValueError(f"Unsupported mode: {mode}. Must be 'auto' or 'manual'.")
+            raise ValueError("Unsupported mode: %r. Must be 'auto' or 'manual'." % mode)
         if mode == "manual" and not batch_size:
-            raise ValueError("When mode is 'manual', batch_size must be specified.")
+            raise ValueError("When mode='manual', batch_size must be specified.")
         if mode == "auto":
             batch_size = memory_aware_batcher(file_path, backend)
 
-        if isinstance(filter_by, dict):
+        if isinstance(filter_by, dict):  # allow single dict
             filter_by = [filter_by]
 
-        # main logic
-        if track:
-            try:
-                file_hash = file_hash_future.result()
-                executor.shutdown()
-                parent_dict = {
-                    'parent': None,
-                    'parent_type': None,
-                    'source_path': file_path,
-                    'logged_by': step_id,
-                    'status': 'complete'
-                }
-                Track._log_data(
-                    run_path=run_path,
-                    file_hash=file_hash,
-                    parent_dict=parent_dict
-                )
-                if backend == "polars":
-                    batch_gen = read_batches_polars(file_path, batch_size, use_cols, filter_by)
-                    wrapped_gen = ((batch, flag, (step_hash, "step")) for batch, flag in batch_gen)
-                    yield from wrapped_gen
+        tracker = Track.get(track)
 
-                elif backend == "pandas":
-                    batch_gen = read_batches_pandas(file_path, batch_size, use_cols, filter_by)
-                    wrapped_gen = ((batch, flag, (step_hash, "step")) for batch, flag in batch_gen)
-                    yield from wrapped_gen
-                
-                Track._end_step(
-                    step_hash=step_hash,
-                    run_path=run_path,
-                    status="completed",
-                    outputs={},
-                    parent=(file_hash, "data")
-                )
-
-            except Exception as e:
-                parent_dict = {
-                    'parent': None,
-                    'parent_type': None,
-                    'source_path': file_path,
-                    'logged_by': step_id,
-                    'status': 'failed'
-                }
-                Track._log_data(
-                    run_path=run_path,
-                    file_hash=file_hash,
-                    parent_dict=parent_dict
-                )
-                Track._end_step(
-                    step_hash=step_hash,
-                    run_path=run_path,
-                    status="failed",
-                    outputs={"error": str(e)}
-                )
-                raise
-        else:
+        # untracked path (no DAG/CAS)
+        if tracker is None:
             if backend == "polars":
-                yield from read_batches_polars(file_path, batch_size, use_cols, filter_by)
+                yield from ((b, last, None) for (b, last) in read_batches_polars(file_path, batch_size, use_cols, filter_by))
+            else:
+                yield from ((b, last, None) for (b, last) in read_batches_pandas(file_path, batch_size, use_cols, filter_by))
+            return
 
-            elif backend == "pandas":
-                yield from read_batches_pandas(file_path, batch_size, use_cols, filter_by)
+        # tracked path
+        params = {"file_path": str(file_path), "batch_size": batch_size, "backend": backend}
+        impl = read_batches_pandas if backend == "pandas" else read_batches_polars
+
+        stream = tracker.stream("blase.Extract.read_csv", params, code_fn=impl)
+
+        # register the source file as data + input binding
+        src_hash = stream.step.register_data(kind="csv", version="1", path_or_bytes=file_path, metadata={})
+        stream.step.add_input(src_hash, role="source", arg_name="file_path")
+
+        try:
+            for i, (batch, is_last) in enumerate(impl(file_path, batch_size, use_cols, filter_by), 1):
+                meta = {
+                    "upstream": [{"id": src_hash, "role": "source"}],
+                    "producer_step": stream.step.step_hash,  # <-- fix
+                    "ordinal": i,
+                    "chunk_size": batch_size,
+                    "reader_backend": backend,
+                    "use_cols": use_cols,
+                    "filter_by": filter_by,
+                }
+                new_meta = stream.emit(last_batch=is_last, meta=meta)
+                yield (batch, is_last, new_meta)
+            stream.close_ok()
+        except Exception as e:
+            stream.close_error(type(e), e, e.__traceback__)
+            raise
 
     def read_json(
         self,

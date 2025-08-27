@@ -5,8 +5,8 @@ import os
 
 from tensorflow.keras.models import Model
 from tensorflow.keras.layers import (
-    Input, Dense, Dropout, Concatenate, GlobalAveragePooling1D, LayerNormalization, 
-    MultiHeadAttention, Add, Flatten, TimeDistributed, LSTM)
+    Input, Dense, Dropout, Concatenate, LayerNormalization, 
+    MultiHeadAttention, Add, LSTM)
 from tensorflow.keras.regularizers import l2
 import tensorflow as tf
 import numpy as np

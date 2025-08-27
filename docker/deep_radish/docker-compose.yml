@@ -1,0 +1,14 @@
+version: "1.0"
+
+services:
+  blase_pi:
+    image: blase_pi
+    container_name: blase_pi
+    build: .
+    volumes:
+      - .:/workspace
+    working_dir: /workspace
+    environment:
+      - PYTHONPATH=/workspace
+    command: sleep infinity
+    

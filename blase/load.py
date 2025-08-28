@@ -5,7 +5,7 @@ from pathlib import Path
 import numpy as np
 
 from blase.loading.csv_backend import save_batch_pandas, save_batch_polars
-from blase.utils.backends import resolve_backend
+from blase.utils.backends import resolve_backend_csv
 from blase.track import Track
 
 class Load:
@@ -194,7 +194,7 @@ class Load:
         ...     )
         >>> print("Final output:", target)
         """
-        backend = resolve_backend(backend)
+        backend = resolve_backend_csv(backend)
         tracker = Track.get(track)
 
         # ---------- Untracked fast-path ----------

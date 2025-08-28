@@ -144,8 +144,7 @@ DDL = [
     # Quickly filter manifests/batches by kind (images vs generic).
     "CREATE INDEX IF NOT EXISTS idx_datasets_kind         ON datasets(kind)",
 
-    # If you often jump from a dataset to its materialized path (restore),
-    # this accelerates the lookup via datasets.manifest_hash.
+    # This accelerates the lookup via datasets.manifest_hash.
     "CREATE INDEX IF NOT EXISTS idx_materializations_hash ON materializations(data_hash)"
 ]
 

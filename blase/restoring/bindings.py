@@ -1,17 +1,34 @@
 from __future__ import annotations
-from typing import Dict, Any, Iterator, Tuple, Optional, Iterable
+from typing import Dict, Any, Iterator, Tuple, Optional, Iterable, Union, List
 from pathlib import Path
 from datetime import datetime
 import os
+import json
 
 from blase.extracting.csv_backend import read_batches_pandas, read_batches_polars
+from blase.extracting.image_backend import (
+    scan_manifest_headers, 
+    shuffle_manifest,
+    ensure_item_content_hashes,
+    compute_manifest_root_hash,
+    plan_image_batches,
+    decode_batch_pil,
+    decode_batch_cv2,
+    iter_batches_from_plan,
+    compute_batch_hash
+)
 from blase.load import Load
-from blase.restoring import store
+from blase.restoring import store, cas
 from blase.utils.hashing import Hash
 
 # simple arg mapping: role -> kwarg
 REGISTRY = {
     "blase.Extract.read_csv": {"source": "file_path"},
+    "blase.Extract.read_images": {
+        "source": "directory",
+        "manifest": "_manifest_hash",
+        "batch": "_batch_desc",
+    },
 }
 
 def apply_registry(function_fqn: str, realized_by_role: Dict[str, Any], kwargs: Dict[str, Any]) -> None:
@@ -31,8 +48,13 @@ def apply_registry(function_fqn: str, realized_by_role: Dict[str, Any], kwargs: 
     if not mapping:
         return
     for role, arg_name in mapping.items():
-        if role in realized_by_role and arg_name:
-            kwargs[arg_name] = str(realized_by_role[role])
+        if role not in realized_by_role or not arg_name:
+            continue
+        val = realized_by_role[role]
+        if isinstance(val, (str, os.PathLike)):
+            kwargs[arg_name] = str(val)
+        else:
+            kwargs[arg_name] = val
 
 # ---------- Restore helpers ----------
 
@@ -76,6 +98,36 @@ def _pick_replay_target(params: Dict[str, Any],
         return base.with_name(f"{stem}_replayed_{stamp}{suf}")
     return base
 
+def _load_cas_json(run_path: Path, sha256_hex: str, *, kind: Optional[str]) -> Dict[str, Any]:
+    """
+    Load a CAS JSON blob by hash and kind, tolerant of legacy layouts.
+    """
+    if not kind:
+        raise ValueError("CAS kind is required to resolve namespaced layout.")
+
+    # 1) Canonical path (namespaced by kind, bucketed aa/bb/hash)
+    cand = [cas.path_for(run_path, kind, sha256_hex)]
+
+    # 2) Legacy fallback: flat (no kind)
+    cand.append(run_path / "cas" / "sha256" / sha256_hex[:2] / sha256_hex[2:4] / sha256_hex)
+
+    # 3) Legacy typo fallback for image.batch.meta -> image.batch.met
+    if kind.endswith(".meta"):
+        legacy_kind = kind[:-1]  # drop the trailing 'a'
+        cand.append(run_path / "cas" / "sha256" / legacy_kind / sha256_hex[:2] / sha256_hex[2:4] / sha256_hex)
+
+    # 4) Reversed bucket order fallback (seen in older runs)
+    cand.append(run_path / "cas" / "sha256" / kind / sha256_hex[2:4] / sha256_hex[:2] / sha256_hex)
+
+    for p in cand:
+        try:
+            with open(p, "rb") as f:
+                return json.loads(f.read().decode("utf-8"))
+        except FileNotFoundError:
+            continue
+
+    raise FileNotFoundError(f"CAS blob not found for kind={kind} hash={sha256_hex}")
+
 # ---------- Restore handlers for streaming/sink steps ----------
 
 def run_read_csv_restore(
@@ -115,7 +167,7 @@ def run_read_csv_restore(
     RuntimeError
         If a provided expected source hash mismatches the current file contents.
     """
-    backend   = params.get("backend", "pandas")
+    backend   = params.get("backend", "polars")
     file_path = str(realized.get("source") or params.get("file_path"))
 
     # Strict verification if the caller provides the expected source hash.
@@ -134,6 +186,159 @@ def run_read_csv_restore(
     impl = read_batches_pandas if backend == "pandas" else read_batches_polars
     for batch, is_last in impl(file_path, batch_size, use_cols, filter_by):
         yield batch, is_last
+
+
+def run_read_images_restore(
+    *,
+    run_path: Path,
+    params: Dict[str, Any],
+    realized: Dict[str, Any],
+    transform_fn=None,   # unused; signature kept for uniformity
+) -> Iterator[Tuple[Any, bool]]:
+    """
+    Replay an Extract.read_images step deterministically.
+
+    Strategy:
+      1) Resolve directory + recorded params.
+      2) If a manifest hash is present, load it and enforce the same root_hash.
+      3) Re-scan headers + content hashes; compute root_hash and compare.
+      4) Rebuild the batch plan (deterministic), optionally validate against recorded batch metas.
+      5) Decode with the recorded backend and yield (batch, is_last).
+    """
+    # ---------- 1) Resolve core params ----------
+    backend   = params.get("backend", "pil")
+    return_tp = params.get("return_type", "np")
+    color     = params.get("color", "rgb")
+    max_side  = params.get("max_side")
+    mode      = params.get("mode", "auto")
+    safety    = params.get("safety_margin", 0.15)
+    max_item_decoded_bytes = params.get("max_item_decoded_bytes")
+    batch_size = params.get("batch_size")
+    target_bytes = params.get("target_batch_bytes")
+    pattern   = params.get("pattern", "**/*.jpg")
+    recursive = bool(params.get("recursive", True))
+    shuffle   = bool(params.get("shuffle", False))
+    seed      = params.get("seed", None)
+    hash_mode = params.get("hash_mode", "content")
+
+    directory = str(realized.get("source") or params.get("directory"))
+    if not directory:
+        raise RuntimeError("read_images restore requires 'source' (directory) or params['directory'].")
+
+    if shuffle and seed is None:
+        raise RuntimeError("Recorded run used shuffle=True but no seed; cannot restore deterministically.")
+
+    # Recorded manifest/batch (optional but recommended)
+    manifest_hash = realized.get("manifest")
+    if manifest_hash:
+        recorded_manifest_desc = _load_cas_json(run_path, manifest_hash, kind="image.manifest")
+        expected_root_hash = (recorded_manifest_desc.get("identity", {}) or {}).get("root_hash") \
+                            or recorded_manifest_desc.get("root_hash")
+    recorded_batches = realized.get("batch") or []
+    recorded_batch_descs = []
+    for b in (recorded_batches if isinstance(recorded_batches, list) else [recorded_batches]):
+        if isinstance(b, str):
+            try:
+                desc = _load_cas_json(run_path, b, kind="image.batch.meta")
+                recorded_batch_descs.append(desc)
+            except FileNotFoundError:
+                recorded_batch_descs.append({})
+        else:
+            recorded_batch_descs.append(b)
+
+    # ---------- 2) Load recorded manifest (if provided) ----------
+    expected_root_hash = None
+    recorded_manifest_desc = None
+    if manifest_hash:
+        recorded_manifest_desc = _load_cas_json(run_path, manifest_hash, kind="image.manifest")
+        expected_root_hash = (
+            recorded_manifest_desc.get("identity", {}).get("root_hash")
+            or recorded_manifest_desc.get("root_hash")  # tolerate older schema
+        )
+
+    # ---------- 3) Rebuild manifest deterministically ----------
+    # Header scan (no pixels)
+    manifest = scan_manifest_headers(
+        directory=directory,
+        pattern=pattern,
+        recursive=recursive,
+        filename_filter=None,
+    )
+    # (Optional) shuffle — must use recorded seed if used during the original run
+    if shuffle:
+        manifest = shuffle_manifest(manifest, seed)
+
+    # Ensure content hashes (use cached fast path if available)
+    manifest = ensure_item_content_hashes(manifest)
+
+    # Compute dataset identity root hash the same way as during the run
+    root_hash = compute_manifest_root_hash(
+        manifest=manifest,
+        directory=directory,
+        pattern=pattern,
+        recursive=recursive,
+        seed=seed,
+        hash_mode=hash_mode,
+    )
+
+    # Enforce identity if we have a recorded manifest
+    if expected_root_hash and root_hash != expected_root_hash:
+        raise RuntimeError(
+            f"Restore aborted: current manifest root_hash ({root_hash[:12]}) "
+            f"does not match recorded ({expected_root_hash[:12]}). Source changed."
+        )
+
+    # ---------- 4) Rebuild batch plan (deterministic) ----------
+    # If target_bytes wasn't recorded, prefer a stable default (avoid RAM-based inference)
+    if mode == "auto" and target_bytes is None:
+        target_bytes = 256 * 1024 * 1024  # 256 MiB default
+
+    batch_plan = plan_image_batches(
+        manifest=manifest,
+        mode=mode,
+        batch_size=batch_size,
+        target_batch_bytes=target_bytes,
+        safety_margin=safety,
+        max_item_decoded_bytes=max_item_decoded_bytes,
+        max_side=max_side,
+    )
+
+    # Optional validation against recorded batch metas
+    recorded_batch_descs: List[Dict[str, Any]] = []
+    if recorded_batches:
+        # Normalize to list of dicts
+        rec_hashes = recorded_batches if isinstance(recorded_batches, list) else [recorded_batches]
+        for b in rec_hashes:
+            desc = _load_cas_json(run_path, b, kind="image.batch.meta") if isinstance(b, str) else b
+            recorded_batch_descs.append(desc)
+
+    impl = decode_batch_pil if backend == "pil" else decode_batch_cv2
+
+    # ---------- 5) Decode and yield ----------
+    for i, planned in enumerate(iter_batches_from_plan(batch_plan), 1):
+        items = planned["items"]
+        # Recompute the same batch_hash we logged originally
+        batch_hash = compute_batch_hash(root_hash, items)
+
+        # Cross-check vs recorded batch meta when available (count + optional hash)
+        if recorded_batch_descs:
+            if i-1 >= len(recorded_batch_descs):
+                raise RuntimeError("Recorded batch metas shorter than planned batches; cannot restore.")
+            rec = recorded_batch_descs[i-1]
+            rec_count = rec.get("count")
+            if rec_count is not None and rec_count != len(items):
+                raise RuntimeError(
+                    f"Batch #{i} size mismatch: recorded={rec_count}, planned={len(items)}."
+                )
+            rec_hash = rec.get("batch_hash")
+            if rec_hash and rec_hash != batch_hash:
+                raise RuntimeError(
+                    f"Batch #{i} hash mismatch: recorded={rec_hash[:12]}, planned={batch_hash[:12]}."
+                )
+
+        decoded = impl(items, return_tp, color, max_side)
+        is_last = bool(planned.get("is_last", False))
+        yield decoded, is_last
 
 def run_apply_function_restore(
     *,
@@ -293,7 +498,8 @@ def run_save_to_csv_replay(
 
 # Public registry of handlers (by function FQN)
 RESTORE_HANDLERS: Dict[str, Any] = {
-    "blase.Extract.read_csv":    run_read_csv_restore,
+    "blase.Extract.read_csv": run_read_csv_restore,
+    "blase.Extract.read_images": run_read_images_restore,
     "blase.Transform.apply_function": run_apply_function_restore,
-    "blase.Load.save_to_csv":    run_save_to_csv_replay,
+    "blase.Load.save_to_csv": run_save_to_csv_replay
 }

@@ -390,6 +390,31 @@ def _exec_plan_for_step(
             )
             continue
 
+        if fqn == "blase.Extract.read_images":
+            ins = store.load_step_inputs(run_path, sh)
+
+            # Recorded artifacts (optional but preferred for deterministic restore)
+            manifest_hash = next((i["data_hash"] for i in ins if i["role"] == "manifest"), None)
+            batch_hashes  = [i["data_hash"] for i in ins if i["role"] == "batch"]
+
+            realized = {}
+            # Prefer the recorded directory param; if you later add a 'source' role
+            # that resolves to a path, you can override it here.
+            if "directory" in st["params"]:
+                realized["source"] = st["params"]["directory"]
+            if manifest_hash:
+                realized["manifest"] = manifest_hash
+            if batch_hashes:
+                realized["batch"] = batch_hashes  # list is fine; binding will normalize
+
+            upstream = bindings.run_read_images_restore(
+                run_path=run_path,
+                params=st["params"],
+                realized=realized,
+                transform_fn=None,
+            )
+            continue
+
         if fqn == "blase.Transform.apply_function":
             ins = store.load_step_inputs(run_path, sh)
             fn  = code.load_callable_from_blob(cas.path_for(run_path, "code", store.pick_code_hash(ins)))
@@ -856,6 +881,23 @@ def cmd_run(args):
         if fqn == "blase.Load.save_to_csv":
             # For a sink, verify by consuming its upstream (don’t write)
             gen = _upstream_for_sink(step_hash)
+        elif fqn == "blase.Extract.read_images":
+            # Build a realized map from recorded inputs so replay is strict
+            ins = store.load_step_inputs(run_path, step_hash)
+            manifest_hash = next((i["data_hash"] for i in ins if i["role"] == "manifest"), None)
+            batch_hashes  = [i["data_hash"] for i in ins if i["role"] == "batch"]
+            realized = {"source": st["params"].get("directory")}
+            if manifest_hash:
+                realized["manifest"] = manifest_hash
+            if batch_hashes:
+                realized["batch"] = batch_hashes
+
+            gen = bindings.run_read_images_restore(
+                run_path=run_path,
+                params=st["params"],
+                realized=realized,
+                transform_fn=None,
+            )
         else:
             # For producers/transforms, restore directly
             gen = restore_step(run_path, step_hash, kind="csv")
@@ -893,10 +935,27 @@ def cmd_run(args):
             print(out_path)
             return 0
         else:
-            # Non-sinks just stream the restored batches (caller can pipe elsewhere)
-            gen = restore_step(run_path, step_hash, kind="csv")
+            if fqn == "blase.Extract.read_images":
+                ins = store.load_step_inputs(run_path, step_hash)
+                manifest_hash = next((i["data_hash"] for i in ins if i["role"] == "manifest"), None)
+                batch_hashes  = [i["data_hash"] for i in ins if i["role"] == "batch"]
+                realized = {"source": st["params"].get("directory")}
+                if manifest_hash:
+                    realized["manifest"] = manifest_hash
+                if batch_hashes:
+                    realized["batch"] = batch_hashes
+
+                gen = bindings.run_read_images_restore(
+                    run_path=run_path,
+                    params=st["params"],
+                    realized=realized,
+                    transform_fn=None,
+                )
+            else:
+                gen = restore_step(run_path, step_hash, kind="csv")
+
             for i, (b, last) in enumerate(gen, 1):
-                print(f"batch {i}: {len(b)} rows, last={last}")
+                print(f"batch {i}: {len(b)} items, last={last}")
                 if limit_batches and i >= limit_batches:
                     break
             return 0

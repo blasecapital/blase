@@ -49,7 +49,6 @@ def build_manifest_descriptor(
         A compact, versioned manifest descriptor with:
           - "type": "image.manifest"
           - "version": "1"
-          - "created_at": ISO8601 UTC timestamp
           - "scan": {directory, pattern, recursive, seed, hash_mode}
           - "identity": {root_hash, count, corrupt_count}
           - "stats": {bytes_{min,median,max}, width_{min,median,max}, height_{min,median,max},
@@ -72,8 +71,6 @@ def build_manifest_descriptor(
     >>> desc["identity"]["count"], desc["identity"]["root_hash"][:8]
     (12873, '9c41f2d0')
     """
-    created_at = datetime.now(timezone.utc).isoformat()
-
     # Pull simple sequences for stats (ignore missing/None)
     widths  = [int(r["width"])  for r in manifest if (r.get("width")  is not None)]
     heights = [int(r["height"]) for r in manifest if (r.get("height") is not None)]
@@ -105,7 +102,6 @@ def build_manifest_descriptor(
     descriptor: Dict[str, Any] = {
         "type": "image.manifest",
         "version": "1",
-        "created_at": created_at,
         "scan": {
             "directory": directory,
             "pattern": pattern,

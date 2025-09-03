@@ -375,19 +375,23 @@ def run_apply_function_restore(
     RuntimeError
         If ``"source"`` is missing from realized inputs.
     """
-    backend    = params.get("backend", "pandas")
-    batch_size = params.get("batch_size")
-    use_cols   = params.get("use_cols")
-    filter_by  = params.get("filter_by")
-
-    source_path = realized.get("source")
-    if not source_path:
+    upstream = realized.get("source") or realized.get("source_gen")
+    if upstream is None:
         raise RuntimeError("restore: missing realized 'source' for Transform.apply_function")
 
-    if backend == "polars":
-        gen = read_batches_polars(source_path, batch_size, use_cols, filter_by)
+    # If upstream is already a generator of (batch, is_last), use it.
+    if not isinstance(upstream, (str, os.PathLike)):
+        gen = upstream
     else:
-        gen = read_batches_pandas(source_path, batch_size, use_cols, filter_by)
+        # Legacy CSV path
+        source_path = str(upstream)
+        backend    = params.get("backend", "polars")
+        batch_size = params.get("batch_size")
+        use_cols   = params.get("use_cols")
+        filter_by  = params.get("filter_by")
+        gen = read_batches_polars(source_path, batch_size, use_cols, filter_by) \
+              if backend == "polars" else \
+              read_batches_pandas(source_path, batch_size, use_cols, filter_by)
 
     for batch, is_last in gen:
         yield transform_fn(batch), is_last

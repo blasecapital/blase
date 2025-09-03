@@ -21,11 +21,16 @@ def _step_row(db: Path, step_hash: str) -> sqlite3.Row:
         raise KeyError(f"step not found: {step_hash}")
     return row
 
-def _source_hash_for_step(db: Path, step_hash: str) -> Optional[str]:
-    r = _fetchone(db, "SELECT data_hash FROM step_inputs WHERE step_hash=? AND role='source'", (step_hash,))
+
+def _input_hash_for_role(db, step_hash: str, role: str) -> Optional[str]:
+    r = _fetchone(
+        db,
+        "SELECT data_hash FROM step_inputs WHERE step_hash = ? AND role = ? LIMIT 1",
+        (step_hash, role),
+    )
     return r["data_hash"] if r else None
 
-def _latest_with_source_before(db: Path, fqn_like: str, source_hash: str, ts_end: str) -> Optional[str]:
+def _latest_with_input_before(db, fqn_like: str, *, role: str, data_hash: str, ts_before: str) -> Optional[str]:
     r = _fetchone(
         db,
         """
@@ -33,14 +38,22 @@ def _latest_with_source_before(db: Path, fqn_like: str, source_hash: str, ts_end
         FROM steps s
         JOIN step_inputs i ON i.step_hash = s.step_hash
         WHERE s.function_fqn LIKE ?
-          AND i.role='source' AND i.data_hash=?
+          AND i.role = ?
+          AND i.data_hash = ?
           AND s.ts_start <= ?
         ORDER BY s.ts_start DESC
         LIMIT 1
         """,
-        (fqn_like, source_hash, ts_end),
+        (fqn_like, role, data_hash, ts_before),
     )
     return r["step_hash"] if r else None
+
+# Back-compat wrappers (CSV-style "source")
+def _source_hash_for_step(db, step_hash: str) -> Optional[str]:
+    return _input_hash_for_role(db, step_hash, "source")
+
+def _latest_with_source_before(db, fqn_like: str, data_hash: str, ts_before: str) -> Optional[str]:
+    return _latest_with_input_before(db, fqn_like, role="source", data_hash=data_hash, ts_before=ts_before)
 
 def plan_for_step(run_path: Path, tip_step_hash: str) -> List[str]:
     """
@@ -105,7 +118,9 @@ def plan_for_step(run_path: Path, tip_step_hash: str) -> List[str]:
     db = _db(run_path)
     tip = _step_row(db, tip_step_hash)
     fqn = tip["function_fqn"]
-    ts = tip["ts_start"]
+    ts  = tip["ts_start"]
+
+    # CSV-style “source” input if present
     src = _source_hash_for_step(db, tip_step_hash)
 
     if fqn.endswith("Load.save_to_csv"):
@@ -113,19 +128,43 @@ def plan_for_step(run_path: Path, tip_step_hash: str) -> List[str]:
         if src:
             tr = _latest_with_source_before(db, "%blase.Transform.apply_function%", src, ts)
             if tr:
-                ex = _latest_with_source_before(db, "%blase.Extract.read_csv%", src, _step_row(db, tr)["ts_start"])
-                if ex: 
-                    plan.append(ex)
+                # Prefer image upstream if transform consumed a manifest
+                man = _input_hash_for_role(db, tr, "manifest")
+                if man:
+                    ex_img = _latest_with_input_before(
+                        db, "%blase.Extract.read_images%",
+                        role="manifest", data_hash=man,
+                        ts_before=_step_row(db, tr)["ts_start"]
+                    )
+                    if ex_img:
+                        plan.append(ex_img)
+                else:
+                    ex_csv = _latest_with_source_before(
+                        db, "%blase.Extract.read_csv%",
+                        src, _step_row(db, tr)["ts_start"]
+                    )
+                    if ex_csv:
+                        plan.append(ex_csv)
                 plan.append(tr)
         plan.append(tip_step_hash)
         return plan
 
     if fqn.endswith("Transform.apply_function"):
-        plan = []
-        if src:
-            ex = _latest_with_source_before(db, "%blase.Extract.read_csv%", src, ts)
-            if ex: 
-                plan.append(ex)
+        plan: List[str] = []
+        # If this transform consumed an image manifest, link to read_images
+        man = _input_hash_for_role(db, tip_step_hash, "manifest")
+        if man:
+            ex_img = _latest_with_input_before(
+                db, "%blase.Extract.read_images%",
+                role="manifest", data_hash=man, ts_before=ts
+            )
+            if ex_img:
+                plan.append(ex_img)
+        elif src:
+            # Else fall back to CSV source
+            ex_csv = _latest_with_source_before(db, "%blase.Extract.read_csv%", src, ts)
+            if ex_csv:
+                plan.append(ex_csv)
         plan.append(tip_step_hash)
         return plan
 

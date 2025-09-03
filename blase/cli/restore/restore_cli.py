@@ -584,6 +584,84 @@ def _normalize_plan_nodes(run_path: Path, plan):
             out.append({"step_hash": h, "function_fqn": st["function_fqn"]})
     return out
 
+STREAM_FQNS = (
+    "blase.Extract.read_csv",
+    "blase.Extract.read_images",
+    "blase.Transform.apply_function",
+)
+
+def _is_stream_fqn(fqn: str) -> bool:
+    return any(fqn.endswith(s) for s in STREAM_FQNS)
+
+def _build_stream_for_step(run_path: Path, step_hash: str):
+    """Return a (batch, is_last) generator for any streaming step."""
+    st  = store.load_step(run_path, step_hash)
+    fqn = st["function_fqn"]
+
+    # ---- Extract.read_csv ----
+    if fqn.endswith("Extract.read_csv"):
+        ins = store.load_step_inputs(run_path, step_hash)
+        realized = {}
+        src_hash = next((i["data_hash"] for i in ins if i["role"] == "source"), None)
+        if src_hash:
+            realized["__expected_source_hash__"] = src_hash
+        return bindings.run_read_csv_restore(
+            run_path=run_path, params=st["params"], realized=realized, transform_fn=None
+        )
+
+    # ---- Extract.read_images ----
+    if fqn.endswith("Extract.read_images"):
+        ins = store.load_step_inputs(run_path, step_hash)
+        manifest_hash = next((i["data_hash"] for i in ins if i["role"] == "manifest"), None)
+        batch_hashes  = [i["data_hash"] for i in ins if i["role"] == "batch"]
+        realized = {"source": st["params"].get("directory")}
+        if manifest_hash:
+            realized["manifest"] = manifest_hash
+        if batch_hashes:
+            realized["batch"] = batch_hashes
+        return bindings.run_read_images_restore(
+            run_path=run_path, params=st["params"], realized=realized, transform_fn=None
+        )
+
+    # ---- Transform.apply_function (chain to its immediate upstream) ----
+    if fqn.endswith("Transform.apply_function"):
+        raw_plan = planner.plan_for_step(run_path, step_hash) or []
+        nodes = _normalize_plan_nodes(run_path, raw_plan)
+        try:
+            idx = next(i for i,n in enumerate(nodes) if n["step_hash"] == step_hash)
+        except StopIteration:
+            raise SystemExit("restore: transform step not found in plan")
+        upstream_node = None
+        for j in range(idx-1, -1, -1):
+            if _is_stream_fqn(nodes[j]["function_fqn"]):
+                upstream_node = nodes[j]; break
+        if upstream_node is None:
+            # Fallback: use recorded CSV source path if present (older runs)
+            ins = store.load_step_inputs(run_path, step_hash)
+            src = next((i["data_hash"] for i in ins if i["role"] == "source"), None)
+            if not src:  # nothing to chain
+                raise SystemExit("restore: cannot locate upstream producer for Transform.apply_function")
+            p = store.get_materialized_path(run_path, src) or store.get_recorded_source_path(run_path, src)
+            if not p or not p.exists():
+                p = materialize.ensure_local(run_path, src, kind=store.get_data_kind(run_path, src))
+            upstream_gen = p.as_posix()  # path-like; binding will read CSV
+        else:
+            upstream_gen = _build_stream_for_step(run_path, upstream_node["step_hash"])
+
+        # load the exact user callable
+        ins = store.load_step_inputs(run_path, step_hash)
+        code_hash = store.pick_code_hash(ins)
+        fn = code.load_callable_from_blob(cas.path_for(run_path, "code", code_hash))
+
+        return bindings.run_apply_function_restore(
+            run_path=run_path, params=st["params"],
+            realized={"source": upstream_gen}, transform_fn=fn
+        )
+
+    # Non-stream fallback
+    from blase import restore as restore_mod
+    return restore_mod.step(run_path, step_hash, kind="data")
+
 def cmd_run(args):
     """
     Execute the ``blase restore run`` command for either a data hash or a step hash.
@@ -789,7 +867,8 @@ def cmd_run(args):
 
         # Non-sink producer: stream verify only for now
         if args.mode in ("verify",):
-            gen = restore_step(run_path, prod, kind=("csv" if (store.get_data_kind(run_path, data_hash) == "csv") else "data"))
+            gen = _build_stream_for_step(run_path, prod) if _is_stream_fqn(store.load_step(run_path, prod)["function_fqn"]) \
+                else restore_step(run_path, prod, kind="data")
             total = 0
             for i, (b, last) in enumerate(gen, 1):
                 n = len(b) if hasattr(b, "__len__") else "?"
@@ -849,58 +928,37 @@ def cmd_run(args):
             print(f"  blase restore run  --step {step_hash} --mode replay")
             return 3
 
-    # Helper: pick nearest upstream compute step (prefer Transform, else Extract)
-    def _upstream_for_sink(target_step_hash: str):
-        raw_plan = planner.plan_for_step(run_path, target_step_hash)
+    def _upstream_for_sink(run_path: Path, target_step_hash: str):
+        """Nearest upstream compute (Transform preferred, else any Extract.*)."""
+        raw_plan = planner.plan_for_step(run_path, target_step_hash) or []
         nodes = _normalize_plan_nodes(run_path, raw_plan)
-
-        # find index of the sink in plan
         try:
-            idx = next(i for i, n in enumerate(nodes) if n["step_hash"] == target_step_hash)
+            idx = next(i for i,n in enumerate(nodes) if n["step_hash"] == target_step_hash)
         except StopIteration:
-            raise SystemExit("restore: target step not found in plan")
+            raise SystemExit("restore: target sink step not found in plan")
 
-        # scan backward to find nearest Transform
         upstream = None
-        for j in range(idx - 1, -1, -1):
+        # prefer Transform
+        for j in range(idx-1, -1, -1):
             if nodes[j]["function_fqn"].endswith("Transform.apply_function"):
-                upstream = nodes[j]
-                break
-        # fallback: nearest Extract
+                upstream = nodes[j]; break
+        # else any Extract.*
         if upstream is None:
-            for j in range(idx - 1, -1, -1):
-                if nodes[j]["function_fqn"].endswith("Extract.read_csv"):
-                    upstream = nodes[j]
-                    break
+            for j in range(idx-1, -1, -1):
+                if nodes[j]["function_fqn"].startswith("blase.Extract."):
+                    upstream = nodes[j]; break
         if upstream is None:
-            raise SystemExit("No upstream compute step found to feed Load.save_to_csv replay.")
-        return restore_step(run_path, upstream["step_hash"], kind="csv")
+            raise SystemExit("No upstream compute step found for sink replay.")
+        return _build_stream_for_step(run_path, upstream["step_hash"])
 
     # ---- VERIFY: stream results without writing ----
     if args.mode == "verify":
         if fqn == "blase.Load.save_to_csv":
-            # For a sink, verify by consuming its upstream (don’t write)
-            gen = _upstream_for_sink(step_hash)
-        elif fqn == "blase.Extract.read_images":
-            # Build a realized map from recorded inputs so replay is strict
-            ins = store.load_step_inputs(run_path, step_hash)
-            manifest_hash = next((i["data_hash"] for i in ins if i["role"] == "manifest"), None)
-            batch_hashes  = [i["data_hash"] for i in ins if i["role"] == "batch"]
-            realized = {"source": st["params"].get("directory")}
-            if manifest_hash:
-                realized["manifest"] = manifest_hash
-            if batch_hashes:
-                realized["batch"] = batch_hashes
-
-            gen = bindings.run_read_images_restore(
-                run_path=run_path,
-                params=st["params"],
-                realized=realized,
-                transform_fn=None,
-            )
+            gen = _upstream_gen_for_sink(run_path, step_hash)
+        elif _is_stream_fqn(fqn):
+            gen = _build_stream_for_step(run_path, step_hash)
         else:
-            # For producers/transforms, restore directly
-            gen = restore_step(run_path, step_hash, kind="csv")
+            gen = restore_step(run_path, step_hash, kind="data")
 
         total = 0
         for i, (b, last) in enumerate(gen, 1):
@@ -918,45 +976,23 @@ def cmd_run(args):
 
     # ---- REPLAY: for sinks, wire upstream; for non-sinks, just restore ----
     if args.mode == "replay":
-        backend_override = getattr(args, "backend", None)
-        target_override = getattr(args, "to", None)
-
         if fqn == "blase.Load.save_to_csv":
-            upstream_gen = _upstream_for_sink(step_hash)
+            upstream_gen = _upstream_gen_for_sink(run_path, step_hash)
             handler = bindings.RESTORE_HANDLERS[fqn]
             out_path = handler(
-                run_path=run_path,
-                params=st["params"],
-                realized={},                   # not needed for replay write
-                upstream_gen=upstream_gen,
-                target_override=target_override,       # optional --to
-                backend_override=backend_override  # optional --backend
+                run_path=run_path, params=st["params"], realized={},
+                upstream_gen=upstream_gen, target_override=getattr(args, "to", None),
+                backend_override=getattr(args, "backend", None)
             )
             print(out_path)
             return 0
         else:
-            if fqn == "blase.Extract.read_images":
-                ins = store.load_step_inputs(run_path, step_hash)
-                manifest_hash = next((i["data_hash"] for i in ins if i["role"] == "manifest"), None)
-                batch_hashes  = [i["data_hash"] for i in ins if i["role"] == "batch"]
-                realized = {"source": st["params"].get("directory")}
-                if manifest_hash:
-                    realized["manifest"] = manifest_hash
-                if batch_hashes:
-                    realized["batch"] = batch_hashes
-
-                gen = bindings.run_read_images_restore(
-                    run_path=run_path,
-                    params=st["params"],
-                    realized=realized,
-                    transform_fn=None,
-                )
-            else:
-                gen = restore_step(run_path, step_hash, kind="csv")
-
+            gen = _build_stream_for_step(run_path, step_hash) if _is_stream_fqn(fqn) \
+                else restore_step(run_path, step_hash, kind="data")
             for i, (b, last) in enumerate(gen, 1):
-                print(f"batch {i}: {len(b)} items, last={last}")
-                if limit_batches and i >= limit_batches:
+                n = (len(b) if hasattr(b, "__len__") else "?")
+                print(f"batch {i}: {n} items, last={last}")
+                if getattr(args, "limit_batches", None) and i >= args.limit_batches:
                     break
             return 0
 

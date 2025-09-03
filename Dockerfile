@@ -50,6 +50,7 @@ RUN conda install -y \
     pytest \
     pytest-cov \
     opencv \
+    ruff \
     more-itertools \
     numpy=2.0.2 \
     pandas && \

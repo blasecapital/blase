@@ -271,7 +271,7 @@ class Extract:
         color: Literal["rgb", "gray"] = "rgb",
         max_side: Optional[int] = None,
         track: bool = True
-    ) -> Iterator[dict]:
+    ) -> Iterator:
         """
         Yield memory-aware batches of images from a directory.
 
@@ -524,11 +524,7 @@ class Extract:
                 }
                 new_meta = stream.emit(last_batch=batch["is_last"], meta=meta)
 
-                yield {
-                    "paths": [it["abs_path"] for it in batch["items"]],
-                    "images": decoded,
-                    "meta": new_meta,
-                }
+                yield [it["abs_path"] for it in batch["items"]], batch["is_last"], decoded, new_meta
 
             stream.close_ok()
 

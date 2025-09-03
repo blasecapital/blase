@@ -176,14 +176,30 @@ class Transform:
             m = meta or {}
             params = {
                 "fn_qualname": fn_qual,
-                # pull from Extract meta; ok if None, restore will still have a fallback
-                "batch_size": m.get("chunk_size"),
-                "reader_backend": m.get("reader_backend"),
-                "use_cols": m.get("use_cols"),
-                "filter_by": m.get("filter_by"),
             }
 
-            # Open one tracked step for the whole stream; snapshot code/env once
+            # batch size: support both key names
+            bs = m.get("chunk_size")
+            if bs is None:
+                bs = m.get("batch_size")
+            if bs is not None:
+                params["batch_size"] = int(bs)
+
+            # backend aliasing (old runs used 'reader_backend')
+            be = m.get("reader_backend") or m.get("backend")
+            if be is not None:
+                params["backend"] = be
+
+            # keep existing CSV hints
+            for k in ("use_cols", "filter_by"):
+                if m.get(k) is not None:
+                    params[k] = m[k]
+
+            # optional image-ish hints (harmless)
+            for k in ("return_type", "color", "max_side", "mode", "target_batch_bytes"):
+                if m.get(k) is not None:
+                    params[k] = m[k]
+
             self._stream = tracker.stream("blase.Transform.apply_function", params, code_fn=transform_func)
             self._fn_tag = fn_qual
 

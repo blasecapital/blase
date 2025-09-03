@@ -1,10 +1,16 @@
 from __future__ import annotations
-from typing import Any, Optional, Dict, Tuple, Callable
+from typing import Any, Optional, Dict, Tuple, Callable, Literal
 from pathlib import Path
 
 import numpy as np
 
 from blase.loading.csv_backend import save_batch_pandas, save_batch_polars
+from blase.loading.img_parquet_backend import (
+    _compute_shard_path,
+    _build_parquet_table_from_images,
+    _write_parquet_table,
+    _compute_shard_path,
+)
 from blase.utils.backends import resolve_backend_csv
 from blase.track import Track
 
@@ -85,6 +91,24 @@ class Load:
             p = Path(path).resolve()
             p.parent.mkdir(parents=True, exist_ok=True)
             return p
+        
+    def _bump_counter(
+        self,
+        base_dir: Path,
+        shard_prefix: str
+    ) -> int:
+        """
+        Stateless-ish counter across calls (process local).
+        """
+        if not hasattr(self, "_global_parquet_counters"):
+            self._global_parquet_counters = {}
+        key = (str(base_dir), shard_prefix)
+        self._global_parquet_counters[key] = self._global_parquet_counters.get(key, 0) + 1
+        return self._global_parquet_counters[key]
+
+    def _bump_stream_counter(self) -> int:
+        self._parquet_counter = int(getattr(self, "_parquet_counter", 0)) + 1
+        return self._parquet_counter
     
     # --- Main API ---
 
@@ -279,8 +303,179 @@ class Load:
 
         return str(target), last_batch, new_meta
 
-    def save_to_parquet(self, data: Any, path: str, mode: str = "overwrite"):
-        pass
+    def save_images_to_parquet(
+        self,
+        *,
+        data: Any,                      # (images, labels, paths) OR just images; see _normalize_images_batch()
+        last_batch: bool,
+        meta: Optional[Dict[str, Any]] = None,   # upstream lineage (manifest_root_hash, batch_hash, etc.)
+        path: Optional[str] = None,        # base dir for shards
+        file_name: Optional[str] = None,
+        subdir: str = "parquet_data",            # used if target_dir is None and use_blase_path=True
+        shard_prefix: str = "batch",
+        encode: Literal["jpeg", "png"] = "jpeg",
+        jpeg_quality: int = 95,
+        compression: Literal["zstd", "snappy"] = "zstd",
+        include_paths: bool = True,              # store original rel paths in a column
+        use_blase_path: bool = True,             # mirror save_to_csv behavior
+        on_conflict: Literal["overwrite","fail","rename"] = "overwrite",
+        track: bool = True,
+    ) -> Tuple[str, bool, Dict[str, Any]]:
+        """
+        Write one Parquet shard per incoming batch of images.
+
+        - Encodes images (np/tensor/PIL) to JPEG/PNG bytes.
+        - Builds a small tabular schema (img_bytes + label + basic dims + lineage).
+        - One tracked stream per (target_dir, shard_prefix, encode, compression).
+
+        Parameters
+        ----------
+        data : Any
+            _description_
+        meta : Optional[Dict[str, Any]], optional
+            _description_, by default None
+        encode : Literal[&quot;jpeg&quot;, &quot;png&quot;], optional
+            _description_, by default "jpeg"
+        jpeg_quality : int, optional
+            _description_, by default 95
+        compression : Literal[&quot;zstd&quot;, &quot;snappy&quot;], optional
+            _description_, by default "zstd"
+        include_paths : bool, optional
+            _description_, by default True
+        track : bool, optional
+            _description_, by default True
+
+        Returns
+        -------
+        Tuple[str, bool, Dict[str, Any]]
+            (shard_path:str, last_batch:bool, meta_out:dict)
+        """
+        tracker = Track.get(track)
+
+        # ---------- Resolve where shards go ----------
+        base_dir = self._resolve_target_path(
+            tracker=tracker,
+            use_blase_path=use_blase_path,
+            path=path,
+            file_name=file_name,
+            subdir=subdir,
+        )
+
+        # ---------- Untracked fast-path ----------
+        if tracker is None or False:
+            shard_path = _compute_shard_path(
+                base_dir=base_dir,
+                shard_prefix=shard_prefix,
+                meta=meta,
+                fallback_idx=self._bump_counter(base_dir, shard_prefix)
+            )
+            table = _build_parquet_table_from_images(
+                data=data,
+                meta=meta,
+                encode=encode,
+                jpeg_quality=jpeg_quality,
+                include_paths=include_paths
+            )
+            _write_parquet_table(
+                table,
+                shard_path,
+                compression=compression,
+                on_conflict=on_conflict
+            )
+            return str(shard_path), last_batch, (meta or {})
+        
+        # ---------- Tracked path ----------
+        # Stream identity: one stream per (base_dir, prefix, encode, compression)
+        new_stream = (
+            self._stream is None
+            or self._parquet_base_dir != base_dir
+            or self._parquet_prefix != shard_prefix
+            or self._parquet_encode != encode
+            or self._parquet_comp != compression
+        )
+        if new_stream:
+            if self._stream is not None:
+                self._stream.close_ok()
+
+            params = {
+                "target_dir": str(base_dir),
+                "shard_prefix": shard_prefix,
+                "encode": encode,
+                "jpeg_quality": int(jpeg_quality),
+                "compression": compression,
+                "use_blase_path": bool(use_blase_path),
+            }
+            self._stream = tracker.stream(
+                "blase.Load.save_to_parquet", 
+                params,
+                code_fn=self.save_images_to_parquet
+                )
+            self._parquet_base_dir = base_dir
+            self._parquet_prefix = shard_prefix
+            self._parquet_encode = encode
+            self._parquet_comp = compression
+            self._parquet_counter = 0
+
+        # 1) Build deterministic shard path (prefer meta["ordinal"] if present)
+        shard_path = _compute_shard_path(
+            base_dir=base_dir,
+            shard_prefix=shard_prefix,
+            meta=meta,
+            fallback_idx=self._bump_stream_counter()
+        )
+
+        # 2) Encode + build Arrow table
+        try:
+            table = _build_parquet_table_from_images(
+                data=data,
+                meta=meta,
+                encode=encode,
+                jpeg_quality=jpeg_quality,
+                include_paths=include_paths
+            )
+            _write_parquet_table(
+                table,
+                shard_path,
+                compression=compression,
+                on_conflict=on_conflict
+            )
+        except Exception as e:
+            self._stream.close_error(type(e), e, e.__traceback__)
+            self._stream = None
+            self._parquet_base_dir = None
+            self._parquet_prefix = None
+            self._parquet_encode = None
+            self._parquet_comp = None
+            self._parquet_counter = 0
+            raise
+
+        # 3) Per-batch lineage (upstream goes via meta)
+        new_meta = self._stream.emit(last_batch=last_batch, meta=meta)
+
+        # 4) Register shard as a data output (kind='parquet'); on last, optionally write an index
+        shard_hash = self._stream.step.register_data(
+            kind="parquet",
+            version="1",
+            path_or_bytes=shard_path,
+            metadata={"shard_path": str(shard_path)}
+        )
+        self._stream.step.add_output(shard_hash, name="parquet_shard")
+
+        if last_batch:
+            # OPTIONAL: write a tiny JSON index of shards (placeholder)
+            # idx_path = _write_parquet_index(self._stream.step, base_dir, shard_prefix)
+            # idx_hash = self._stream.step.register_data(kind="parquet.index", version="1", path_or_bytes=idx_path)
+            # self._stream.step.add_output(idx_hash, name="parquet_index")
+
+            self._stream.close_ok()
+            self._stream = None
+            self._parquet_base_dir = None
+            self._parquet_prefix = None
+            self._parquet_encode = None
+            self._parquet_comp = None
+            self._parquet_counter = 0
+
+        return str(shard_path), last_batch, new_meta        
 
     def save_to_npy(self, data: np.ndarray, path: str):
         pass

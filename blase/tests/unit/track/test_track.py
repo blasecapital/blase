@@ -187,6 +187,7 @@ def test_emit_records_upstream_edges(tracker: Track):
     db = _db_path(tracker)
     ss = tracker.stream("blase.Transform.apply", params={})
     meta = {"upstream": [{"id": "abc", "role": "input"}, {"id": "def", "role": "input"}]}
+    ss.step.add_upstream_from_meta(meta)
     ss.emit(last_batch=True, meta=meta)
     ss.close_ok()
     rows = _q(db, "SELECT data_hash FROM step_inputs WHERE step_hash=?", (ss.step_hash,))

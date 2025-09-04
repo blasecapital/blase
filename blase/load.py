@@ -287,6 +287,7 @@ class Load:
             raise
 
         # 2) per-batch lineage + seal on last batch
+        self._stream.step.add_upstream_from_meta(meta) 
         new_meta = self._stream.emit(last_batch=last_batch, meta=meta)
 
         # 3) on final batch, register final file and close the stream
@@ -406,7 +407,7 @@ class Load:
                 "use_blase_path": bool(use_blase_path),
             }
             self._stream = tracker.stream(
-                "blase.Load.save_to_parquet", 
+                "blase.Load.save_images_to_parquet", 
                 params,
                 code_fn=self.save_images_to_parquet
                 )
@@ -450,6 +451,23 @@ class Load:
             raise
 
         # 3) Per-batch lineage (upstream goes via meta)
+        # try to capture upstream lineage
+        if isinstance(meta, dict):
+            up = (meta.get("upstream") or [])
+            for u in up:
+                rid = u.get("id"); role = u.get("role")
+                if rid and role in {"batch", "batch_desc", "manifest"}:
+                    try:
+                        self._stream.step.add_input(rid, role=role, arg_name=None)
+                    except Exception:
+                        pass
+        # optionally also keep the root hash for debugging
+        rh = (meta or {}).get("manifest_root_hash")
+        if rh:
+            try:
+                self._stream.step.add_input(rh, role="manifest_root", arg_name=None)
+            except Exception:
+                pass
         new_meta = self._stream.emit(last_batch=last_batch, meta=meta)
 
         # 4) Register shard as a data output (kind='parquet'); on last, optionally write an index

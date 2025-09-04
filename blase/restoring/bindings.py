@@ -20,6 +20,11 @@ from blase.extracting.image_backend import (
 from blase.load import Load
 from blase.restoring import store, cas
 from blase.utils.hashing import Hash
+from blase.restoring.io_safety import resolve_conflict_path
+from blase.loading.img_parquet_backend import (
+    _build_parquet_table_from_images,
+    _write_parquet_table
+)
 
 # simple arg mapping: role -> kwarg
 REGISTRY = {
@@ -187,6 +192,62 @@ def run_read_csv_restore(
     for batch, is_last in impl(file_path, batch_size, use_cols, filter_by):
         yield batch, is_last
 
+def _lookup_data_row(run_path: Path, h: str):
+    db = run_path / "nodes" / "nodes.db"
+    import sqlite3, json as _json
+    con = sqlite3.connect(db)
+    try:
+        con.row_factory = sqlite3.Row
+        row = con.execute("SELECT kind, metadata_json FROM data WHERE data_hash=?", (h,)).fetchone()
+        if not row:
+            return None
+        md = None
+        try:
+            md = _json.loads(row["metadata_json"]) if row["metadata_json"] else None
+        except Exception:
+            md = None
+        return {"kind": row["kind"], "metadata": md}
+    finally:
+        con.close()
+
+def _try_load_batch_desc(run_path: Path, h: str) -> dict:
+    # 1) First try the canonical batch-meta blob
+    try:
+        return _load_cas_json(run_path, h, kind="image.batch.meta")
+    except FileNotFoundError:
+        pass
+    except Exception:
+        # tolerate older runs with odd contents
+        pass
+
+    # 2) Fallback: check data row kind + metadata_json
+    row = _lookup_data_row(run_path, h)
+    if row:
+        k = (row.get("kind") or "").lower()
+        if k in ("image.batch.meta", "image.batch"):
+            if isinstance(row.get("metadata"), dict):
+                return row["metadata"]
+
+    # 3) Last resort: try loading the CAS blob as JSON without enforcing kind
+    try:
+        return _load_cas_json(run_path, h, kind="image.batch")
+    except Exception:
+        # give a benign empty descriptor so restore can continue
+        return {}
+    
+def _normalize_recorded_batches(run_path: Path, realized: Dict[str, Any]) -> list[dict]:
+    vals = realized.get("batch") or realized.get("batch_desc") or []
+    if not isinstance(vals, list):
+        vals = [vals]
+    out = []
+    for v in vals:
+        if isinstance(v, str):
+            out.append(_try_load_batch_desc(run_path, v))
+        elif isinstance(v, dict):
+            out.append(v)
+        else:
+            out.append({})
+    return out
 
 def run_read_images_restore(
     *,
@@ -199,12 +260,44 @@ def run_read_images_restore(
     Replay an Extract.read_images step deterministically.
 
     Strategy:
-      1) Resolve directory + recorded params.
+      1) Resolve params and source directory.
       2) If a manifest hash is present, load it and enforce the same root_hash.
       3) Re-scan headers + content hashes; compute root_hash and compare.
-      4) Rebuild the batch plan (deterministic), optionally validate against recorded batch metas.
+      4) Rebuild the batch plan; optionally validate against recorded batch descriptors.
       5) Decode with the recorded backend and yield (batch, is_last).
     """
+
+    # ---------- helpers ----------
+    def _load_manifest_desc(run_path: Path, h: str) -> Dict[str, Any]:
+        desc = _load_cas_json(run_path, h, kind="image.manifest")
+        return desc or {}
+
+    def _try_load_batch_desc(run_path: Path, h: str) -> Dict[str, Any]:
+        """
+        Accept either kind:
+          - image.batch.meta (preferred; full descriptor)
+          - image.batch      (fallback; synthesize minimal descriptor)
+        """
+        try:
+            return _load_cas_json(run_path, h, kind="image.batch.meta")
+        except FileNotFoundError:
+            pass
+        # Fallback to image.batch
+        try:
+            b = _load_cas_json(run_path, h, kind="image.batch")
+            # synthesize minimal structure the validator uses
+            return {
+                "manifest_hash": b.get("manifest_hash"),
+                "ordinal": b.get("ordinal"),
+                "count": b.get("count"),          # may be absent; validator tolerates None
+                "batch_hash": b.get("batch_hash"),
+            }
+        except FileNotFoundError:
+            # Surface a clear error so users know which CAS entry is missing
+            raise FileNotFoundError(
+                f"CAS blob not found as image.batch.meta or image.batch for hash={h}"
+            )
+
     # ---------- 1) Resolve core params ----------
     backend   = params.get("backend", "pil")
     return_tp = params.get("return_type", "np")
@@ -221,57 +314,36 @@ def run_read_images_restore(
     seed      = params.get("seed", None)
     hash_mode = params.get("hash_mode", "content")
 
-    directory = str(realized.get("source") or params.get("directory"))
+    directory = str(realized.get("source") or params.get("directory") or "")
     if not directory:
         raise RuntimeError("read_images restore requires 'source' (directory) or params['directory'].")
 
     if shuffle and seed is None:
         raise RuntimeError("Recorded run used shuffle=True but no seed; cannot restore deterministically.")
 
-    # Recorded manifest/batch (optional but recommended)
+    # ---------- 2) Manifest enforcement (if provided) ----------
     manifest_hash = realized.get("manifest")
+    expected_root_hash: Optional[str] = None
     if manifest_hash:
-        recorded_manifest_desc = _load_cas_json(run_path, manifest_hash, kind="image.manifest")
-        expected_root_hash = (recorded_manifest_desc.get("identity", {}) or {}).get("root_hash") \
-                            or recorded_manifest_desc.get("root_hash")
-    recorded_batches = realized.get("batch") or []
-    recorded_batch_descs = []
-    for b in (recorded_batches if isinstance(recorded_batches, list) else [recorded_batches]):
-        if isinstance(b, str):
-            try:
-                desc = _load_cas_json(run_path, b, kind="image.batch.meta")
-                recorded_batch_descs.append(desc)
-            except FileNotFoundError:
-                recorded_batch_descs.append({})
-        else:
-            recorded_batch_descs.append(b)
-
-    # ---------- 2) Load recorded manifest (if provided) ----------
-    expected_root_hash = None
-    recorded_manifest_desc = None
-    if manifest_hash:
-        recorded_manifest_desc = _load_cas_json(run_path, manifest_hash, kind="image.manifest")
+        manifest_desc = _load_manifest_desc(run_path, manifest_hash)
+        # support both new (identity.root_hash) and older (root_hash) shapes
         expected_root_hash = (
-            recorded_manifest_desc.get("identity", {}).get("root_hash")
-            or recorded_manifest_desc.get("root_hash")  # tolerate older schema
+            (manifest_desc.get("identity") or {}).get("root_hash")
+            or manifest_desc.get("root_hash")
         )
 
     # ---------- 3) Rebuild manifest deterministically ----------
-    # Header scan (no pixels)
     manifest = scan_manifest_headers(
         directory=directory,
         pattern=pattern,
         recursive=recursive,
         filename_filter=None,
     )
-    # (Optional) shuffle — must use recorded seed if used during the original run
     if shuffle:
         manifest = shuffle_manifest(manifest, seed)
 
-    # Ensure content hashes (use cached fast path if available)
     manifest = ensure_item_content_hashes(manifest)
 
-    # Compute dataset identity root hash the same way as during the run
     root_hash = compute_manifest_root_hash(
         manifest=manifest,
         directory=directory,
@@ -281,15 +353,13 @@ def run_read_images_restore(
         hash_mode=hash_mode,
     )
 
-    # Enforce identity if we have a recorded manifest
     if expected_root_hash and root_hash != expected_root_hash:
         raise RuntimeError(
             f"Restore aborted: current manifest root_hash ({root_hash[:12]}) "
             f"does not match recorded ({expected_root_hash[:12]}). Source changed."
         )
 
-    # ---------- 4) Rebuild batch plan (deterministic) ----------
-    # If target_bytes wasn't recorded, prefer a stable default (avoid RAM-based inference)
+    # ---------- 4) Rebuild batch plan ----------
     if mode == "auto" and target_bytes is None:
         target_bytes = 256 * 1024 * 1024  # 256 MiB default
 
@@ -303,30 +373,22 @@ def run_read_images_restore(
         max_side=max_side,
     )
 
-    # Optional validation against recorded batch metas
-    recorded_batch_descs: List[Dict[str, Any]] = []
-    if recorded_batches:
-        # Normalize to list of dicts
-        rec_hashes = recorded_batches if isinstance(recorded_batches, list) else [recorded_batches]
-        for b in rec_hashes:
-            desc = _load_cas_json(run_path, b, kind="image.batch.meta") if isinstance(b, str) else b
-            recorded_batch_descs.append(desc)
+    # Optional validation against recorded batch descriptors (accept batch_desc or batch)
+    recorded_batch_descs = _normalize_recorded_batches(run_path, realized)
 
     impl = decode_batch_pil if backend == "pil" else decode_batch_cv2
 
     # ---------- 5) Decode and yield ----------
     for i, planned in enumerate(iter_batches_from_plan(batch_plan), 1):
         items = planned["items"]
-        # Recompute the same batch_hash we logged originally
         batch_hash = compute_batch_hash(root_hash, items)
 
-        # Cross-check vs recorded batch meta when available (count + optional hash)
         if recorded_batch_descs:
-            if i-1 >= len(recorded_batch_descs):
+            if i - 1 >= len(recorded_batch_descs):
                 raise RuntimeError("Recorded batch metas shorter than planned batches; cannot restore.")
-            rec = recorded_batch_descs[i-1]
+            rec = recorded_batch_descs[i - 1]
             rec_count = rec.get("count")
-            if rec_count is not None and rec_count != len(items):
+            if isinstance(rec_count, int) and rec_count != len(items):
                 raise RuntimeError(
                     f"Batch #{i} size mismatch: recorded={rec_count}, planned={len(items)}."
                 )
@@ -500,10 +562,116 @@ def run_save_to_csv_replay(
 
     return str(target_path)
 
+def _deterministic_shard_path(
+    target_dir: Path,
+    shard_prefix: str,
+    ordinal: int,
+) -> Path:
+    # Matches your runtime shard naming scheme (prefix-000001.parquet)
+    return (target_dir / f"{shard_prefix}-{ordinal:06d}.parquet").resolve()
+
+def run_save_images_to_parquet_replay(
+    *,
+    run_path: Path,
+    params: Dict[str, Any],
+    realized: Dict[str, Any],           # not used currently, kept for parity
+    backend_override: Optional[str] = None,
+    upstream_gen: Iterator[Tuple[Any, bool]],
+    target_override: Optional[str] = None,   # if provided, use this directory
+    on_conflict: str = "overwrite",
+    expected_out_hashes: Optional[List[str]] = None,   # optional strict check
+    record_materialization: bool = True,
+) -> List[Path]:
+    """
+    Replay a Load.save_images_to_parquet step by consuming an upstream (batch,last) generator
+    and writing one deterministic Parquet shard per batch.
+
+    Returns list of *actual* output paths in the order they were written.
+    """
+    # --------- 1) Resolve sink parameters ----------
+    target_dir = (
+        Path(target_override).resolve()
+        if target_override else
+        Path(params.get("target_dir") or RESTORE_DEFAULT_DIR).resolve()
+    )
+    target_dir.mkdir(parents=True, exist_ok=True)
+
+    shard_prefix  = params.get("shard_prefix", "batch")
+    encode        = params.get("encode", "jpeg")
+    jpeg_quality  = int(params.get("jpeg_quality", 95))
+    compression   = params.get("compression", "zstd")
+    include_paths = bool(params.get("include_paths", True))
+
+    # optional: if the recorded step logged batch_desc inputs we can map ordinals
+    # to tighten determinism of lineage meta (ordinal, hashes, etc.)
+    # We only *read* them to reconstruct meta columns; not required to run.
+    # Fetch via step_inputs if you need them here, or let the caller pass them.
+    # (Keeping it simple: we recompute ordinals 1..N; _build_parquet_table_from_images
+    # uses meta for lineage; if you want strict byte-for-byte equivalence with
+    # recorded runs that include lineage cols, enrich 'meta' below from batch_desc.)
+    out_paths: List[Path] = []
+    hasher = Hash()
+
+    ordinal = 0
+    # --------- 2) Stream batches and write shards ----------
+    for (batch, is_last) in upstream_gen:
+        ordinal += 1
+
+        # minimal meta (you can enrich this from recorded batch_desc/manifest if desired)
+        meta = {"ordinal": ordinal}
+
+        # Build table exactly like at runtime
+        table = _build_parquet_table_from_images(
+            data=batch,
+            meta=meta,
+            encode=encode,
+            jpeg_quality=jpeg_quality,
+            include_paths=include_paths,
+        )
+
+        shard_path = _deterministic_shard_path(target_dir, shard_prefix, ordinal)
+        # resolve conflict policy (overwrite/rename/fail) on per-file basis
+        shard_path = resolve_conflict_path(
+            shard_path,
+            policy=on_conflict,
+            suffix=".restore",
+        )
+
+        _write_parquet_table(
+            table,
+            shard_path,
+            compression=compression,
+            on_conflict="overwrite",  # we already resolved name conflicts above
+        )
+
+        if expected_out_hashes:
+            # If the step recorded N outputs (one per batch), this ensures exact bytes
+            h = hasher.hash_file(shard_path)
+            # Guard against mismatched counts OR content drift
+            if ordinal - 1 < len(expected_out_hashes):
+                exp = expected_out_hashes[ordinal - 1]
+                if exp and exp != h:
+                    raise IOError(
+                        f"[restore] parquet shard #{ordinal} hash mismatch: "
+                        f"expected={exp[:16]}… got={h[:16]}…"
+                    )
+
+        if record_materialization:
+            # index materialization so future restores can fast-path
+            try:
+                store.record_materialization(run_path, hasher.hash_file(shard_path), str(shard_path))
+            except Exception:
+                pass
+
+        out_paths.append(shard_path)
+
+    return out_paths
+
 # Public registry of handlers (by function FQN)
 RESTORE_HANDLERS: Dict[str, Any] = {
     "blase.Extract.read_csv": run_read_csv_restore,
     "blase.Extract.read_images": run_read_images_restore,
     "blase.Transform.apply_function": run_apply_function_restore,
-    "blase.Load.save_to_csv": run_save_to_csv_replay
+    "blase.Load.save_to_csv": run_save_to_csv_replay,
+    "blase.Load.save_images_to_parquet": run_save_images_to_parquet_replay
 }

@@ -737,9 +737,6 @@ class StreamStep:
             Downstream metadata for the batch (includes ``"producer_step"`` and
             preserves caller-provided ``"ordinal"`` if present).
         """
-        # record lineage
-        self.step.add_upstream_from_meta(meta)
-
         # preserve caller meta (hints) and overlay our bookkeeping
         out = dict(meta or {})
         out["producer_step"] = self.step.step_hash

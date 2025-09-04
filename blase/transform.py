@@ -201,6 +201,24 @@ class Transform:
                     params[k] = m[k]
 
             self._stream = tracker.stream("blase.Transform.apply_function", params, code_fn=transform_func)
+            # wire lineage as inputs once (safe to repeat; implementation can de-dup)
+            m = meta or {}
+            up = (m.get("upstream") or [])
+            for u in up:
+                rid = u.get("id"); role = u.get("role")
+                if rid and role in {"manifest", "batch_desc", "batch"}:
+                    try:
+                        self._stream.step.add_input(rid, role=role, arg_name=None)
+                    except Exception:
+                        pass  # tolerate replays/duplicates
+
+            # you can also store manifest root for convenience (optional)
+            root = (m.get("manifest_root_hash") or m.get("root_hash"))
+            if root:
+                try:
+                    self._stream.step.add_input(root, role="manifest_root", arg_name=None)
+                except Exception:
+                    pass
             self._fn_tag = fn_qual
 
         # Execute user code
@@ -214,6 +232,7 @@ class Transform:
             raise
 
         # Record upstream lineage for this batch; seal on last
+        self._stream.step.add_upstream_from_meta(meta) 
         new_meta = self._stream.emit(last_batch=last_batch, meta=meta)
 
         if last_batch:

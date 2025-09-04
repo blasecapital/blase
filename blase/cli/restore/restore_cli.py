@@ -165,28 +165,62 @@ def _upstream_gen_for_sink(run_path: Path, target_step_hash: str):
     Build an upstream (batch,last) generator for a Load.save_to_csv step by scanning
     its plan backward to the nearest Transform.apply_function (preferred) or Extract.read_csv.
     """
+    # figure out which sink we’re wiring
+    tip = store.load_step(run_path, target_step_hash)
+    tip_fqn = tip["function_fqn"]
+
+    # what counts as a streaming producer
+    def _is_extract_images(fqn: str) -> bool:
+        return fqn.endswith("Extract.read_images")
+
+    def _is_extract_csv(fqn: str) -> bool:
+        return fqn.endswith("Extract.read_csv")
+
+    def _is_transform(fqn: str) -> bool:
+        return fqn.endswith("Transform.apply_function")
+
+    # ask the planner for a minimal chain and normalize it
     raw_plan = planner.plan_for_step(run_path, target_step_hash) or []
     nodes = _normalize_plan_nodes(run_path, raw_plan)
+
     try:
         idx = next(i for i, n in enumerate(nodes) if n["step_hash"] == target_step_hash)
     except StopIteration:
         raise SystemExit("restore: target sink step not found in plan")
 
-    upstream = None
-    for j in range(idx - 1, -1, -1):
-        if nodes[j]["function_fqn"].endswith("Transform.apply_function"):
-            upstream = nodes[j]
-            break
-    if upstream is None:
-        for j in range(idx - 1, -1, -1):
-            if nodes[j]["function_fqn"].endswith("Extract.read_csv"):
-                upstream = nodes[j]
-                break
-    if upstream is None:
-        raise SystemExit("No upstream compute step found for sink replay.")
+    # scan backwards to find a producer
+    upstream_node = None
 
-    from blase import restore as restore_mod
-    return restore_mod.step(run_path, upstream["step_hash"], kind="csv")
+    # 1) nearest Transform.apply_function
+    for j in range(idx - 1, -1, -1):
+        if _is_transform(nodes[j]["function_fqn"]):
+            upstream_node = nodes[j]
+            break
+
+    # 2) if none, pick the right Extract fallback by sink type
+    if upstream_node is None:
+        if tip_fqn.endswith("Load.save_images_to_parquet"):
+            for j in range(idx - 1, -1, -1):
+                if _is_extract_images(nodes[j]["function_fqn"]):
+                    upstream_node = nodes[j]
+                    break
+        else:
+            # default/legacy CSV path
+            for j in range(idx - 1, -1, -1):
+                if _is_extract_csv(nodes[j]["function_fqn"]):
+                    upstream_node = nodes[j]
+                    break
+
+    if upstream_node is None:
+        # helpful debug: show what we actually saw
+        dbg = " → ".join(f"{n['function_fqn']}[{n['step_hash'][:8]}]" for n in nodes)
+        raise SystemExit(
+            "No upstream compute step found for sink replay.\n"
+            f"[debug] plan: {dbg}"
+        )
+
+    # delegate to the generic streaming builder for whatever node we found
+    return _build_stream_for_step(run_path, upstream_node["step_hash"])
 
 # --------- pretty helpers ---------
 
@@ -492,6 +526,63 @@ def _exec_plan_for_step(
             upstream = None
             continue
 
+        if fqn == "blase.Load.save_images_to_parquet":
+            ins  = store.load_step_inputs(run_path, sh)
+            outs = store.load_step_outputs(run_path, sh)
+
+            # Collect expected hashes (one per shard) if they were recorded.
+            expected_out_hashes = [o["data_hash"] for o in outs if o["name"].startswith("parquet_shard")]
+            # (If you recorded one output per batch, the order should match emission order.)
+
+            # Destination: a directory
+            if to_path:
+                target_dir_override = to_path
+                conflict_policy = "overwrite"
+            else:
+                # default: deterministic directory under RESTORE_DEFAULT_DIR
+                # using the first expected hash as a hint to make the path unique.
+                RESTORE_DEFAULT_DIR.mkdir(parents=True, exist_ok=True)
+                target_dir_override = str((RESTORE_DEFAULT_DIR).resolve())
+                conflict_policy = "overwrite"
+
+            upstream_gen = upstream or _upstream_gen_for_sink(run_path, sh)
+
+            handler = bindings.RESTORE_HANDLERS[fqn]
+            out_paths = handler(
+                run_path=run_path,
+                params=st["params"],
+                realized={},
+                upstream_gen=upstream_gen,
+                target_override=target_dir_override,
+                on_conflict=conflict_policy,
+                expected_out_hashes=expected_out_hashes or None,
+                record_materialization=(not ephemeral_only),
+            )
+
+            print("Replayed shards:")
+            for p in out_paths:
+                print(f"  {p}")
+
+            # Track produced hashes → paths
+            # If outputs were recorded, map them 1:1; else compute here.
+            if outs:
+                for i, o in enumerate(outs):
+                    dh = o["data_hash"]
+                    if i < len(out_paths):
+                        produced[dh] = Path(out_paths[i])
+                        created_paths.append(Path(out_paths[i]))
+                        produced_hashes.add(dh)
+            else:
+                # No recorded outputs? compute and index
+                for p in out_paths:
+                    dh = Hash().hash_file(p)
+                    produced[dh] = Path(p)
+                    created_paths.append(Path(p))
+                    produced_hashes.add(dh)
+
+            upstream = None
+            continue
+
         # Fallback for non-stream steps, if any
         from blase import restore as _restore
         _restore.step(run_path, sh)
@@ -635,6 +726,31 @@ def _build_stream_for_step(run_path: Path, step_hash: str):
         for j in range(idx-1, -1, -1):
             if _is_stream_fqn(nodes[j]["function_fqn"]):
                 upstream_node = nodes[j]; break
+        if upstream_node is None:
+            # ---- Resolve by lineage hashes (manifest / batch_desc / batch) ----
+            ins = store.load_step_inputs(run_path, step_hash)
+
+            # prefer a manifest hash if present
+            man = next((i["data_hash"] for i in ins if i["role"] == "manifest"), None)
+            if man:
+                ex = store.producer_step_for_data(run_path, man)
+                if ex:
+                    upstream_node = {"step_hash": ex, "function_fqn": store.load_step(run_path, ex)["function_fqn"]}
+
+            # else try batch_desc, then batch
+            if upstream_node is None:
+                bdesc = next((i["data_hash"] for i in ins if i["role"] in ("batch_desc","batch_meta","batchmeta","batch_desc_1","batch_desc_2")), None)
+                if bdesc:
+                    ex = store.producer_step_for_data(run_path, bdesc)
+                    if ex:
+                        upstream_node = {"step_hash": ex, "function_fqn": store.load_step(run_path, ex)["function_fqn"]}
+
+            if upstream_node is None:
+                b = next((i["data_hash"] for i in ins if i["role"] in ("batch","image.batch")), None)
+                if b:
+                    ex = store.producer_step_for_data(run_path, b)
+                    if ex:
+                        upstream_node = {"step_hash": ex, "function_fqn": store.load_step(run_path, ex)["function_fqn"]}
         if upstream_node is None:
             # Fallback: use recorded CSV source path if present (older runs)
             ins = store.load_step_inputs(run_path, step_hash)
@@ -928,33 +1044,11 @@ def cmd_run(args):
             print(f"  blase restore run  --step {step_hash} --mode replay")
             return 3
 
-    def _upstream_for_sink(run_path: Path, target_step_hash: str):
-        """Nearest upstream compute (Transform preferred, else any Extract.*)."""
-        raw_plan = planner.plan_for_step(run_path, target_step_hash) or []
-        nodes = _normalize_plan_nodes(run_path, raw_plan)
-        try:
-            idx = next(i for i,n in enumerate(nodes) if n["step_hash"] == target_step_hash)
-        except StopIteration:
-            raise SystemExit("restore: target sink step not found in plan")
-
-        upstream = None
-        # prefer Transform
-        for j in range(idx-1, -1, -1):
-            if nodes[j]["function_fqn"].endswith("Transform.apply_function"):
-                upstream = nodes[j]; break
-        # else any Extract.*
-        if upstream is None:
-            for j in range(idx-1, -1, -1):
-                if nodes[j]["function_fqn"].startswith("blase.Extract."):
-                    upstream = nodes[j]; break
-        if upstream is None:
-            raise SystemExit("No upstream compute step found for sink replay.")
-        return _build_stream_for_step(run_path, upstream["step_hash"])
-
     # ---- VERIFY: stream results without writing ----
     if args.mode == "verify":
-        if fqn == "blase.Load.save_to_csv":
-            gen = _upstream_gen_for_sink(run_path, step_hash)
+        if fqn in ("blase.Load.save_to_csv", "blase.Load.save_images_to_parquet"):
+            upstream_gen = _upstream_gen_for_sink(run_path, step_hash)
+            gen = upstream_gen
         elif _is_stream_fqn(fqn):
             gen = _build_stream_for_step(run_path, step_hash)
         else:
@@ -976,24 +1070,28 @@ def cmd_run(args):
 
     # ---- REPLAY: for sinks, wire upstream; for non-sinks, just restore ----
     if args.mode == "replay":
-        if fqn == "blase.Load.save_to_csv":
+        if fqn in ("blase.Load.save_to_csv", "blase.Load.save_images_to_parquet"):
             upstream_gen = _upstream_gen_for_sink(run_path, step_hash)
-            handler = bindings.RESTORE_HANDLERS[fqn]
+            handler = bindings.RESTORE_HANDLERS[fqn]   # handler must exist for both FQNs
             out_path = handler(
-                run_path=run_path, params=st["params"], realized={},
-                upstream_gen=upstream_gen, target_override=getattr(args, "to", None),
-                backend_override=getattr(args, "backend", None)
+                run_path=run_path,
+                params=st["params"],
+                realized={},                       # sinks don’t need extra realized inputs
+                upstream_gen=upstream_gen,         # (batch, is_last) generator
+                target_override=getattr(args, "to", None),
+                backend_override=getattr(args, "backend", None),
             )
             print(out_path)
             return 0
-        else:
-            gen = _build_stream_for_step(run_path, step_hash) if _is_stream_fqn(fqn) \
-                else restore_step(run_path, step_hash, kind="data")
-            for i, (b, last) in enumerate(gen, 1):
-                n = (len(b) if hasattr(b, "__len__") else "?")
-                print(f"batch {i}: {n} items, last={last}")
-                if getattr(args, "limit_batches", None) and i >= args.limit_batches:
-                    break
-            return 0
+
+        # non-sinks: as before
+        gen = _build_stream_for_step(run_path, step_hash) if _is_stream_fqn(fqn) \
+            else restore_step(run_path, step_hash, kind="data")
+        for i, (b, last) in enumerate(gen, 1):
+            n = (len(b) if hasattr(b, "__len__") else "?")
+            print(f"batch {i}: {n} items, last={last}")
+            if getattr(args, "limit_batches", None) and i >= args.limit_batches:
+                break
+        return 0
 
     raise SystemExit(f"[restore] unknown mode: {args.mode}")

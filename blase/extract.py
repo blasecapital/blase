@@ -458,7 +458,7 @@ class Extract:
                 path_or_bytes=json.dumps(manifest_desc, ensure_ascii=False).encode("utf-8"),
                 metadata=manifest_desc,
             )
-            stream.step.add_input(manifest_hash, role="manifest", arg_name="manifest")
+            stream.step.add_output(manifest_hash, name="manifest")
 
             # Record dataset + members for Inspect/CLI (ordered; cached fields optional).
             dataset_id = ensure_dataset_for_manifest(
@@ -491,7 +491,13 @@ class Extract:
                     path_or_bytes=json.dumps(batch_meta_desc, ensure_ascii=False).encode("utf-8"),
                     metadata=batch_meta_desc,
                 )
-                stream.step.add_input(batch_desc_hash, role="batch", arg_name="batch_desc")
+                stream.step.add_output(batch_desc_hash, name=f"batch_desc_{i}")
+                batch_token_hash = stream.step.register_data(
+                    kind="image.batch", version="1",
+                    path_or_bytes=batch_hash.encode("utf-8"),
+                    metadata={"batch_hash": batch_hash, "manifest_hash": manifest_hash, "ordinal": i},
+                )
+                stream.step.add_output(batch_token_hash, name=f"batch_{i}")
 
                 # Decode (no CAS for pixels).
                 decoded = impl(batch["items"], return_type, color, max_side)
@@ -501,6 +507,7 @@ class Extract:
                     "upstream": [
                         {"id": manifest_hash, "role": "manifest"},
                         {"id": batch_desc_hash, "role": "batch_desc"},
+                        {"id": batch_token_hash, "role": "batch"},
                     ],
                     "producer_step": stream.step.step_hash,
                     "ordinal": i,
@@ -522,7 +529,11 @@ class Extract:
                     "shuffle": shuffle,
                     "seed": seed,
                 }
-                new_meta = stream.emit(last_batch=batch["is_last"], meta=meta)
+                # Do not record inputs for this method but pass upstream dict to downstream steps
+                meta_no_up = dict(meta)
+                meta_no_up.pop("upstream", None)
+                new_meta = stream.emit(last_batch=batch["is_last"], meta=meta_no_up)
+                new_meta["upstream"] = meta["upstream"]
 
                 yield [it["abs_path"] for it in batch["items"]], batch["is_last"], decoded, new_meta
 

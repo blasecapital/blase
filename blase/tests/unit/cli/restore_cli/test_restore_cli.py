@@ -191,7 +191,7 @@ def test__resolve_seed_no_producer_raises(run_dir, monkeypatch):
 # ----- Plan scanning / upstream builder -----
 
 def test__upstream_gen_for_sink_prefers_transform(run_dir, monkeypatch):
-    # Make the plan contain the sink and a transform right before it
+    # Plan: Extract -> Transform -> SINK
     monkeypatch.setattr(
         rc.planner, "plan_for_step",
         lambda *_: [
@@ -201,26 +201,39 @@ def test__upstream_gen_for_sink_prefers_transform(run_dir, monkeypatch):
         ]
     )
 
-    # Patch the actual function that _upstream_gen_for_sink calls:
-    # it imports `from blase import restore as restore_mod` and uses restore_mod.step(...)
-    import blase.restore as restore_mod
+    # Patch the *same store module object used inside restore_cli*
+    monkeypatch.setattr(
+        rc.store, "load_step",
+        lambda run_path, step_hash: {"function_fqn": "blase.Load.save_to_csv", "params": {}, "status": "completed"}
+        if step_hash == "SINK" else {"function_fqn": "blase.Transform.apply_function", "params": {}, "status": "completed"}
+    )
+
+    # Intercept which upstream step hash is chosen
     called = {}
-    def fake_restore_step(run_path, step_hash, kind):
+    def fake_build(run_path, step_hash):
         called["hash"] = step_hash
-        # return a trivial generator
         return iter([([], True)])
 
-    monkeypatch.setattr(restore_mod, "step", fake_restore_step)
+    monkeypatch.setattr(rc, "_build_stream_for_step", fake_build)
 
-    # Run
     gen = rc._upstream_gen_for_sink(run_dir, "SINK")
-    next(gen)  # consume one item
+    list(gen)  # exhaust generator
 
-    # Assert it picked the transform ("B"), not the extract
     assert called["hash"] == "B"
 
 def test__upstream_gen_for_sink_no_upstream_raises(run_dir, monkeypatch):
-    monkeypatch.setattr(rc.planner, "plan_for_step", lambda *_: [{"step_hash":"SINK","function_fqn":"blase.Load.save_to_csv"}])
+    # Only the sink in the plan
+    monkeypatch.setattr(
+        rc.planner, "plan_for_step",
+        lambda *_: [{"step_hash": "SINK", "function_fqn": "blase.Load.save_to_csv"}]
+    )
+
+    # Patch the store reference used by restore_cli
+    monkeypatch.setattr(
+        rc.store, "load_step",
+        lambda run_path, step_hash: {"function_fqn": "blase.Load.save_to_csv", "params": {}, "status": "completed"}
+    )
+
     with pytest.raises(SystemExit):
         rc._upstream_gen_for_sink(run_dir, "SINK")
 

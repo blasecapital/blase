@@ -23,7 +23,8 @@ from blase.utils.hashing import Hash
 from blase.restoring.io_safety import resolve_conflict_path
 from blase.loading.img_parquet_backend import (
     _build_parquet_table_from_images,
-    _write_parquet_table
+    _write_parquet_table,
+    RECORDED_WRITER_CFG
 )
 
 # simple arg mapping: role -> kwarg
@@ -255,7 +256,7 @@ def run_read_images_restore(
     params: Dict[str, Any],
     realized: Dict[str, Any],
     transform_fn=None,   # unused; signature kept for uniformity
-) -> Iterator[Tuple[Any, bool]]:
+) -> Iterator[Tuple[Any, Dict, bool]]:
     """
     Replay an Extract.read_images step deterministically.
 
@@ -313,6 +314,15 @@ def run_read_images_restore(
     shuffle   = bool(params.get("shuffle", False))
     seed      = params.get("seed", None)
     hash_mode = params.get("hash_mode", "content")
+    rec_ids = realized.get("batch_descs") or realized.get("batch") or []
+    recorded_batch_descs = []
+    for h in rec_ids:
+        try:
+            recorded_batch_descs.append(_try_load_batch_desc(run_path, h))
+        except FileNotFoundError:
+            pass
+    if not recorded_batch_descs:
+        recorded_batch_descs = None
 
     directory = str(realized.get("source") or params.get("directory") or "")
     if not directory:
@@ -352,7 +362,6 @@ def run_read_images_restore(
         seed=seed,
         hash_mode=hash_mode,
     )
-
     if expected_root_hash and root_hash != expected_root_hash:
         raise RuntimeError(
             f"Restore aborted: current manifest root_hash ({root_hash[:12]}) "
@@ -374,7 +383,7 @@ def run_read_images_restore(
     )
 
     # Optional validation against recorded batch descriptors (accept batch_desc or batch)
-    recorded_batch_descs = _normalize_recorded_batches(run_path, realized)
+    #recorded_batch_descs = _normalize_recorded_batches(run_path, realized)
 
     impl = decode_batch_pil if backend == "pil" else decode_batch_cv2
 
@@ -383,6 +392,15 @@ def run_read_images_restore(
         items = planned["items"]
         batch_hash = compute_batch_hash(root_hash, items)
 
+        if items:
+            k0 = list(items[0].keys())
+            print(f"[READ.ITEMS] n={len(items)} keys0={k0}")
+        paths_items = [rec.get("rel_path") for rec in items]
+        print(f"[READ.BATCH] #{i} is_last={planned.get('is_last')} "
+            f"planned_hash={batch_hash[:12]} count={len(items)} "
+            f"items_paths[:3]={paths_items[:3]}")
+
+        rec = None
         if recorded_batch_descs:
             if i - 1 >= len(recorded_batch_descs):
                 raise RuntimeError("Recorded batch metas shorter than planned batches; cannot restore.")
@@ -399,8 +417,30 @@ def run_read_images_restore(
                 )
 
         decoded = impl(items, return_tp, color, max_side)
-        is_last = bool(planned.get("is_last", False))
-        yield decoded, is_last
+        is_last = bool(planned.get("is_last", False))    
+
+        paths = [it.get("relpath") or it.get("path") for it in items]
+        print(f"[READ.BATCH] #{i} is_last={is_last} "
+            f"planned_hash={batch_hash[:12]} count={len(items)} "
+            f"paths[:3]={paths[:3]}")
+        items_rel_paths = [rec.get("rel_path") for rec in items]
+        meta = {
+            "ordinal": i,
+            "manifest": manifest_hash,
+            "manifest_root_hash": root_hash,
+            "batch_hash": batch_hash,
+            "recorded": rec,             # include fields you used at write-time
+            #"paths": paths,
+            "upstream": [
+                {"id": manifest_hash, "role": "manifest"},
+                *([{"id": rec.get("batch_desc_hash"), "role": "batch_desc"}] if rec else []),
+                {"id": batch_hash, "role": "batch"},
+            ],
+            #"items_rel_paths": items_rel_paths,
+        }
+        #print(f"[READ.META]  #{i} meta_paths[:3]={meta['items_rel_paths']} len={len(meta['items_rel_paths'])}")
+
+        yield decoded, meta, is_last
 
 def run_apply_function_restore(
     *,
@@ -437,15 +477,12 @@ def run_apply_function_restore(
     RuntimeError
         If ``"source"`` is missing from realized inputs.
     """
-    upstream = realized.get("source") or realized.get("source_gen")
+    upstream = realized.get("source_gen") or realized.get("source")
     if upstream is None:
-        raise RuntimeError("restore: missing realized 'source' for Transform.apply_function")
+        raise RuntimeError("restore: missing realized 'source' or 'source_gen' for Transform.apply_function")
 
-    # If upstream is already a generator of (batch, is_last), use it.
-    if not isinstance(upstream, (str, os.PathLike)):
-        gen = upstream
-    else:
-        # Legacy CSV path
+    if isinstance(upstream, (str, os.PathLike)):
+        # legacy CSV path → build a 2-tuple generator
         source_path = str(upstream)
         backend    = params.get("backend", "polars")
         batch_size = params.get("batch_size")
@@ -454,9 +491,32 @@ def run_apply_function_restore(
         gen = read_batches_polars(source_path, batch_size, use_cols, filter_by) \
               if backend == "polars" else \
               read_batches_pandas(source_path, batch_size, use_cols, filter_by)
+    else:
+        gen = upstream  # passthrough
 
-    for batch, is_last in gen:
-        yield transform_fn(batch), is_last
+    for item in gen:
+        if isinstance(item, tuple):
+            if len(item) == 3:
+                batch, meta, is_last = item
+                out = transform_fn(batch)
+                try: in_n=len(batch)
+                except: in_n="?"
+                try: out_n=len(out)
+                except: out_n="?"
+                ord_ = (meta or {}).get("ordinal") if (isinstance(item, tuple) and len(item)==3) else "?"
+                mpaths = (meta or {}).get("items_rel_paths") if (isinstance(item, tuple) and len(item)==3) else None
+                print(f"[XFORM.BATCH] ord={ord_} in={in_n} out={out_n}")
+                if mpaths:
+                    print(f"[XFORM.PATHS] ord={ord_} first3={mpaths[:3]} len={len(mpaths)}")
+                yield transform_fn(batch), meta, is_last
+            elif len(item) == 2:
+                batch, is_last = item
+                yield transform_fn(batch), is_last
+            else:
+                batch = item[0]
+                yield transform_fn(batch), False
+        else:
+            yield transform_fn(item), False
 
 def run_save_to_csv_replay(
     *,
@@ -534,8 +594,21 @@ def run_save_to_csv_replay(
         shutil.copy2(preseed_path, tmp)
 
     # consume to tmp (append semantics preserved if seed existed)
+    def _coerce2(gen):
+        for item in gen:
+            if isinstance(item, tuple):
+                if len(item) == 3:
+                    b, _meta, last = item
+                    yield b, last
+                elif len(item) == 2:
+                    b, last = item
+                    yield b, last
+                else:
+                    yield item[0], False
+            else:
+                yield item, False
     ld = Load()
-    for (b, last) in upstream_gen:
+    for (b, last) in _coerce2(upstream_gen):
         ld.save_to_csv(
             data=b, last_batch=last, meta={},
             path=str(tmp), backend=backend, track=False, use_blase_path=False,
@@ -614,11 +687,36 @@ def run_save_images_to_parquet_replay(
 
     ordinal = 0
     # --------- 2) Stream batches and write shards ----------
-    for (batch, is_last) in upstream_gen:
-        ordinal += 1
+    writer_cfg = params.get("writer_cfg") or RECORDED_WRITER_CFG
+    import pyarrow as pa, pyarrow.parquet as pq, json, os
+    print(f"[ARROW] pyarrow={pa.__version__}")
+    print(f"[WRITER.CFG] {json.dumps(writer_cfg, sort_keys=True)}")
+    for item in upstream_gen:
+        if len(item) == 3:
+            batch, meta, is_last = item
+            ordinal = meta.get("ordinal") or (ordinal + 1)
+        else:
+            batch, is_last = item
+            ordinal += 1
+            meta = {"ordinal": ordinal}
+            ordinal += 1
 
-        # minimal meta (you can enrich this from recorded batch_desc/manifest if desired)
-        meta = {"ordinal": ordinal}
+        def _batch_bytes(batch) -> bytes:
+            import struct, numpy as np
+            # Deterministic framing: [count][item...], each item = [dtype][ndim][shape][data]
+            buf = bytearray()
+            buf += b"B0" + struct.pack("<Q", len(batch))
+            for x in batch:
+                a = np.ascontiguousarray(x)
+                dt = str(a.dtype).encode()
+                buf += b"T" + struct.pack("<I", len(dt)) + dt
+                buf += b"N" + struct.pack("<I", a.ndim)
+                buf += b"S" + struct.pack("<" + "Q"*a.ndim, *a.shape)
+                buf += b"D" + struct.pack("<Q", a.nbytes) + a.tobytes()
+            return bytes(buf)
+
+        def _batch_fp(batch, hasher) -> str:
+            return hasher.hash_bytes(_batch_bytes(batch))
 
         # Build table exactly like at runtime
         table = _build_parquet_table_from_images(
@@ -630,6 +728,7 @@ def run_save_images_to_parquet_replay(
         )
 
         shard_path = _deterministic_shard_path(target_dir, shard_prefix, ordinal)
+        shard_path = _write_parquet_table(table, shard_path, writer_cfg=writer_cfg, on_conflict="overwrite")
         # resolve conflict policy (overwrite/rename/fail) on per-file basis
         shard_path = resolve_conflict_path(
             shard_path,
@@ -637,12 +736,73 @@ def run_save_images_to_parquet_replay(
             suffix=".restore",
         )
 
+        # Sanity on meta / ordering
+        print(f"[SINK.BATCH] ord={ordinal} rows={len(meta.get('items_rel_paths') or [])}"
+            f" writer_cfg={json.dumps(writer_cfg, sort_keys=True)}")
+
+        # Peek at the to-be-written table to confirm content & row order
+        print(f"[SINK.TABLE] rows={table.num_rows} cols={table.num_columns} schema={table.schema.names}")
+        imgs  = table.column("img_bytes").to_pylist()
+        paths = table.column("path").to_pylist() if "path" in table.schema.names else ["<none>"]*table.num_rows
+        row_fp = [(hasher.hash_bytes(imgs[k]), paths[k]) for k in range(min(3, len(imgs)))]
+        print(f"[SINK.TABLE] ord={ordinal} rows={table.num_rows} cols={table.schema.names}")
+        print(f"[SINK.ROWS]  ord={ordinal} first3_fps+paths={row_fp}")
+        print(f"[SINK.TABLE] ord={ordinal} rows={table.num_rows} cols={table.schema.names}")
+
         _write_parquet_table(
             table,
             shard_path,
-            compression=compression,
+            writer_cfg=writer_cfg,
             on_conflict="overwrite",  # we already resolved name conflicts above
         )
+        import pyarrow.parquet as pq
+        h = hasher.hash_file(shard_path)
+        pf = pq.ParquetFile(shard_path)
+
+        print(f"[SINK.WRITE] ord={ordinal} out={shard_path.name} hash={h[:16]} "
+            f"expected={(expected_out_hashes[ordinal-1][:16] if expected_out_hashes and ordinal-1 < len(expected_out_hashes) else 'None')}")
+
+        md = pq.read_metadata(shard_path)
+        print(f"[PARQUET.META] rg_counts={[md.row_group(i).num_rows for i in range(md.num_row_groups)]} created_by={md.created_by}")
+        for c in range(md.num_columns):
+            cc = md.row_group(0).column(c)
+            print(f"[PARQUET.CHUNK] col={table.schema.names[c]} codec={cc.compression} encodings={tuple(cc.encodings)} has_dict={cc.dictionary_page_offset is not None}")
+        rgs = [md.row_group(i).num_rows for i in range(md.num_row_groups)]
+        print(f"[PARQUET.META] ord={ordinal} rows={md.num_rows} rgs={rgs} created_by={md.created_by}")
+
+        try:
+            kv = dict(md.metadata) if md.metadata is not None else {}
+            print(f"[PARQUET.KV] {kv}")
+        except Exception as e:
+            print(f"[PARQUET.KV] <err {e!r}>")
+
+        try:
+            for i, name in enumerate(table.schema.names):
+                col = md.row_group(0).column(i)
+                enc = getattr(col, "encodings", None)
+                has_dict = getattr(col, "has_dictionary_page", None)
+                print(f"[PARQUET.CHUNK] col={name} codec={col.compression} encodings={enc} has_dict={has_dict}")
+        except Exception as e:
+            print(f"[PARQUET.CHUNK] <err {e!r}>")
+
+        # Read-back verification (does disk contain exactly what table had?)
+        try:
+            rb = pq.read_table(shard_path)
+            print(f"[READBACK.SCHEMA] {rb.schema}")
+            # buffer-level fp for first column
+            col0 = rb.column(0).combine_chunks()
+            bufs = [b.to_pybytes() for b in col0.buffers() if b is not None]
+            print(f"[READBACK.BUFFERS] col0 nbuf={len(bufs)} fps={[Hash().hash_bytes(b)[:12] for b in bufs]}")
+            rb_imgs  = rb.column("img_bytes").to_pylist()
+            rb_paths = rb.column("path").to_pylist() if "path" in rb.schema.names else ["<none>"]*rb.num_rows
+            rb_fp = [(hasher.hash_bytes(rb_imgs[k]), rb_paths[k]) for k in range(min(3, len(rb_imgs)))]
+            print(f"[PARQUET.READBACK] ord={ordinal} first3_fps+paths={rb_fp} rows={len(rb_imgs)}")
+            if len(rb_imgs) == len(imgs):
+                mismatch_ix = next((k for k in range(len(imgs))
+                                    if hasher.hash_bytes(imgs[k]) != hasher.hash_bytes(rb_imgs[k]) or paths[k] != rb_paths[k]), None)
+                print(f"[PARQUET.CHECK] ord={ordinal} row_mismatch_at={mismatch_ix}")
+        except Exception as e:
+            print(f"[PARQUET.READBACK] ord={ordinal} failed: {e!r}")
 
         if expected_out_hashes:
             # If the step recorded N outputs (one per batch), this ensures exact bytes

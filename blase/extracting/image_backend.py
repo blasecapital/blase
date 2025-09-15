@@ -265,7 +265,7 @@ def scan_manifest_headers(
 
         rec: Dict[str, Any] = {
             "abs_path": str(p),
-            "rel_path": str(p.relative_to(root)) if p.is_relative_to(root) else p.as_posix(),
+            "rel_path": p.resolve().relative_to(root).as_posix(),
             "ext": p.suffix.lower().lstrip("."),
             "bytes": size,
             "mtime": mtime,

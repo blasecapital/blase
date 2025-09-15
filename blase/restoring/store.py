@@ -46,6 +46,12 @@ def pick_code_hash(inputs: List[Dict[str, Any]]) -> str:
             return i["data_hash"]
     raise KeyError("no code blob recorded for step")
 
+def kind_for_hash(run_path: Path, data_hash: str) -> str:
+    db = run_path / "nodes" / "nodes.db"
+    with _conn(db) as c:
+        r = c.execute("SELECT kind FROM data WHERE data_hash=?", (data_hash,)).fetchone()
+    return r[0] if r else None
+
 def lookup_source_path(run_path: Path, data_hash: str) -> Optional[str]:
     db = run_path / "nodes" / "nodes.db"
     with _conn(db) as c:
@@ -114,3 +120,41 @@ def producer_step_for_data(run_path: Path, data_hash: str) -> Optional[str]:
     with _conn(db) as c:
         row = c.execute("SELECT step_hash FROM step_outputs WHERE data_hash=?", (data_hash,)).fetchone()
     return row[0] if row else None
+
+def read_images_params_for_manifest(run_path: Path, manifest_hash: str, ts_before: Optional[str] = None) -> Optional[Dict[str, Any]]:
+    """
+    Return the params_json dict from the Extract.read_images step that produced `manifest_hash`.
+    If ts_before is given, pick the latest at-or-before that timestamp.
+    """
+    db = run_path / "nodes" / "nodes.db"
+    sql = """
+      SELECT s.params_json
+      FROM steps s
+      JOIN step_outputs o ON o.step_hash = s.step_hash
+      WHERE s.function_fqn = 'blase.Extract.read_images'
+        AND o.data_hash = ?
+    """
+    args = [manifest_hash]
+    if ts_before:
+        sql += " AND s.ts_start <= ?"
+        args.append(ts_before)
+    sql += " ORDER BY s.ts_start DESC LIMIT 1"
+    with _conn(db) as c:
+        row = c.execute(sql, tuple(args)).fetchone()
+    if not row:
+        return None
+    try:
+        params = json.loads(row[0])
+    except Exception:
+        return None
+
+    # Provide sane defaults for keys used by restore.
+    params.setdefault("backend", "pil")
+    params.setdefault("return_type", "np")
+    params.setdefault("color", "rgb")
+    params.setdefault("pattern", "**/*.jpg")
+    params.setdefault("recursive", True)
+    params.setdefault("shuffle", False)
+    params.setdefault("safety_margin", 0.15)
+    params.setdefault("hash_mode", "content")
+    return params

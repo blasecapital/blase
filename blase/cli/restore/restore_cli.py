@@ -425,21 +425,33 @@ def _exec_plan_for_step(
             continue
 
         if fqn == "blase.Extract.read_images":
-            ins = store.load_step_inputs(run_path, sh)
+            ins  = store.load_step_inputs(run_path, sh)      # code/env only
+            outs = store.load_step_outputs(run_path, sh)     # manifest + batch_desc_*
 
-            # Recorded artifacts (optional but preferred for deterministic restore)
-            manifest_hash = next((i["data_hash"] for i in ins if i["role"] == "manifest"), None)
-            batch_hashes  = [i["data_hash"] for i in ins if i["role"] == "batch"]
+            # optional sanity
+            code_hash = store.pick_code_hash(ins)
+            env_hash  = next((i["data_hash"] for i in ins if i["role"] == "env"), None)
+
+            # recorded artifacts come from outputs
+            manifest_hash = next((o["data_hash"] for o in outs if o["name"] == "manifest"), None)
+
+            def _ord(o):
+                n = o["name"]
+                try: return int(n.rsplit("_", 1)[-1])
+                except: return 0
+
+            batch_descs = [
+                o["data_hash"] for o in sorted(outs, key=_ord)
+                if o["name"].startswith("batch_desc_")
+            ]
 
             realized = {}
-            # Prefer the recorded directory param; if you later add a 'source' role
-            # that resolves to a path, you can override it here.
             if "directory" in st["params"]:
                 realized["source"] = st["params"]["directory"]
             if manifest_hash:
                 realized["manifest"] = manifest_hash
-            if batch_hashes:
-                realized["batch"] = batch_hashes  # list is fine; binding will normalize
+            if batch_descs:
+                realized["batch_descs"] = batch_descs   # your reader should accept this
 
             upstream = bindings.run_read_images_restore(
                 run_path=run_path,
@@ -452,20 +464,51 @@ def _exec_plan_for_step(
         if fqn == "blase.Transform.apply_function":
             ins = store.load_step_inputs(run_path, sh)
             fn  = code.load_callable_from_blob(cas.path_for(run_path, "code", store.pick_code_hash(ins)))
-            src_hash = next((i["data_hash"] for i in ins if i["role"] == "source"), None)
-            if not src_hash:
-                raise SystemExit("replay: Transform.apply_function missing 'source' input")
 
-            src_path, created_src = _resolve_source_no_copy(
-                run_path, src_hash, seen_steps=seen_steps, created_paths=created_paths
-            )
+            # If an upstream generator already exists, consume it.
+            if upstream is not None:
+                upstream = bindings.run_apply_function_restore(
+                    run_path=run_path, params=st["params"], realized={"source_gen": upstream}, transform_fn=fn
+                )
+                continue
 
-            upstream = bindings.run_apply_function_restore(
-                run_path=run_path,
-                params=st["params"],
-                realized={"source": src_path},
-                transform_fn=fn,
-            )
+            # Otherwise, anchor by manifest/source and build the upstream now.
+            def _pick_anchor(roles=("source","manifest","dataset","manifest_root")):
+                for r in roles:
+                    h = next((i["data_hash"] for i in ins if i["role"] == r), None)
+                    if h:
+                        return r, h
+                return None, None
+
+            role, anchor_hash = _pick_anchor()
+            if not anchor_hash:
+                raise SystemExit("replay: Transform.apply_function missing anchor (source|manifest|dataset)")
+
+            if role == "source":
+                src_path, _ = _resolve_source_no_copy(run_path, anchor_hash, seen_steps=seen_steps, created_paths=created_paths)
+                upstream = bindings.run_apply_function_restore(
+                    run_path=run_path, params=st["params"], realized={"source": src_path}, transform_fn=fn
+                )
+            else:
+                # treat anchor as the manifest
+                man_hash = anchor_hash
+                ts_before = planner._step_row(planner._db(run_path), sh)["ts_start"]
+                ri_params = store.read_images_params_for_manifest(run_path, man_hash, ts_before=ts_before)
+                if not ri_params:
+                    raise SystemExit("replay: cannot find read_images params for manifest")
+
+                ins_tr = store.load_step_inputs(run_path, sh)
+                batch_descs = [i["data_hash"] for i in ins_tr if i["role"] in ("batch_desc","batch")]
+                gen = bindings.run_read_images_restore(
+                    run_path=run_path,
+                    params=ri_params,
+                    realized={"source": ri_params.get("directory"),
+                            "manifest": man_hash,
+                            "batch": batch_descs},    # your reader should normalize 'batch'/'batch_descs'
+                )
+                upstream = bindings.run_apply_function_restore(
+                    run_path=run_path, params=st["params"], realized={"source_gen": gen}, transform_fn=fn
+                )
             continue
 
         if fqn == "blase.Load.save_to_csv":
@@ -529,10 +572,15 @@ def _exec_plan_for_step(
         if fqn == "blase.Load.save_images_to_parquet":
             ins  = store.load_step_inputs(run_path, sh)
             outs = store.load_step_outputs(run_path, sh)
+            st = store.load_step(run_path, sh)
+
+            def _ord(o):
+                n = o["name"]
+                return int(n.split("_")[-1]) if n.startswith("parquet_shard_") else 0
+            outs.sort(key=_ord)
 
             # Collect expected hashes (one per shard) if they were recorded.
             expected_out_hashes = [o["data_hash"] for o in outs if o["name"].startswith("parquet_shard")]
-            # (If you recorded one output per batch, the order should match emission order.)
 
             # Destination: a directory
             if to_path:
@@ -546,7 +594,6 @@ def _exec_plan_for_step(
                 conflict_policy = "overwrite"
 
             upstream_gen = upstream or _upstream_gen_for_sink(run_path, sh)
-
             handler = bindings.RESTORE_HANDLERS[fqn]
             out_paths = handler(
                 run_path=run_path,
@@ -602,8 +649,14 @@ def _ensure_data_local_or_replay(
     (using shared seen_steps/created_paths), then materialize it.
     Returns (path, created_now).
     """
+    if not kind:
+        kind = store.kind_for_hash(run_path, data_hash)
     try:
-        p = materialize.ensure_local(run_path, data_hash, kind=kind, policy="reuse", to_dir=None)
+        ext = {"parquet": ".parquet", "parquet.shard": ".parquet",
+       "image.manifest": ".json", "image.batch.meta": ".json",
+       "code": ".py", "env": ".json"}.get(kind, ".bin")
+        target_name = f"{data_hash}{ext}"
+        p = materialize.ensure_local(run_path, data_hash, kind=kind, policy="reuse", to_dir=None, target_name=target_name)
         _assert_path_matches_hash(p, data_hash, f"{kind} materialization")
         return p, False
     except NeedReplay:
@@ -1054,8 +1107,21 @@ def cmd_run(args):
         else:
             gen = restore_step(run_path, step_hash, kind="data")
 
+        def _coerce_stream_2(gen):
+            for item in gen:
+                if isinstance(item, tuple):
+                    if len(item) == 3:
+                        b, _meta, last = item
+                    elif len(item) == 2:
+                        b, last = item
+                    else:
+                        b, last = item, False
+                else:
+                    b, last = item, False
+                yield b, last
+
         total = 0
-        for i, (b, last) in enumerate(gen, 1):
+        for i, (b, last) in enumerate(_coerce_stream_2(gen), 1):
             try:
                 n = len(b)
             except Exception:

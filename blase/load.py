@@ -10,6 +10,7 @@ from blase.loading.img_parquet_backend import (
     _build_parquet_table_from_images,
     _write_parquet_table,
     _compute_shard_path,
+    RECORDED_WRITER_CFG
 )
 from blase.utils.backends import resolve_backend_csv
 from blase.track import Track
@@ -362,6 +363,17 @@ class Load:
             subdir=subdir,
         )
 
+        writer_cfg = {**RECORDED_WRITER_CFG, "compression": compression}
+        params = {
+            "target_dir": str(base_dir),
+            "shard_prefix": shard_prefix,
+            "encode": encode,
+            "jpeg_quality": int(jpeg_quality),
+            "compression": compression,
+            "use_blase_path": bool(use_blase_path),
+            "writer_cfg": writer_cfg,
+        }
+
         # ---------- Untracked fast-path ----------
         if tracker is None or False:
             shard_path = _compute_shard_path(
@@ -380,7 +392,7 @@ class Load:
             _write_parquet_table(
                 table,
                 shard_path,
-                compression=compression,
+                writer_cfg=writer_cfg,
                 on_conflict=on_conflict
             )
             return str(shard_path), last_batch, (meta or {})
@@ -398,19 +410,13 @@ class Load:
             if self._stream is not None:
                 self._stream.close_ok()
 
-            params = {
-                "target_dir": str(base_dir),
-                "shard_prefix": shard_prefix,
-                "encode": encode,
-                "jpeg_quality": int(jpeg_quality),
-                "compression": compression,
-                "use_blase_path": bool(use_blase_path),
-            }
             self._stream = tracker.stream(
                 "blase.Load.save_images_to_parquet", 
                 params,
                 code_fn=self.save_images_to_parquet
                 )
+            setattr(self._stream, "params", params)
+            self._writer_cfg = writer_cfg 
             self._parquet_base_dir = base_dir
             self._parquet_prefix = shard_prefix
             self._parquet_encode = encode
@@ -434,12 +440,35 @@ class Load:
                 jpeg_quality=jpeg_quality,
                 include_paths=include_paths
             )
-            _write_parquet_table(
-                table,
-                shard_path,
-                compression=compression,
-                on_conflict=on_conflict
-            )
+            cfg = (getattr(self._stream, "params", {}).get("writer_cfg")
+                or getattr(self, "_writer_cfg", None)
+                or RECORDED_WRITER_CFG)
+            import json
+            print("[PHASE]", "produce" or "restore")
+            print("[WRITER.CFG]", json.dumps(cfg, sort_keys=True))
+            print("[INCLUDE_PATHS]", include_paths)
+            print("[TABLE.SCHEMA]", [f"{f.name}:{f.type}" for f in table.schema])
+            print("[TABLE.ROWS]", table.num_rows)
+            from blase.utils.hashing import Hash
+            print("[TABLE.FIRST2]", [
+                (Hash().hash_bytes(table.column("img_bytes").chunk(0).to_pylist()[i]), 
+                table.column("path").chunk(0).to_pylist()[i])
+                for i in range(min(2, table.num_rows))
+            ])
+
+            _write_parquet_table(table, shard_path, writer_cfg=cfg, on_conflict=on_conflict)
+            import pyarrow.parquet as pq
+            print("[AFTER.WRITE.HASH]", Hash().hash_file(shard_path))
+            pf = pq.ParquetFile(shard_path)
+            rg = pf.metadata.row_group(0)
+            print("[AFTER.META]", dict(
+                num_rows=pf.metadata.num_rows,
+                num_row_groups=pf.metadata.num_row_groups,
+                created_by=pf.metadata.created_by,
+                col_encodings=[tuple(rg.column(i).encodings) for i in range(table.num_columns)],
+                col_codecs=[rg.column(i).compression for i in range(table.num_columns)],
+                col_stats_present=[rg.column(i).statistics is not None for i in range(table.num_columns)],
+            ))
         except Exception as e:
             self._stream.close_error(type(e), e, e.__traceback__)
             self._stream = None
@@ -477,7 +506,8 @@ class Load:
             path_or_bytes=shard_path,
             metadata={"shard_path": str(shard_path)}
         )
-        self._stream.step.add_output(shard_hash, name="parquet_shard")
+        print("[PRODUCE.RECORDED_HASH]", shard_hash) 
+        self._stream.step.add_output(shard_hash, name=f"parquet_shard_{self._parquet_counter:05d}")
 
         if last_batch:
             # OPTIONAL: write a tiny JSON index of shards (placeholder)

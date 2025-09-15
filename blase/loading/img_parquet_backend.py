@@ -174,20 +174,66 @@ def _build_parquet_table_from_images(
         "batch_hash": pa.array([batch_hash] * len(enc_bytes), type=pa.string()),
     }
 
-    if include_paths:
-        if paths and len(paths) == len(enc_bytes):
-            cols["path"] = pa.array(paths, type=pa.string())
-        else:
-            cols["path"] = pa.nulls(len(enc_bytes), type=pa.string())
+    # derive paths from meta, keep order 1:1 with enc_bytes
+    paths = list((meta or {}).get("items_rel_paths") or [])
 
-    return pa.table(cols)
+    if include_paths and paths and len(paths) == len(enc_bytes):
+        cols["path"] = pa.array(paths, type=pa.string())   # ordered, POSIX
+    else:
+        cols["path"] = pa.nulls(len(enc_bytes), type=pa.string())
+
+    order = ["img_bytes","height","width","channels","label","manifest_root_hash","batch_hash","path"]
+    names = [k for k in order if k in cols]
+    arrays = [cols[k] for k in names]
+    print(f"[TABLE.BUILD] rows={len(next(iter(cols.values())).to_pylist()) if cols else 0} "
+      f"cols={names}")
+
+    # If path column present, dump first few in-order
+    if "path" in names:
+        try:
+            _paths = cols["path"].to_pylist()
+            print(f"[TABLE.PATHS] first3={_paths[:3]} len={len(_paths)}")
+        except Exception:
+            pass
+
+    rows = len(next(iter(cols.values())).to_pylist()) if cols else 0
+    print(f"[TABLE.BUILD] rows={rows} cols={names}")
+    if "path" in cols:
+        try:
+            _paths = cols["path"].to_pylist()
+            print(f"[TABLE.PATHS] first3={_paths[:3]} len={len(_paths)}")
+        except Exception as e:
+            print(f"[TABLE.PATHS] error={e!r}")
+    return pa.Table.from_arrays(arrays, names=names)
+
+RECORDED_WRITER_CFG = {
+    "version": "2.6",
+    "data_page_version": "1.0",
+    "compression": "zstd",
+    "compression_level": 3,
+    "use_dictionary": True,
+    "write_statistics": True,
+    "row_group_size": 1024*1024,
+    "write_batch_size": 1024*32,
+    "coerce_timestamps": "us",
+    "allow_truncated_timestamps": False,
+    "use_deprecated_int96_timestamps": False,
+    "use_byte_stream_split": False,
+    "use_compliant_nested_type": True,
+    "store_schema": True,
+    "store_decimal_as_integer": False,
+    "write_page_index": False,
+    "write_page_checksum": False,
+    "column_encoding": None,
+    "sorting_columns": None,
+}
 
 # ---- writer & conflict policy ----
 def _write_parquet_table(
     table: pa.Table,
     out_path: Path,
     *,
-    compression: Literal["zstd","snappy"],
+    writer_cfg: dict,
     on_conflict: Literal["overwrite","fail","rename"],
 ) -> Path:
     out_path = Path(out_path)
@@ -200,7 +246,56 @@ def _write_parquet_table(
             out_path = _auto_rename(out_path)
         # "overwrite" -> do nothing
 
-    pq.write_table(table, out_path, compression=compression)
+    cfg = {**RECORDED_WRITER_CFG, **(writer_cfg or {})}
+    # pin to a single row group for small tables to avoid chunk-driven drift
+    rg_size = max(int(table.num_rows), 1)
+
+    print("[WRITE.RG_SIZE]", rg_size)
+    print("[WRITE.ARGS]", dict(
+        version=cfg.get("version"), use_dictionary=cfg.get("use_dictionary"),
+        compression=cfg.get("compression"), compression_level=cfg.get("compression_level"),
+        write_statistics=cfg.get("write_statistics"), data_page_version=cfg.get("data_page_version"),
+        coerce_timestamps=cfg.get("coerce_timestamps"),
+        allow_truncated_timestamps=cfg.get("allow_truncated_timestamps"),
+        use_byte_stream_split=cfg.get("use_byte_stream_split"),
+        write_page_index=cfg.get("write_page_index"),
+        write_page_checksum=cfg.get("write_page_checksum"),
+        store_schema=cfg.get("store_schema"),
+        use_compliant_nested_type=cfg.get("use_compliant_nested_type"),
+    ))
+    pq.write_table(
+        table,
+        out_path,
+        row_group_size=rg_size,
+        version=cfg.get("version", "2.6"),
+        use_dictionary=cfg.get("use_dictionary", True),
+        compression=cfg.get("compression", "zstd"),
+        write_statistics=cfg.get("write_statistics", True),
+        data_page_version=cfg.get("data_page_version", "1.0"),
+        use_deprecated_int96_timestamps=cfg.get("use_deprecated_int96_timestamps", False),
+        coerce_timestamps=cfg.get("coerce_timestamps", "us"),
+        allow_truncated_timestamps=cfg.get("allow_truncated_timestamps", False),
+        use_byte_stream_split=cfg.get("use_byte_stream_split", False),
+        compression_level=cfg.get("compression_level", None),
+        write_page_index=cfg.get("write_page_index", False),
+        write_page_checksum=cfg.get("write_page_checksum", False),
+        store_schema=cfg.get("store_schema", True),
+        use_compliant_nested_type=cfg.get("use_compliant_nested_type", True),
+        write_batch_size=cfg.get("write_batch_size", None),   # ← important
+        # column_encoding / sorting_columns intentionally omitted unless you record them
+    )
+    from blase.utils.hashing import Hash
+    print("[AFTER.WRITE.HASH]", Hash().hash_file(out_path))
+    pf = pq.ParquetFile(out_path)
+    rg = pf.metadata.row_group(0)
+    print("[AFTER.META]", dict(
+        num_rows=pf.metadata.num_rows,
+        num_row_groups=pf.metadata.num_row_groups,
+        created_by=pf.metadata.created_by,
+        col_encodings=[tuple(rg.column(i).encodings) for i in range(table.num_columns)],
+        col_codecs=[rg.column(i).compression for i in range(table.num_columns)],
+        col_stats_present=[rg.column(i).statistics is not None for i in range(table.num_columns)],
+    ))
     return out_path
 
 def _auto_rename(p: Path) -> Path:

@@ -12,6 +12,13 @@ from .io_safety import resolve_conflict_path
 class NeedReplay(FileNotFoundError):
     """Raised when a data hash has no valid local copy; caller should replay."""
 
+META_KINDS = (
+    "image.manifest",
+    "image.batch.meta",
+    "dataset.checkpoint.meta",
+    # add any other descriptor kinds you store as bytes in CAS
+)
+
 def _valid_local_candidates(run_path: Path, data_hash: str) -> List[Path]:
     """
     Return valid local file paths that match a given data hash.
@@ -128,12 +135,11 @@ def ensure_local(run_path: Path, data_hash: str, *, kind: str = "data",
     """
     hasher = Hash()
 
-    # Code/env blobs still come from CAS
-    if kind in ("code", "env"):
-        cas_path = cas.path_for(run_path, kind=kind, data_hash=data_hash)
-        if not cas_path.exists():
-            raise FileNotFoundError(f"missing {kind} blob in CAS: {cas_path}")
-        return cas_path  # usually we just return the CAS path for callables/env
+    if kind in ("code", "env") or kind in META_KINDS:
+        p = cas.path_for(run_path, kind=kind, data_hash=data_hash)
+        if not p.exists():
+            raise FileNotFoundError(f"missing {kind} blob in CAS: {p}")
+        return p
 
     # Data kinds: prefer local materializations/source-of-truth
     candidates = _valid_local_candidates(run_path, data_hash)

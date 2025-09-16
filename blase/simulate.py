@@ -73,7 +73,7 @@ class Simulate:
         config: Optional[dict] = None,
         seed: Optional[int] = None,
         curriculum: Optional[dict] = None,
-        multi_env: bool = False
+        multi_env: bool = False,
     ) -> None:
         pass
 
@@ -87,7 +87,7 @@ class Simulate:
         max_steps: Optional[int] = None,
         callbacks: Optional[List[Callable]] = None,
         multi_agent: bool = False,
-        curriculum_schedule: Optional[Callable[[int], dict]] = None
+        curriculum_schedule: Optional[Callable[[int], dict]] = None,
     ) -> None:
         pass
 

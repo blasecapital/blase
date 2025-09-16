@@ -3,6 +3,7 @@ from typing import Iterable
 
 from blase.track import Track
 
+
 class Transform:
     """
     A utility class for applying user-defined and built-in transformations to batched datasets.
@@ -58,18 +59,13 @@ class Transform:
     - Works as an **intermediate step** between data extraction and model training.
     - Provides flexibility to use **either inline functions, classes, or external scripts** for transformations.
     """
+
     def __init__(self):
         self._stream = None
         self._fn_tag = None
 
     def apply_function(
-        self,
-        *,
-        data,
-        transform_func,
-        last_batch,
-        meta=None,
-        track=True
+        self, *, data, transform_func, last_batch, meta=None, track=True
     ):
         """
         Apply a user transform to one batch in a tracked stream, propagating lineage.
@@ -164,10 +160,17 @@ class Transform:
             return out, last_batch, (meta or {})
 
         # Identify the callable for stream grouping (one step per function per stream)
-        fn_qual = getattr(transform_func, "__qualname__", getattr(transform_func, "__name__", "callable"))
+        fn_qual = getattr(
+            transform_func,
+            "__qualname__",
+            getattr(transform_func, "__name__", "callable"),
+        )
 
         # If new stream or function changed, (re)open a StreamStep and stash replay hints
-        if getattr(self, "_stream", None) is None or getattr(self, "_fn_tag", None) != fn_qual:
+        if (
+            getattr(self, "_stream", None) is None
+            or getattr(self, "_fn_tag", None) != fn_qual
+        ):
             # Close any prior open step cleanly
             if getattr(self, "_stream", None) is not None:
                 self._stream.close_ok()
@@ -200,12 +203,15 @@ class Transform:
                 if m.get(k) is not None:
                     params[k] = m[k]
 
-            self._stream = tracker.stream("blase.Transform.apply_function", params, code_fn=transform_func)
+            self._stream = tracker.stream(
+                "blase.Transform.apply_function", params, code_fn=transform_func
+            )
             # wire lineage as inputs once (safe to repeat; implementation can de-dup)
             m = meta or {}
-            up = (m.get("upstream") or [])
+            up = m.get("upstream") or []
             for u in up:
-                rid = u.get("id"); role = u.get("role")
+                rid = u.get("id")
+                role = u.get("role")
                 if rid and role in {"manifest", "batch_desc", "batch"}:
                     try:
                         self._stream.step.add_input(rid, role=role, arg_name=None)
@@ -213,10 +219,12 @@ class Transform:
                         pass  # tolerate replays/duplicates
 
             # you can also store manifest root for convenience (optional)
-            root = (m.get("manifest_root_hash") or m.get("root_hash"))
+            root = m.get("manifest_root_hash") or m.get("root_hash")
             if root:
                 try:
-                    self._stream.step.add_input(root, role="manifest_root", arg_name=None)
+                    self._stream.step.add_input(
+                        root, role="manifest_root", arg_name=None
+                    )
                 except Exception:
                     pass
             self._fn_tag = fn_qual
@@ -232,7 +240,7 @@ class Transform:
             raise
 
         # Record upstream lineage for this batch; seal on last
-        self._stream.step.add_upstream_from_meta(meta) 
+        self._stream.step.add_upstream_from_meta(meta)
         new_meta = self._stream.emit(last_batch=last_batch, meta=meta)
 
         if last_batch:
@@ -242,6 +250,12 @@ class Transform:
 
         return out, last_batch, new_meta
 
-    def apply_from_module(self, data: Iterable, module_path: str, function_name: str) -> Iterable: pass
-    def apply_standard_transformation(self, data, transformation: str, columns: list): pass
+    def apply_from_module(
+        self, data: Iterable, module_path: str, function_name: str
+    ) -> Iterable:
+        pass
+
+    def apply_standard_transformation(self, data, transformation: str, columns: list):
+        pass
+
     # Maybe include a fill missing values explicitly here or include it in standard transformation

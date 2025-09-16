@@ -126,7 +126,9 @@ class Performance:
         """
         pass
 
-    def compare_runs(self, log_path_1: str, log_path_2: str) -> Dict[str, Dict[str, float]]:
+    def compare_runs(
+        self, log_path_1: str, log_path_2: str
+    ) -> Dict[str, Dict[str, float]]:
         """
         Compare two performance logs side-by-side.
 

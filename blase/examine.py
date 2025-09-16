@@ -4,7 +4,7 @@ import numpy as np
 import pandas as pd
 
 
-class Examine():
+class Examine:
     """
     Provides tools for inspecting and visualizing batched datasets.
 

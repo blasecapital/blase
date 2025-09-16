@@ -2,8 +2,6 @@
 
 import os
 import sys
-import csv
-import json
 import sqlite3
 import importlib
 import subprocess
@@ -16,6 +14,7 @@ from PIL import Image
 
 
 # ---------------- Helpers ----------------
+
 
 def import_blase_fresh(project_root: Path) -> ModuleType:
     os.environ["BLASE_HOME"] = str(project_root)
@@ -55,7 +54,8 @@ def gen_images(data_root: Path, n=6, size=(32, 24)):
 def _latest_run_path(project_root: Path) -> Path:
     roots = {project_root, project_root.parent}
     bh = Path(os.environ.get("BLASE_HOME", str(project_root)))
-    roots.add(bh); roots.add(bh.parent)
+    roots.add(bh)
+    roots.add(bh.parent)
     cands = []
     for root in roots:
         rr = root / "runs"
@@ -103,19 +103,24 @@ def parquet_sink_step(project_root: Path) -> str:
 def parquet_data_hashes_for_step(project_root: Path, step_hash: str):
     c = _con(project_root)
     try:
-        rows = c.execute("""
+        rows = c.execute(
+            """
             SELECT name, data_hash
             FROM step_outputs
             WHERE step_hash=?
             ORDER BY CAST(substr(name, length('parquet_shard_') + 1) AS INTEGER) NULLS LAST
-        """, (step_hash,)).fetchall()
+        """,
+            (step_hash,),
+        ).fetchall()
         # keep only parquet_shard_* rows
         return [r["data_hash"] for r in rows if r["name"].startswith("parquet_shard_")]
     finally:
         c.close()
 
 
-def run_image_pipeline_once(project_root: Path, data_root: Path, *, track=True, shard_prefix="flowers"):
+def run_image_pipeline_once(
+    project_root: Path, data_root: Path, *, track=True, shard_prefix="flowers"
+):
     blase = import_blase_fresh(project_root)
     ex, tr, ld = blase.Extract(), blase.Transform(), blase.Load()
 
@@ -175,13 +180,21 @@ def run_image_pipeline_once(project_root: Path, data_root: Path, *, track=True, 
 def cli_restore_step(project_root: Path, step_hash: str, target_dir: Path):
     run_path = _latest_run_path(project_root)
     cmd = [
-        sys.executable, "-m", "blase.cli.cli",
-        "restore", "run",
-        "--run", str(run_path),
-        "--step", step_hash,
-        "--mode", "replay",
-        "--to", str(target_dir),
-        "--on-conflict", "overwrite",
+        sys.executable,
+        "-m",
+        "blase.cli.cli",
+        "restore",
+        "run",
+        "--run",
+        str(run_path),
+        "--step",
+        step_hash,
+        "--mode",
+        "replay",
+        "--to",
+        str(target_dir),
+        "--on-conflict",
+        "overwrite",
     ]
     return subprocess.run(cmd, cwd=project_root, capture_output=True, text=True)
 
@@ -189,13 +202,21 @@ def cli_restore_step(project_root: Path, step_hash: str, target_dir: Path):
 def cli_restore_data(project_root: Path, data_hash: str, target_dir: Path):
     run_path = _latest_run_path(project_root)
     cmd = [
-        sys.executable, "-m", "blase.cli.cli",
-        "restore", "run",
-        "--run", str(run_path),
-        "--data", data_hash,
-        "--mode", "replay",
-        "--to", str(target_dir),
-        "--on-conflict", "overwrite",
+        sys.executable,
+        "-m",
+        "blase.cli.cli",
+        "restore",
+        "run",
+        "--run",
+        str(run_path),
+        "--data",
+        data_hash,
+        "--mode",
+        "replay",
+        "--to",
+        str(target_dir),
+        "--on-conflict",
+        "overwrite",
     ]
     return subprocess.run(cmd, cwd=project_root, capture_output=True, text=True)
 
@@ -203,18 +224,27 @@ def cli_restore_data(project_root: Path, data_hash: str, target_dir: Path):
 def cli_materialize_data(project_root: Path, data_hash: str, target_dir: Path):
     run_path = _latest_run_path(project_root)
     cmd = [
-        sys.executable, "-m", "blase.cli.cli",
-        "restore", "run",
-        "--run", str(run_path),
-        "--data", data_hash,
-        "--mode", "materialize",
-        "--to", str(target_dir),
-        "--on-conflict", "overwrite",
+        sys.executable,
+        "-m",
+        "blase.cli.cli",
+        "restore",
+        "run",
+        "--run",
+        str(run_path),
+        "--data",
+        data_hash,
+        "--mode",
+        "materialize",
+        "--to",
+        str(target_dir),
+        "--on-conflict",
+        "overwrite",
     ]
     return subprocess.run(cmd, cwd=project_root, capture_output=True, text=True)
 
 
 # ---------------- Tests ----------------
+
 
 @pytest.mark.integration
 def test_restore_cli_image_parquet_materialize_and_replay(tmp_path, monkeypatch):
@@ -224,7 +254,9 @@ def test_restore_cli_image_parquet_materialize_and_replay(tmp_path, monkeypatch)
     gen_images(data_root, n=6)
 
     # Run image pipeline once → produce shards
-    out_paths = run_image_pipeline_once(project_root, data_root, track=True, shard_prefix="flowers")
+    out_paths = run_image_pipeline_once(
+        project_root, data_root, track=True, shard_prefix="flowers"
+    )
     assert out_paths, "No parquet shards produced"
     for p in out_paths:
         assert p.exists()
@@ -235,7 +267,6 @@ def test_restore_cli_image_parquet_materialize_and_replay(tmp_path, monkeypatch)
     assert len(shard_hashes) == len(out_paths)
 
     # Hash each shard then delete to force restore
-    shard_hashes_fp = [(Hash().hash_file(p), p.name) for p in out_paths]
     for p in out_paths:
         p.unlink()
         assert not p.exists()
@@ -244,11 +275,15 @@ def test_restore_cli_image_parquet_materialize_and_replay(tmp_path, monkeypatch)
     step_target_dir = project_root / "restore_step_parquet"
     step_target_dir.mkdir(parents=True, exist_ok=True)
     res = cli_restore_step(project_root, shash, step_target_dir)
-    assert res.returncode == 0, f"CLI step replay failed:\nSTDOUT:\n{res.stdout}\nSTDERR:\n{res.stderr}"
+    assert res.returncode == 0, (
+        f"CLI step replay failed:\nSTDOUT:\n{res.stdout}\nSTDERR:\n{res.stderr}"
+    )
 
     # Expect shards present again (names may be deterministic per handler)
     step_outs = sorted(step_target_dir.glob("*.parquet"))
-    assert len(step_outs) >= len(shard_hashes), "Expected at least as many shards after step replay"
+    assert len(step_outs) >= len(shard_hashes), (
+        "Expected at least as many shards after step replay"
+    )
 
     # ---- Data materialize: each shard by its data hash
     mat_dir = project_root / "restore_mat_parquet"
@@ -258,7 +293,9 @@ def test_restore_cli_image_parquet_materialize_and_replay(tmp_path, monkeypatch)
         if target.exists():
             target.unlink()
         res = cli_materialize_data(project_root, dh, target)
-        assert res.returncode == 0, f"CLI materialize failed for shard {i}:\n{res.stdout}\n{res.stderr}"
+        assert res.returncode == 0, (
+            f"CLI materialize failed for shard {i}:\n{res.stdout}\n{res.stderr}"
+        )
         assert target.exists()
         # materialize path should match bytes
         assert Hash().hash_file(target) == dh
@@ -271,7 +308,9 @@ def test_restore_cli_image_parquet_materialize_and_replay(tmp_path, monkeypatch)
         if target.exists():
             target.unlink()
         res = cli_restore_data(project_root, dh, target)
-        assert res.returncode == 0, f"CLI data replay failed for shard {i}:\n{res.stdout}\n{res.stderr}"
+        assert res.returncode == 0, (
+            f"CLI data replay failed for shard {i}:\n{res.stdout}\n{res.stderr}"
+        )
         assert target.exists()
         # strict bytes check
         assert Hash().hash_file(target) == dh

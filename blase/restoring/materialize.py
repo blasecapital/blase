@@ -9,8 +9,10 @@ from blase.utils import config
 from blase.restoring import store, cas
 from .io_safety import resolve_conflict_path
 
+
 class NeedReplay(FileNotFoundError):
     """Raised when a data hash has no valid local copy; caller should replay."""
+
 
 META_KINDS = (
     "image.manifest",
@@ -18,6 +20,7 @@ META_KINDS = (
     "dataset.checkpoint.meta",
     # add any other descriptor kinds you store as bytes in CAS
 )
+
 
 def _valid_local_candidates(run_path: Path, data_hash: str) -> List[Path]:
     """
@@ -62,10 +65,17 @@ def _valid_local_candidates(run_path: Path, data_hash: str) -> List[Path]:
 
     return out
 
-def ensure_local(run_path: Path, data_hash: str, *, kind: str = "data",
-                 policy: str = "reuse", to_dir: Optional[Path] = None,
-                 target_name: Optional[str] = None,
-                 on_conflict: Optional[str] = None) -> Path:
+
+def ensure_local(
+    run_path: Path,
+    data_hash: str,
+    *,
+    kind: str = "data",
+    policy: str = "reuse",
+    to_dir: Optional[Path] = None,
+    target_name: Optional[str] = None,
+    on_conflict: Optional[str] = None,
+) -> Path:
     """
     Ensure a data, code, or environment artifact is locally materialized.
 
@@ -158,9 +168,11 @@ def ensure_local(run_path: Path, data_hash: str, *, kind: str = "data",
     out.parent.mkdir(parents=True, exist_ok=True)
 
     # Conflict policy (rename/overwrite/fail)
-    out = resolve_conflict_path(out,
-                                policy=(on_conflict or config.RESTORE_CONFLICT),
-                                suffix=config.RESTORE_SUFFIX)
+    out = resolve_conflict_path(
+        out,
+        policy=(on_conflict or config.RESTORE_CONFLICT),
+        suffix=config.RESTORE_SUFFIX,
+    )
 
     # Try hardlink, else copy
     try:

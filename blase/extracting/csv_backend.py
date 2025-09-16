@@ -13,7 +13,7 @@ def memory_aware_batcher(
     backend: str = "pandas",
     safety_factor: float = 0.2,
     verbose: bool = False,
-    fallback_memory_limit_mb: int = 512
+    fallback_memory_limit_mb: int = 512,
 ) -> int:
     """
     Estimate an optimal batch size (number of rows) for reading a CSV file,
@@ -47,15 +47,19 @@ def memory_aware_batcher(
     else:
         available_memory = fallback_memory_limit_mb * 1024 * 1024  # convert MB to bytes
         if verbose:
-            print(f"[WARN] psutil not installed. Assuming {fallback_memory_limit_mb}MB available.")
+            print(
+                f"[WARN] psutil not installed. Assuming {fallback_memory_limit_mb}MB available."
+            )
 
     sample_rows = 1000
     if backend == "pandas":
         import pandas as pd
+
         sample_df = pd.read_csv(file_path, nrows=sample_rows)
         mem_usage = sample_df.memory_usage(deep=True).sum()
     elif backend == "polars":
         import polars as pl
+
         sample_df = pl.read_csv(file_path, n_rows=sample_rows)
         mem_usage = sample_df.estimated_size()
     else:
@@ -77,7 +81,7 @@ def read_batches_pandas(
     file_path: str,
     batch_size: Union[int, None],
     use_cols: Optional[List[str]] = None,
-    filter_by: Optional[List[Dict[str, Any]]] = None
+    filter_by: Optional[List[Dict[str, Any]]] = None,
 ) -> Iterable[Any]:
     """
     Read a CSV in memory-safe batches using pandas, with optional filtering on each chunk.
@@ -103,19 +107,22 @@ def read_batches_pandas(
     import pandas as pd
 
     try:
-        chunk_iter = peekable(pd.read_csv(file_path, chunksize=batch_size, usecols=use_cols))
+        chunk_iter = peekable(
+            pd.read_csv(file_path, chunksize=batch_size, usecols=use_cols)
+        )
         last_batch = False
 
         for chunk in chunk_iter:
             if filter_by:
                 for condition in filter_by:
-
                     col = condition.get("col")
                     val = condition.get("value")
 
                     if col not in chunk.columns:
-                        raise ValueError(f"[Pandas Backend] Column '{col}' not found in read columns.")
-                    
+                        raise ValueError(
+                            f"[Pandas Backend] Column '{col}' not found in read columns."
+                        )
+
                     if isinstance(val, list):
                         chunk = chunk[chunk[col].isin(val)]
                     else:
@@ -128,13 +135,13 @@ def read_batches_pandas(
 
     except Exception as e:
         raise RuntimeError(f"[Pandas Backend] Failed to read CSV in batches: {e}")
-    
-    
+
+
 def read_batches_polars(
-        file_path: str, 
-        batch_size: int, 
-        use_cols: Optional[List[str]] = None,
-        filter_by: Optional[Dict[str, Any]] = None
+    file_path: str,
+    batch_size: int,
+    use_cols: Optional[List[str]] = None,
+    filter_by: Optional[Dict[str, Any]] = None,
 ) -> Iterable[Any]:
     """
     Stream batches from a CSV using Polars with optional column filters.
@@ -191,11 +198,11 @@ def read_batches_polars(
         while True:
             batch_df = scan_csv.slice(offset, batch_size).collect()
             num_rows = batch_df.height
-            
+
             # If empty batch is returned, break loop
             if batch_df.is_empty():
                 break
-            
+
             if num_rows < batch_size:
                 last_batch = True
 

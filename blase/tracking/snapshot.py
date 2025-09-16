@@ -5,6 +5,7 @@ import json
 import textwrap
 from pathlib import Path
 
+
 def _read_module_source(mod) -> Optional[str]:
     try:
         p = getattr(mod, "__file__", None)
@@ -17,11 +18,13 @@ def _read_module_source(mod) -> Optional[str]:
     except Exception:
         return None
 
+
 def _read_function_source(fn) -> Optional[str]:
     try:
         return textwrap.dedent(inspect.getsource(fn))
     except Exception:
         return None
+
 
 def build_code_blob(fn: Any) -> Tuple[bytes, Dict[str, Any]]:
     """
@@ -45,7 +48,7 @@ def build_code_blob(fn: Any) -> Tuple[bytes, Dict[str, Any]]:
         - **blob** : bytes
             Canonical JSON-encoded representation of the snapshot.
             Includes:
-            
+
             * `v`: Schema version.
             * `entry`: Dict with `module` name and function
               `qualname`.
@@ -96,9 +99,14 @@ def build_code_blob(fn: Any) -> Tuple[bytes, Dict[str, Any]]:
         "function_source": _read_function_source(fn),
     }
     blob = json.dumps(doc, sort_keys=True, separators=(",", ":")).encode("utf-8")
-    meta = {"v": 1, "entry": doc["entry"], "has_module": doc["module_source"] is not None,
-            "has_function": doc["function_source"] is not None}
+    meta = {
+        "v": 1,
+        "entry": doc["entry"],
+        "has_module": doc["module_source"] is not None,
+        "has_function": doc["function_source"] is not None,
+    }
     return blob, meta
+
 
 def build_env_manifest() -> Tuple[bytes, Dict[str, Any]]:
     """
@@ -120,14 +128,14 @@ def build_env_manifest() -> Tuple[bytes, Dict[str, Any]]:
         - **blob** : bytes
             Canonical JSON-encoded representation of the environment
             manifest. Includes:
-            
+
             * `v`: Schema version.
             * `packages`: List of dicts with fields
               `{"name": str, "version": str}`.
 
         - **meta** : dict
             Companion metadata with summary information. Includes:
-            
+
             * `v`: Schema version.
             * `count`: Number of packages captured.
 
@@ -154,10 +162,10 @@ def build_env_manifest() -> Tuple[bytes, Dict[str, Any]]:
         from importlib.metadata import distributions  # py39 ok via backport if needed
     except Exception:
         from importlib_metadata import distributions  # type: ignore
-    pkgs: List[Dict[str,str]] = []
+    pkgs: List[Dict[str, str]] = []
     for d in distributions():
         name = getattr(d, "metadata", {}).get("Name") or d.metadata.get("Name")  # type: ignore[attr-defined]
-        ver  = getattr(d, "version", None) or d.metadata.get("Version")          # type: ignore[attr-defined]
+        ver = getattr(d, "version", None) or d.metadata.get("Version")  # type: ignore[attr-defined]
         if name and ver:
             pkgs.append({"name": name, "version": ver})
     pkgs.sort(key=lambda x: (x["name"].lower(), x["version"]))

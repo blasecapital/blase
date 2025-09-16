@@ -19,11 +19,13 @@ TEST_CSV_CONTENT = """id,value
 5,500
 """
 
+
 @pytest.fixture
 def temp_csv_file(tmp_path):
     file_path = tmp_path / "test.csv"
     file_path.write_text(TEST_CSV_CONTENT)
     return str(file_path)
+
 
 class FakeStreamStep:
     def __init__(self):
@@ -69,7 +71,11 @@ class FakeTracker:
 def _fake_manifest(n=3):
     # Minimal items: abs_path, hash_content
     items = [
-        {"abs_path": f"/img/{i}.jpg", "rel_path": f"{i}.jpg", "hash_content": f"h{i:02d}"}
+        {
+            "abs_path": f"/img/{i}.jpg",
+            "rel_path": f"{i}.jpg",
+            "hash_content": f"h{i:02d}",
+        }
         for i in range(n)
     ]
     return items
@@ -94,6 +100,7 @@ def _fake_plan(items, batch_sizes):
 @pytest.fixture
 def isolate_deps(monkeypatch):
     import blase.extracting.image_backend as ib
+
     # backend + manifest + plan stubs
     monkeypatch.setattr(mod, "resolve_backend_images", lambda b: b)
     monkeypatch.setattr(mod, "scan_manifest_headers", lambda **kw: _fake_manifest(5))
@@ -104,36 +111,58 @@ def isolate_deps(monkeypatch):
     def _plan(**kw):
         items = _fake_manifest(5)
         return _fake_plan(items, [2, 2, 1])
+
     monkeypatch.setattr(mod, "plan_image_batches", _plan)
     monkeypatch.setattr(mod, "iter_batches_from_plan", lambda plan: iter(plan))
 
     # decode + batch hash
-    monkeypatch.setattr(mod, "decode_batch_pil", lambda items, rt, color, ms: [f"im:{x['abs_path']}" for x in items])
-    monkeypatch.setattr(mod, "decode_batch_cv2", lambda items, rt, color, ms: [f"im:{x['abs_path']}" for x in items])
-    monkeypatch.setattr(mod, "compute_batch_hash", lambda root, items: "bh_" + str(len(items)))
+    monkeypatch.setattr(
+        mod,
+        "decode_batch_pil",
+        lambda items, rt, color, ms: [f"im:{x['abs_path']}" for x in items],
+    )
+    monkeypatch.setattr(
+        mod,
+        "decode_batch_cv2",
+        lambda items, rt, color, ms: [f"im:{x['abs_path']}" for x in items],
+    )
+    monkeypatch.setattr(
+        mod, "compute_batch_hash", lambda root, items: "bh_" + str(len(items))
+    )
 
     # CAS + dataset stubs
-    monkeypatch.setattr(mod, "build_manifest_descriptor", lambda **kw: {"root_hash": "rootHASH"})
+    monkeypatch.setattr(
+        mod, "build_manifest_descriptor", lambda **kw: {"root_hash": "rootHASH"}
+    )
     monkeypatch.setattr(mod, "ensure_dataset_for_manifest", lambda *a, **k: "ds1")
 
     # Return a concrete budget so read_images never calls image_backend
-    monkeypatch.setattr(mod, "auto_target_bytes_from_system", lambda rt: 256 * 1024 * 1024)
+    monkeypatch.setattr(
+        mod, "auto_target_bytes_from_system", lambda rt: 256 * 1024 * 1024
+    )
     # Belt-and-suspenders if other code calls the module function directly
-    monkeypatch.setattr(ib, "auto_target_bytes_from_system", lambda rt: 256 * 1024 * 1024)
+    monkeypatch.setattr(
+        ib, "auto_target_bytes_from_system", lambda rt: 256 * 1024 * 1024
+    )
     yield
+
 
 # ----- Extract().read_csv -----
 
+
 def test_read_csv_batches(temp_csv_file):
     extractor = Extract()
-    batches = [batch for batch, _, _ in extractor.read_csv(
-        file_path=temp_csv_file, 
-        mode="manual", 
-        batch_size=2, 
-        backend="pandas",
-        track=False
-    )]
-    
+    batches = [
+        batch
+        for batch, _, _ in extractor.read_csv(
+            file_path=temp_csv_file,
+            mode="manual",
+            batch_size=2,
+            backend="pandas",
+            track=False,
+        )
+    ]
+
     # Should split into 3 batches (2+2+1)
     assert len(batches) == 3
     assert isinstance(batches[0], pd.DataFrame)
@@ -142,15 +171,19 @@ def test_read_csv_batches(temp_csv_file):
     assert batches[2].shape[0] == 1
     assert batches[0].iloc[0]["id"] == 1
 
+
 def test_read_csv_batches_polars(temp_csv_file):
     extractor = Extract()
-    batches = [batch for batch, _, _ in extractor.read_csv(
-        file_path=temp_csv_file, 
-        mode="manual", 
-        batch_size=2, 
-        backend="polars",
-        track=False
-    )]
+    batches = [
+        batch
+        for batch, _, _ in extractor.read_csv(
+            file_path=temp_csv_file,
+            mode="manual",
+            batch_size=2,
+            backend="polars",
+            track=False,
+        )
+    ]
 
     # Should split into 3 batches (2+2+1)
     assert len(batches) == 3
@@ -161,6 +194,7 @@ def test_read_csv_batches_polars(temp_csv_file):
 
     # Polars uses `batches[0][col][row]` for indexing
     assert batches[0]["id"][0] == 1
+
 
 # ----- Extract().read_images test -----
 def test_untracked_auto_mode_yields_dict_batches(isolate_deps, monkeypatch, tmp_path):
@@ -180,7 +214,7 @@ def test_untracked_auto_mode_yields_dict_batches(isolate_deps, monkeypatch, tmp_
         return_type="np",
         mode="auto",
         shuffle=True,  # exercise seeding default path
-        track=False,   # also forces untracked path since Track.get returns None
+        track=False,  # also forces untracked path since Track.get returns None
     )
 
     outs = list(gen)
@@ -236,18 +270,24 @@ def test_tracked_path_emits_tuple_and_logs(isolate_deps, monkeypatch, tmp_path):
 
 
 def test_invalid_mode_raises(monkeypatch, isolate_deps, tmp_path):
-    class _NoTrack: 
+    class _NoTrack:
         @staticmethod
-        def get(flag): return None
+        def get(flag):
+            return None
+
     monkeypatch.setattr(mod, "Track", _NoTrack)
 
     ex = types.SimpleNamespace()
     with pytest.raises(ValueError):
-        gen = mod.Extract.read_images.__get__(ex, mod.Extract)(directory=str(tmp_path), mode="weird")
+        gen = mod.Extract.read_images.__get__(ex, mod.Extract)(
+            directory=str(tmp_path), mode="weird"
+        )
         next(gen)
 
     with pytest.raises(ValueError):
-        gen = mod.Extract.read_images.__get__(ex, mod.Extract)(directory=str(tmp_path), mode="manual")
+        gen = mod.Extract.read_images.__get__(ex, mod.Extract)(
+            directory=str(tmp_path), mode="manual"
+        )
         next(gen)
 
 

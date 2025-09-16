@@ -102,9 +102,7 @@ class Monitor:
         pass
 
     def stream_batches(
-        self,
-        batch_size: int = 100,
-        source_paths: dict = None
+        self, batch_size: int = 100, source_paths: dict = None
     ) -> Iterator[Tuple[pd.DataFrame, pd.Series, pd.Series]]:
         """
         Streams batches of live features, predictions, and ground truth values.
@@ -114,7 +112,7 @@ class Monitor:
         batch_size : int
             Number of rows per batch.
         source_paths : dict
-            A dictionary with keys: 'features', 'predictions', 'ground_truth', 
+            A dictionary with keys: 'features', 'predictions', 'ground_truth',
             and values as paths to the corresponding files or directories.
 
         Returns:
@@ -125,10 +123,7 @@ class Monitor:
         pass
 
     def submit_live_batch(
-        self,
-        features: Any,
-        predictions: Any,
-        ground_truth: Any
+        self, features: Any, predictions: Any, ground_truth: Any
     ) -> None:
         """Submit a new batch of live data for monitoring."""
         pass
@@ -153,7 +148,9 @@ class Monitor:
         """Store the latest calculated performance metrics."""
         pass
 
-    def register_trigger(self, name: str, trigger_fn: Callable[[Dict[str, float]], bool]) -> None:
+    def register_trigger(
+        self, name: str, trigger_fn: Callable[[Dict[str, float]], bool]
+    ) -> None:
         """Register a user-defined function to act as a retraining trigger."""
         pass
 
@@ -166,10 +163,7 @@ class Monitor:
         pass
 
     def extract_and_monitor(
-        self,
-        source: str,
-        file_type: str = "csv",
-        batch_size: int = 512
+        self, source: str, file_type: str = "csv", batch_size: int = 512
     ) -> None:
         """Shortcut method to extract live data and run feature drift monitoring."""
         pass

@@ -1,8 +1,12 @@
 from pathlib import Path
 from typing import Literal
 
-def resolve_conflict_path(path: Path, policy: Literal["rename","overwrite","fail"]="rename",
-                          suffix: str="_restored") -> Path:
+
+def resolve_conflict_path(
+    path: Path,
+    policy: Literal["rename", "overwrite", "fail"] = "rename",
+    suffix: str = "_restored",
+) -> Path:
     """
     Resolve conflicts when materializing a file to disk.
 

@@ -7,6 +7,7 @@ from PIL import Image
 import pyarrow as pa
 import pyarrow.parquet as pq
 
+
 # ---- path & counters ----
 def _compute_shard_path(
     *,
@@ -27,6 +28,7 @@ def _compute_shard_path(
         ord_ = fallback_idx
     name = f"{shard_prefix}-{int(ord_):06d}.parquet"
     return (Path(base_dir) / name).resolve()
+
 
 # ---- table construction ----
 def _normalize_images_batch(
@@ -67,6 +69,7 @@ def _normalize_images_batch(
 
     return images, labels, paths
 
+
 def _to_numpy(arr: Any) -> np.ndarray:
     """
     Accept np.ndarray, PIL.Image, TF/Torch tensor -> numpy array.
@@ -77,6 +80,7 @@ def _to_numpy(arr: Any) -> np.ndarray:
     # Torch
     try:
         import torch
+
         if isinstance(arr, torch.Tensor):
             arr = arr.detach().cpu().numpy()
     except Exception:
@@ -84,13 +88,15 @@ def _to_numpy(arr: Any) -> np.ndarray:
     # TF
     try:
         import tensorflow as tf
+
         if isinstance(arr, (tf.Tensor, tf.Variable)):
             arr = arr.numpy()
     except Exception:
         pass
     return np.asarray(arr)
 
-def _ensure_uint8_rgb(arr: Any) -> np.ndarray: 
+
+def _ensure_uint8_rgb(arr: Any) -> np.ndarray:
     """
     If use_blase_path: place under run output root (…/data/<subdir>)
     Else: use target_dir as absolute/relative path.
@@ -112,35 +118,39 @@ def _ensure_uint8_rgb(arr: Any) -> np.ndarray:
     # Channels normalization
     if arr.shape[-1] == 1:
         arr = np.repeat(arr, 3, axis=-1)
-    elif arr.shape[-1] == 4: # RGBA -> RGB
+    elif arr.shape[-1] == 4:  # RGBA -> RGB
         arr = arr[..., :3]
     elif arr.shape[-1] == 3:
         pass
     else:
         raise ValueError(f"Unsupported channel count: {arr.shape}")
-    
+
     return arr
 
+
 def _encode_image(
-    arr_u8_rgb: np.ndarray, 
-    fmt: Literal["jpeg","png"], 
-    quality: int
+    arr_u8_rgb: np.ndarray, fmt: Literal["jpeg", "png"], quality: int
 ) -> bytes:
     """Encode to JPEG/PNG with Pillow."""
     if fmt not in ("jpeg", "png"):
         raise ValueError(f"Unsupported encode fmt: {fmt}")
     with io.BytesIO() as buf:
         if fmt == "jpeg":
-            Image.fromarray(arr_u8_rgb, mode="RGB").save(buf, format="JPEG", quality=int(quality))
+            Image.fromarray(arr_u8_rgb, mode="RGB").save(
+                buf, format="JPEG", quality=int(quality)
+            )
         else:
-            Image.fromarray(arr_u8_rgb, mode="RGB").save(buf, format="RGB", optimize=True)
-        return buf.getvalue()            
+            Image.fromarray(arr_u8_rgb, mode="RGB").save(
+                buf, format="RGB", optimize=True
+            )
+        return buf.getvalue()
+
 
 def _build_parquet_table_from_images(
     *,
     data: Any,
     meta: Optional[Dict[str, Any]],
-    encode: Literal["jpeg","png"],
+    encode: Literal["jpeg", "png"],
     jpeg_quality: int,
     include_paths: bool,
 ) -> pa.Table:
@@ -160,7 +170,9 @@ def _build_parquet_table_from_images(
     # lineage
     m = meta or {}
     # support both direct and nested styles
-    manifest_root_hash = m.get("manifest_root_hash") or m.get("identity", {}).get("root_hash")
+    manifest_root_hash = m.get("manifest_root_hash") or m.get("identity", {}).get(
+        "root_hash"
+    )
     batch_hash = m.get("batch_hash")
 
     cols = {
@@ -168,9 +180,14 @@ def _build_parquet_table_from_images(
         "height": pa.array(heights, type=pa.int32()),
         "width": pa.array(widths, type=pa.int32()),
         "channels": pa.array(chans, type=pa.int8()),
-        "label": (pa.array(labels) if labels is not None
-                  else pa.nulls(len(enc_bytes), type=pa.int32())),
-        "manifest_root_hash": pa.array([manifest_root_hash] * len(enc_bytes), type=pa.string()),
+        "label": (
+            pa.array(labels)
+            if labels is not None
+            else pa.nulls(len(enc_bytes), type=pa.int32())
+        ),
+        "manifest_root_hash": pa.array(
+            [manifest_root_hash] * len(enc_bytes), type=pa.string()
+        ),
         "batch_hash": pa.array([batch_hash] * len(enc_bytes), type=pa.string()),
     }
 
@@ -178,33 +195,25 @@ def _build_parquet_table_from_images(
     paths = list((meta or {}).get("items_rel_paths") or [])
 
     if include_paths and paths and len(paths) == len(enc_bytes):
-        cols["path"] = pa.array(paths, type=pa.string())   # ordered, POSIX
+        cols["path"] = pa.array(paths, type=pa.string())  # ordered, POSIX
     else:
         cols["path"] = pa.nulls(len(enc_bytes), type=pa.string())
 
-    order = ["img_bytes","height","width","channels","label","manifest_root_hash","batch_hash","path"]
+    order = [
+        "img_bytes",
+        "height",
+        "width",
+        "channels",
+        "label",
+        "manifest_root_hash",
+        "batch_hash",
+        "path",
+    ]
     names = [k for k in order if k in cols]
     arrays = [cols[k] for k in names]
-    print(f"[TABLE.BUILD] rows={len(next(iter(cols.values())).to_pylist()) if cols else 0} "
-      f"cols={names}")
 
-    # If path column present, dump first few in-order
-    if "path" in names:
-        try:
-            _paths = cols["path"].to_pylist()
-            print(f"[TABLE.PATHS] first3={_paths[:3]} len={len(_paths)}")
-        except Exception:
-            pass
-
-    rows = len(next(iter(cols.values())).to_pylist()) if cols else 0
-    print(f"[TABLE.BUILD] rows={rows} cols={names}")
-    if "path" in cols:
-        try:
-            _paths = cols["path"].to_pylist()
-            print(f"[TABLE.PATHS] first3={_paths[:3]} len={len(_paths)}")
-        except Exception as e:
-            print(f"[TABLE.PATHS] error={e!r}")
     return pa.Table.from_arrays(arrays, names=names)
+
 
 RECORDED_WRITER_CFG = {
     "version": "2.6",
@@ -213,8 +222,8 @@ RECORDED_WRITER_CFG = {
     "compression_level": 3,
     "use_dictionary": True,
     "write_statistics": True,
-    "row_group_size": 1024*1024,
-    "write_batch_size": 1024*32,
+    "row_group_size": 1024 * 1024,
+    "write_batch_size": 1024 * 32,
     "coerce_timestamps": "us",
     "allow_truncated_timestamps": False,
     "use_deprecated_int96_timestamps": False,
@@ -228,13 +237,14 @@ RECORDED_WRITER_CFG = {
     "sorting_columns": None,
 }
 
+
 # ---- writer & conflict policy ----
 def _write_parquet_table(
     table: pa.Table,
     out_path: Path,
     *,
     writer_cfg: dict,
-    on_conflict: Literal["overwrite","fail","rename"],
+    on_conflict: Literal["overwrite", "fail", "rename"],
 ) -> Path:
     out_path = Path(out_path)
     out_path.parent.mkdir(parents=True, exist_ok=True)
@@ -250,19 +260,6 @@ def _write_parquet_table(
     # pin to a single row group for small tables to avoid chunk-driven drift
     rg_size = max(int(table.num_rows), 1)
 
-    print("[WRITE.RG_SIZE]", rg_size)
-    print("[WRITE.ARGS]", dict(
-        version=cfg.get("version"), use_dictionary=cfg.get("use_dictionary"),
-        compression=cfg.get("compression"), compression_level=cfg.get("compression_level"),
-        write_statistics=cfg.get("write_statistics"), data_page_version=cfg.get("data_page_version"),
-        coerce_timestamps=cfg.get("coerce_timestamps"),
-        allow_truncated_timestamps=cfg.get("allow_truncated_timestamps"),
-        use_byte_stream_split=cfg.get("use_byte_stream_split"),
-        write_page_index=cfg.get("write_page_index"),
-        write_page_checksum=cfg.get("write_page_checksum"),
-        store_schema=cfg.get("store_schema"),
-        use_compliant_nested_type=cfg.get("use_compliant_nested_type"),
-    ))
     pq.write_table(
         table,
         out_path,
@@ -272,7 +269,9 @@ def _write_parquet_table(
         compression=cfg.get("compression", "zstd"),
         write_statistics=cfg.get("write_statistics", True),
         data_page_version=cfg.get("data_page_version", "1.0"),
-        use_deprecated_int96_timestamps=cfg.get("use_deprecated_int96_timestamps", False),
+        use_deprecated_int96_timestamps=cfg.get(
+            "use_deprecated_int96_timestamps", False
+        ),
         coerce_timestamps=cfg.get("coerce_timestamps", "us"),
         allow_truncated_timestamps=cfg.get("allow_truncated_timestamps", False),
         use_byte_stream_split=cfg.get("use_byte_stream_split", False),
@@ -281,22 +280,12 @@ def _write_parquet_table(
         write_page_checksum=cfg.get("write_page_checksum", False),
         store_schema=cfg.get("store_schema", True),
         use_compliant_nested_type=cfg.get("use_compliant_nested_type", True),
-        write_batch_size=cfg.get("write_batch_size", None),   # ← important
+        write_batch_size=cfg.get("write_batch_size", None),  # ← important
         # column_encoding / sorting_columns intentionally omitted unless you record them
     )
-    from blase.utils.hashing import Hash
-    print("[AFTER.WRITE.HASH]", Hash().hash_file(out_path))
-    pf = pq.ParquetFile(out_path)
-    rg = pf.metadata.row_group(0)
-    print("[AFTER.META]", dict(
-        num_rows=pf.metadata.num_rows,
-        num_row_groups=pf.metadata.num_row_groups,
-        created_by=pf.metadata.created_by,
-        col_encodings=[tuple(rg.column(i).encodings) for i in range(table.num_columns)],
-        col_codecs=[rg.column(i).compression for i in range(table.num_columns)],
-        col_stats_present=[rg.column(i).statistics is not None for i in range(table.num_columns)],
-    ))
+
     return out_path
+
 
 def _auto_rename(p: Path) -> Path:
     i, stem, suf = 1, p.stem, p.suffix

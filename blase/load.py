@@ -6,14 +6,14 @@ import numpy as np
 
 from blase.loading.csv_backend import save_batch_pandas, save_batch_polars
 from blase.loading.img_parquet_backend import (
-    _compute_shard_path,
     _build_parquet_table_from_images,
     _write_parquet_table,
     _compute_shard_path,
-    RECORDED_WRITER_CFG
+    RECORDED_WRITER_CFG,
 )
 from blase.utils.backends import resolve_backend_csv
 from blase.track import Track
+
 
 class Load:
     """
@@ -62,6 +62,7 @@ class Load:
     - By default, the module infers the best storage format from the input data.
     - Schema validation and metadata logging are optional but enhance pipeline safety and traceability.
     """
+
     def __init__(self):
         self._stream = None
         self._target_path: Optional[Path] = None
@@ -92,35 +93,35 @@ class Load:
             p = Path(path).resolve()
             p.parent.mkdir(parents=True, exist_ok=True)
             return p
-        
-    def _bump_counter(
-        self,
-        base_dir: Path,
-        shard_prefix: str
-    ) -> int:
+
+    def _bump_counter(self, base_dir: Path, shard_prefix: str) -> int:
         """
         Stateless-ish counter across calls (process local).
         """
         if not hasattr(self, "_global_parquet_counters"):
             self._global_parquet_counters = {}
         key = (str(base_dir), shard_prefix)
-        self._global_parquet_counters[key] = self._global_parquet_counters.get(key, 0) + 1
+        self._global_parquet_counters[key] = (
+            self._global_parquet_counters.get(key, 0) + 1
+        )
         return self._global_parquet_counters[key]
 
     def _bump_stream_counter(self) -> int:
         self._parquet_counter = int(getattr(self, "_parquet_counter", 0)) + 1
         return self._parquet_counter
-    
+
     # --- Main API ---
 
-    def save(self, 
-             data: Any, 
-             destination: str, 
-             data_type: str = "auto", 
-             custom_file_saver: Callable = None, 
-             validate_schema: bool = False, 
-             schema_path: str = None, 
-             metadata: dict = None):
+    def save(
+        self,
+        data: Any,
+        destination: str,
+        data_type: str = "auto",
+        custom_file_saver: Callable = None,
+        validate_schema: bool = False,
+        schema_path: str = None,
+        metadata: dict = None,
+    ):
         pass
 
     def save_to_csv(
@@ -128,7 +129,9 @@ class Load:
         *,
         data: Any,
         last_batch: bool,
-        meta: Optional[Dict[str, Any]] = None,   # pass upstream lineage from Extract/Transform
+        meta: Optional[
+            Dict[str, Any]
+        ] = None,  # pass upstream lineage from Extract/Transform
         path: Optional[str] = None,
         file_name: Optional[str] = None,
         subdir: Optional[str] = "csv_data",
@@ -179,11 +182,11 @@ class Load:
         -------
         tuple of (str, bool, dict)
             A 3-tuple containing:
-            - ``target_path`` : str  
+            - ``target_path`` : str
             Filesystem path of the CSV file being written to.
-            - ``last_batch`` : bool  
+            - ``last_batch`` : bool
             Echo of the input flag, enabling downstream flow control.
-            - ``new_meta`` : dict  
+            - ``new_meta`` : dict
             Metadata returned by the tracking system’s emit call if tracking is enabled,
             otherwise the input ``meta`` or an empty dict.
 
@@ -227,10 +230,14 @@ class Load:
             target = self._resolve_target_path(
                 tracker=Track.get(True),  # for path resolution only
                 use_blase_path=use_blase_path,
-                path=path, file_name=file_name, subdir=subdir,
+                path=path,
+                file_name=file_name,
+                subdir=subdir,
             )
             file_exists = target.exists()
-            (save_batch_pandas if backend == "pandas" else save_batch_polars)(data, target, file_exists)
+            (save_batch_pandas if backend == "pandas" else save_batch_polars)(
+                data, target, file_exists
+            )
             return str(target), last_batch, (meta or {})
 
         # ---------- Tracked path ----------
@@ -258,7 +265,9 @@ class Load:
                 "use_blase_path": bool(use_blase_path),
             }
             # snapshot the callable/env once per stream
-            self._stream = tracker.stream("blase.Load.save_to_csv", params, code_fn=self.save_to_csv)
+            self._stream = tracker.stream(
+                "blase.Load.save_to_csv", params, code_fn=self.save_to_csv
+            )
             self._target_path = target
             self._backend = backend
 
@@ -266,8 +275,10 @@ class Load:
             self._stream.step.remove_inputs_by_role("seed")
             if target.exists():
                 seed_hash = self._stream.step.register_data(
-                    kind="csv", version="1", path_or_bytes=target,
-                    metadata={"role": "seed", "target": str(target)}
+                    kind="csv",
+                    version="1",
+                    path_or_bytes=target,
+                    metadata={"role": "seed", "target": str(target)},
                 )
                 self._stream.step.add_input(seed_hash, role="seed", arg_name=None)
 
@@ -288,13 +299,16 @@ class Load:
             raise
 
         # 2) per-batch lineage + seal on last batch
-        self._stream.step.add_upstream_from_meta(meta) 
+        self._stream.step.add_upstream_from_meta(meta)
         new_meta = self._stream.emit(last_batch=last_batch, meta=meta)
 
         # 3) on final batch, register final file and close the stream
         if last_batch:
             out_hash = self._stream.step.register_data(
-                kind="csv", version="1", path_or_bytes=target, metadata={"target": str(target)}
+                kind="csv",
+                version="1",
+                path_or_bytes=target,
+                metadata={"target": str(target)},
             )
             self._stream.step.add_output(out_hash, name="csv")
 
@@ -308,19 +322,21 @@ class Load:
     def save_images_to_parquet(
         self,
         *,
-        data: Any,                      # (images, labels, paths) OR just images; see _normalize_images_batch()
+        data: Any,  # (images, labels, paths) OR just images; see _normalize_images_batch()
         last_batch: bool,
-        meta: Optional[Dict[str, Any]] = None,   # upstream lineage (manifest_root_hash, batch_hash, etc.)
-        path: Optional[str] = None,        # base dir for shards
+        meta: Optional[
+            Dict[str, Any]
+        ] = None,  # upstream lineage (manifest_root_hash, batch_hash, etc.)
+        path: Optional[str] = None,  # base dir for shards
         file_name: Optional[str] = None,
-        subdir: str = "parquet_data",            # used if target_dir is None and use_blase_path=True
+        subdir: str = "parquet_data",  # used if target_dir is None and use_blase_path=True
         shard_prefix: str = "batch",
         encode: Literal["jpeg", "png"] = "jpeg",
         jpeg_quality: int = 95,
         compression: Literal["zstd", "snappy"] = "zstd",
-        include_paths: bool = True,              # store original rel paths in a column
-        use_blase_path: bool = True,             # mirror save_to_csv behavior
-        on_conflict: Literal["overwrite","fail","rename"] = "overwrite",
+        include_paths: bool = True,  # store original rel paths in a column
+        use_blase_path: bool = True,  # mirror save_to_csv behavior
+        on_conflict: Literal["overwrite", "fail", "rename"] = "overwrite",
         track: bool = True,
     ) -> Tuple[str, bool, Dict[str, Any]]:
         """
@@ -380,23 +396,20 @@ class Load:
                 base_dir=base_dir,
                 shard_prefix=shard_prefix,
                 meta=meta,
-                fallback_idx=self._bump_counter(base_dir, shard_prefix)
+                fallback_idx=self._bump_counter(base_dir, shard_prefix),
             )
             table = _build_parquet_table_from_images(
                 data=data,
                 meta=meta,
                 encode=encode,
                 jpeg_quality=jpeg_quality,
-                include_paths=include_paths
+                include_paths=include_paths,
             )
             _write_parquet_table(
-                table,
-                shard_path,
-                writer_cfg=writer_cfg,
-                on_conflict=on_conflict
+                table, shard_path, writer_cfg=writer_cfg, on_conflict=on_conflict
             )
             return str(shard_path), last_batch, (meta or {})
-        
+
         # ---------- Tracked path ----------
         # Stream identity: one stream per (base_dir, prefix, encode, compression)
         new_stream = (
@@ -411,12 +424,12 @@ class Load:
                 self._stream.close_ok()
 
             self._stream = tracker.stream(
-                "blase.Load.save_images_to_parquet", 
+                "blase.Load.save_images_to_parquet",
                 params,
-                code_fn=self.save_images_to_parquet
-                )
+                code_fn=self.save_images_to_parquet,
+            )
             setattr(self._stream, "params", params)
-            self._writer_cfg = writer_cfg 
+            self._writer_cfg = writer_cfg
             self._parquet_base_dir = base_dir
             self._parquet_prefix = shard_prefix
             self._parquet_encode = encode
@@ -428,7 +441,7 @@ class Load:
             base_dir=base_dir,
             shard_prefix=shard_prefix,
             meta=meta,
-            fallback_idx=self._bump_stream_counter()
+            fallback_idx=self._bump_stream_counter(),
         )
 
         # 2) Encode + build Arrow table
@@ -438,37 +451,18 @@ class Load:
                 meta=meta,
                 encode=encode,
                 jpeg_quality=jpeg_quality,
-                include_paths=include_paths
+                include_paths=include_paths,
             )
-            cfg = (getattr(self._stream, "params", {}).get("writer_cfg")
+            cfg = (
+                getattr(self._stream, "params", {}).get("writer_cfg")
                 or getattr(self, "_writer_cfg", None)
-                or RECORDED_WRITER_CFG)
-            import json
-            print("[PHASE]", "produce" or "restore")
-            print("[WRITER.CFG]", json.dumps(cfg, sort_keys=True))
-            print("[INCLUDE_PATHS]", include_paths)
-            print("[TABLE.SCHEMA]", [f"{f.name}:{f.type}" for f in table.schema])
-            print("[TABLE.ROWS]", table.num_rows)
-            from blase.utils.hashing import Hash
-            print("[TABLE.FIRST2]", [
-                (Hash().hash_bytes(table.column("img_bytes").chunk(0).to_pylist()[i]), 
-                table.column("path").chunk(0).to_pylist()[i])
-                for i in range(min(2, table.num_rows))
-            ])
+                or RECORDED_WRITER_CFG
+            )
 
-            _write_parquet_table(table, shard_path, writer_cfg=cfg, on_conflict=on_conflict)
-            import pyarrow.parquet as pq
-            print("[AFTER.WRITE.HASH]", Hash().hash_file(shard_path))
-            pf = pq.ParquetFile(shard_path)
-            rg = pf.metadata.row_group(0)
-            print("[AFTER.META]", dict(
-                num_rows=pf.metadata.num_rows,
-                num_row_groups=pf.metadata.num_row_groups,
-                created_by=pf.metadata.created_by,
-                col_encodings=[tuple(rg.column(i).encodings) for i in range(table.num_columns)],
-                col_codecs=[rg.column(i).compression for i in range(table.num_columns)],
-                col_stats_present=[rg.column(i).statistics is not None for i in range(table.num_columns)],
-            ))
+            _write_parquet_table(
+                table, shard_path, writer_cfg=cfg, on_conflict=on_conflict
+            )
+
         except Exception as e:
             self._stream.close_error(type(e), e, e.__traceback__)
             self._stream = None
@@ -482,9 +476,10 @@ class Load:
         # 3) Per-batch lineage (upstream goes via meta)
         # try to capture upstream lineage
         if isinstance(meta, dict):
-            up = (meta.get("upstream") or [])
+            up = meta.get("upstream") or []
             for u in up:
-                rid = u.get("id"); role = u.get("role")
+                rid = u.get("id")
+                role = u.get("role")
                 if rid and role in {"batch", "batch_desc", "manifest"}:
                     try:
                         self._stream.step.add_input(rid, role=role, arg_name=None)
@@ -504,10 +499,11 @@ class Load:
             kind="parquet",
             version="1",
             path_or_bytes=shard_path,
-            metadata={"shard_path": str(shard_path)}
+            metadata={"shard_path": str(shard_path)},
         )
-        print("[PRODUCE.RECORDED_HASH]", shard_hash) 
-        self._stream.step.add_output(shard_hash, name=f"parquet_shard_{self._parquet_counter:05d}")
+        self._stream.step.add_output(
+            shard_hash, name=f"parquet_shard_{self._parquet_counter:05d}"
+        )
 
         if last_batch:
             # OPTIONAL: write a tiny JSON index of shards (placeholder)
@@ -523,7 +519,7 @@ class Load:
             self._parquet_comp = None
             self._parquet_counter = 0
 
-        return str(shard_path), last_batch, new_meta        
+        return str(shard_path), last_batch, new_meta
 
     def save_to_npy(self, data: np.ndarray, path: str):
         pass
@@ -537,7 +533,9 @@ class Load:
     def save_to_duckdb(self, data: Any, db_path: str, table: str, mode: str = "append"):
         pass
 
-    def save_to_postgresql(self, data: Any, conn_params: dict, table: str, mode: str = "append"):
+    def save_to_postgresql(
+        self, data: Any, conn_params: dict, table: str, mode: str = "append"
+    ):
         pass
 
     def save_to_filesystem(self, data: Any, directory: str, filename_fn: Callable):

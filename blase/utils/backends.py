@@ -2,14 +2,17 @@ import importlib.util
 
 from typing import Optional, Literal
 
+
 def _has_package(name: str) -> bool:
     return importlib.util.find_spec(name) is not None
 
-_HAS_POLARS  = _has_package("polars")
-_HAS_PANDAS  = _has_package("pandas")
+
+_HAS_POLARS = _has_package("polars")
+_HAS_PANDAS = _has_package("pandas")
 _HAS_PYARROW = _has_package("pyarrow")
-_HAS_PILLOW  = _has_package("PIL")
+_HAS_PILLOW = _has_package("PIL")
 _HAS_CV2 = _has_package("cv2")
+
 
 def is_available(lib: str) -> bool:
     """
@@ -54,7 +57,7 @@ def resolve_backend_csv(preferred: str = "auto") -> str:
         raise ImportError(f"Backend '{preferred}' is not available. Please install it.")
     else:
         raise ValueError(f"Invalid backend choice: '{preferred}'")
-    
+
 
 def resolve_backend_images(backend: Optional[str]) -> Literal["pil", "cv2"]:
     """
@@ -86,8 +89,10 @@ def resolve_backend_images(backend: Optional[str]) -> Literal["pil", "cv2"]:
         "opencv-python": "cv2",
     }
     if name not in aliases:
-        raise ValueError(f"Invalid backend choice: {backend!r}. "
-                         "Use one of: 'pil'/'pillow', 'cv2'/'opencv'.")
+        raise ValueError(
+            f"Invalid backend choice: {backend!r}. "
+            "Use one of: 'pil'/'pillow', 'cv2'/'opencv'."
+        )
 
     resolved = aliases[name]
 
@@ -103,4 +108,3 @@ def resolve_backend_images(backend: Optional[str]) -> Literal["pil", "cv2"]:
             )
 
     return resolved
-    

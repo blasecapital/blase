@@ -5,6 +5,7 @@ import random
 
 from blase.utils.hashing import Hash
 
+
 def auto_target_bytes_from_system(return_type: str) -> Optional[int]:
     """
     Estimate a safe per-batch decoded-bytes budget using available system memory.
@@ -43,8 +44,8 @@ def auto_target_bytes_from_system(return_type: str) -> Optional[int]:
     The value is for planning. Apply an additional safety margin during packing,
     and verify decoded memory at runtime.
     """
-    min_cap = 128 * 1024 * 1024      # 128 MiB
-    max_cap = 2 * 1024 * 1024 * 1024 # 2 GiB
+    min_cap = 128 * 1024 * 1024  # 128 MiB
+    max_cap = 2 * 1024 * 1024 * 1024  # 2 GiB
 
     def clamp(v: int) -> int:
         return max(min_cap, min(v, max_cap))
@@ -54,6 +55,7 @@ def auto_target_bytes_from_system(return_type: str) -> Optional[int]:
         # --------- PyTorch CUDA ---------
         if importlib.util.find_spec("torch") is not None:
             import torch
+
             if torch.cuda.is_available():
                 try:
                     free, _total = torch.cuda.mem_get_info()  # bytes
@@ -65,6 +67,7 @@ def auto_target_bytes_from_system(return_type: str) -> Optional[int]:
         # --------- TensorFlow GPU ---------
         if importlib.util.find_spec("tensorflow") is not None:
             import tensorflow as tf
+
             try:
                 gpus = tf.config.list_physical_devices("GPU")
             except Exception:
@@ -75,6 +78,7 @@ def auto_target_bytes_from_system(return_type: str) -> Optional[int]:
                 if importlib.util.find_spec("pynvml") is not None:
                     try:
                         import pynvml  # provided by nvidia-ml-py3
+
                         pynvml.nvmlInit()
                         handle = pynvml.nvmlDeviceGetHandleByIndex(0)
                         info = pynvml.nvmlDeviceGetMemoryInfo(handle)
@@ -87,15 +91,27 @@ def auto_target_bytes_from_system(return_type: str) -> Optional[int]:
                 # 2) TF-only estimate: virtual device memory limit - current allocation
                 try:
                     # Note: virtual device configuration is present only if user set a limit.
-                    vcfg = tf.config.experimental.get_virtual_device_configuration(gpus[0])
-                    if vcfg and len(vcfg) > 0 and getattr(vcfg[0], "memory_limit", None):
-                        total_bytes = int(vcfg[0].memory_limit) * 1024 * 1024  # MiB -> bytes
+                    vcfg = tf.config.experimental.get_virtual_device_configuration(
+                        gpus[0]
+                    )
+                    if (
+                        vcfg
+                        and len(vcfg) > 0
+                        and getattr(vcfg[0], "memory_limit", None)
+                    ):
+                        total_bytes = (
+                            int(vcfg[0].memory_limit) * 1024 * 1024
+                        )  # MiB -> bytes
                         # current allocated per TF allocator (bytes)
-                        get_mem = getattr(tf.config.experimental, "get_memory_info", None)
+                        get_mem = getattr(
+                            tf.config.experimental, "get_memory_info", None
+                        )
                         current = 0
                         if callable(get_mem):
                             try:
-                                meminfo = get_mem("GPU:0")  # {'current':..., 'peak':...}
+                                meminfo = get_mem(
+                                    "GPU:0"
+                                )  # {'current':..., 'peak':...}
                                 current = int(meminfo.get("current", 0))
                             except Exception:
                                 current = 0
@@ -109,6 +125,7 @@ def auto_target_bytes_from_system(return_type: str) -> Optional[int]:
     if importlib.util.find_spec("psutil") is not None:
         try:
             import psutil
+
             avail = int(psutil.virtual_memory().available)  # bytes
             return clamp(int(avail * 0.50))
         except Exception:
@@ -116,6 +133,7 @@ def auto_target_bytes_from_system(return_type: str) -> Optional[int]:
 
     # ---------------- fallback ----------------
     return None
+
 
 def scan_manifest_headers(
     directory: str,
@@ -168,7 +186,9 @@ def scan_manifest_headers(
     """
     # --- dependency check (Pillow) ---
     if importlib.util.find_spec("PIL") is None:
-        raise RuntimeError("Pillow is required for header scans. Install with: pip install pillow")
+        raise RuntimeError(
+            "Pillow is required for header scans. Install with: pip install pillow"
+        )
     from PIL import Image, UnidentifiedImageError  # imported after check
 
     # --- normalize inputs ---
@@ -204,7 +224,15 @@ def scan_manifest_headers(
         return hasher.hash_bytes(payload)
 
     # map Pillow modes to channel counts
-    MODE_TO_CHANNELS = {"1": 1, "L": 1, "P": 1, "RGB": 3, "RGBA": 4, "CMYK": 4, "YCbCr": 3}
+    MODE_TO_CHANNELS = {
+        "1": 1,
+        "L": 1,
+        "P": 1,
+        "RGB": 3,
+        "RGBA": 4,
+        "CMYK": 4,
+        "YCbCr": 3,
+    }
 
     for p in paths:
         # filename filter (post-glob)
@@ -274,7 +302,10 @@ def scan_manifest_headers(
     items.sort(key=lambda r: r["rel_path"])
     return items
 
-def shuffle_manifest(manifest: List[Dict[str, Any]], seed: Optional[int]) -> List[Dict[str, Any]]:
+
+def shuffle_manifest(
+    manifest: List[Dict[str, Any]], seed: Optional[int]
+) -> List[Dict[str, Any]]:
     """
     Deterministically shuffle a manifest when a seed is provided.
 
@@ -308,6 +339,7 @@ def shuffle_manifest(manifest: List[Dict[str, Any]], seed: Optional[int]) -> Lis
     shuffled = manifest.copy()
     rng.shuffle(shuffled)
     return shuffled
+
 
 def ensure_item_content_hashes(manifest: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     """
@@ -359,6 +391,7 @@ def ensure_item_content_hashes(manifest: List[Dict[str, Any]]) -> List[Dict[str,
             rec["hash_content"] = None
 
     return manifest
+
 
 def compute_manifest_root_hash(
     manifest: List[Dict[str, Any]],
@@ -417,8 +450,7 @@ def compute_manifest_root_hash(
     mode = (hash_mode or "content").strip().lower()
     if mode not in ("content", "path_mtime_size"):
         raise ValueError(
-            f"Unsupported hash_mode: {hash_mode!r}. "
-            "Use 'content' or 'path_mtime_size'."
+            f"Unsupported hash_mode: {hash_mode!r}. Use 'content' or 'path_mtime_size'."
         )
 
     # Canonicalize scan params (strings, bools, and simple types only).
@@ -470,6 +502,7 @@ def compute_manifest_root_hash(
     hasher = Hash()
     root_hash = hasher.hash_object(identity_obj)
     return root_hash
+
 
 def plan_image_batches(
     manifest: List[Dict[str, Any]],
@@ -524,10 +557,14 @@ def plan_image_batches(
 
     if mode == "manual":
         if not batch_size or batch_size <= 0:
-            raise ValueError("When mode='manual', batch_size must be a positive integer.")
+            raise ValueError(
+                "When mode='manual', batch_size must be a positive integer."
+            )
     else:  # auto
         if not target_batch_bytes or target_batch_bytes <= 0:
-            raise ValueError("When mode='auto', target_batch_bytes must be a positive integer.")
+            raise ValueError(
+                "When mode='auto', target_batch_bytes must be a positive integer."
+            )
         if not (0.0 <= safety_margin < 1.0):
             raise ValueError("safety_margin must be in [0.0, 1.0).")
 
@@ -567,17 +604,21 @@ def plan_image_batches(
         for start in range(0, n, bs):
             chunk = manifest[start : start + bs]
             total = sum(_scaled_estimate(rec) for rec in chunk)
-            plan.append({
-                "items": chunk,
-                "est_decoded_bytes": int(total),
-                "is_last": (start + bs) >= n,
-            })
+            plan.append(
+                {
+                    "items": chunk,
+                    "est_decoded_bytes": int(total),
+                    "is_last": (start + bs) >= n,
+                }
+            )
         return plan
 
     # mode == "auto" (bytes-aware greedy packing)
     cap = int(target_batch_bytes * (1.0 - safety_margin))
     if cap <= 0:
-        raise ValueError("Effective planning cap (after safety_margin) must be positive.")
+        raise ValueError(
+            "Effective planning cap (after safety_margin) must be positive."
+        )
 
     cur_items: List[Dict[str, Any]] = []
     cur_total = 0
@@ -585,11 +626,13 @@ def plan_image_batches(
     def _flush(is_last_flag: bool = False):
         nonlocal cur_items, cur_total
         if cur_items:
-            plan.append({
-                "items": cur_items,
-                "est_decoded_bytes": int(cur_total),
-                "is_last": is_last_flag,
-            })
+            plan.append(
+                {
+                    "items": cur_items,
+                    "est_decoded_bytes": int(cur_total),
+                    "is_last": is_last_flag,
+                }
+            )
             cur_items, cur_total = [], 0
 
     for idx, rec in enumerate(manifest, 1):
@@ -598,7 +641,7 @@ def plan_image_batches(
         # If we already have items and adding this one would exceed cap,
         # or we'd exceed the optional hard count ceiling, flush first.
         would_exceed_bytes = (cur_total + est) > cap if cap > 0 else False
-        would_exceed_count = (batch_size is not None and len(cur_items) >= batch_size)
+        would_exceed_count = batch_size is not None and len(cur_items) >= batch_size
 
         if cur_items and (would_exceed_bytes or would_exceed_count):
             _flush(is_last_flag=False)
@@ -607,11 +650,13 @@ def plan_image_batches(
         # if est > cap and batch is empty, accept it as a single-item batch.
         if not cur_items and (est > cap) and (batch_size is None or batch_size > 0):
             # Single-item batch for this oversized record
-            plan.append({
-                "items": [rec],
-                "est_decoded_bytes": int(est),
-                "is_last": False,  # may be updated below if it happens to be last
-            })
+            plan.append(
+                {
+                    "items": [rec],
+                    "est_decoded_bytes": int(est),
+                    "is_last": False,  # may be updated below if it happens to be last
+                }
+            )
             continue
 
         # Add to current batch
@@ -625,11 +670,13 @@ def plan_image_batches(
     # Flush any remainder and mark the last batch
     if cur_items:
         # mark last batch; we’ll correct previous "is_last" flags next
-        plan.append({
-            "items": cur_items,
-            "est_decoded_bytes": int(cur_total),
-            "is_last": True,
-        })
+        plan.append(
+            {
+                "items": cur_items,
+                "est_decoded_bytes": int(cur_total),
+                "is_last": True,
+            }
+        )
 
     # Ensure only the final batch has is_last=True
     if plan:
@@ -638,6 +685,7 @@ def plan_image_batches(
         plan[-1]["is_last"] = True
 
     return plan
+
 
 def decode_batch_pil(
     items: List[Dict[str, Any]],
@@ -676,30 +724,38 @@ def decode_batch_pil(
     """
     # Lazy imports so the module doesn't hard-require heavy deps
     import importlib.util
+
     if importlib.util.find_spec("PIL") is None:
-        raise RuntimeError("Pillow is required to decode images with backend 'pil'. Install with: pip install pillow")
+        raise RuntimeError(
+            "Pillow is required to decode images with backend 'pil'. Install with: pip install pillow"
+        )
     from PIL import Image, ImageOps
+
     # ensure codecs are registered for both save and open
     try:
         import PIL.JpegImagePlugin  # noqa: F401
-        import PIL.PngImagePlugin   # noqa: F401
-        import PIL.BmpImagePlugin   # noqa: F401
+        import PIL.PngImagePlugin  # noqa: F401
+        import PIL.BmpImagePlugin  # noqa: F401
     except Exception:
         pass
     Image.init()
 
-    to_numpy = (return_type == "np")
-    to_pil    = (return_type == "pil")
-    to_tensor = (return_type == "tensor")
+    to_numpy = return_type == "np"
+    to_pil = return_type == "pil"
+    to_tensor = return_type == "tensor"
 
     if to_tensor:
         if importlib.util.find_spec("torch") is None:
-            raise RuntimeError("return_type='tensor' requires PyTorch. Install with: pip install torch")
+            raise RuntimeError(
+                "return_type='tensor' requires PyTorch. Install with: pip install torch"
+            )
         import torch
 
     if to_numpy:
         if importlib.util.find_spec("numpy") is None:
-            raise RuntimeError("return_type='np' requires NumPy. Install with: pip install numpy")
+            raise RuntimeError(
+                "return_type='np' requires NumPy. Install with: pip install numpy"
+            )
         import numpy as np  # type: ignore
 
     out: List[Any] = []
@@ -754,6 +810,7 @@ def decode_batch_pil(
 
     return out
 
+
 def decode_batch_cv2(
     items: List[Dict[str, Any]],
     return_type: Literal["np", "pil", "tensor"] = "np",
@@ -789,27 +846,34 @@ def decode_batch_cv2(
     """
     # Required deps (lazy)
     if importlib.util.find_spec("cv2") is None:
-        raise RuntimeError("OpenCV is required for decode_batch_cv2. Install with: pip install opencv-python")
+        raise RuntimeError(
+            "OpenCV is required for decode_batch_cv2. Install with: pip install opencv-python"
+        )
     import cv2  # type: ignore
 
-    to_numpy = (return_type == "np")
-    to_pil    = (return_type == "pil")
-    to_tensor = (return_type == "tensor")
+    to_numpy = return_type == "np"
+    to_pil = return_type == "pil"
+    to_tensor = return_type == "tensor"
 
     if to_pil:
         if importlib.util.find_spec("PIL") is None:
-            raise RuntimeError("return_type='pil' requires Pillow. Install with: pip install pillow")
+            raise RuntimeError(
+                "return_type='pil' requires Pillow. Install with: pip install pillow"
+            )
         from PIL import Image  # type: ignore
 
     if to_tensor:
         if importlib.util.find_spec("torch") is None:
-            raise RuntimeError("return_type='tensor' requires PyTorch. Install with: pip install torch")
+            raise RuntimeError(
+                "return_type='tensor' requires PyTorch. Install with: pip install torch"
+            )
         import torch  # type: ignore
 
     if to_numpy or to_tensor or to_pil:
         if importlib.util.find_spec("numpy") is None:
-            raise RuntimeError("NumPy is required for this decoder path. Install with: pip install numpy")
-        import numpy as np  # type: ignore
+            raise RuntimeError(
+                "NumPy is required for this decoder path. Install with: pip install numpy"
+            )
 
     out: List[Any] = []
 
@@ -834,7 +898,9 @@ def decode_batch_cv2(
                         scale = max_side / float(m)
                         new_w = max(1, int(round(w * scale)))
                         new_h = max(1, int(round(h * scale)))
-                        img = cv2.resize(img, (new_w, new_h), interpolation=cv2.INTER_AREA)
+                        img = cv2.resize(
+                            img, (new_w, new_h), interpolation=cv2.INTER_AREA
+                        )
                 # Convert to requested return_type
                 if to_pil:
                     out.append(Image.fromarray(img, mode="L"))
@@ -858,7 +924,9 @@ def decode_batch_cv2(
                         scale = max_side / float(m)
                         new_w = max(1, int(round(w * scale)))
                         new_h = max(1, int(round(h * scale)))
-                        img = cv2.resize(img, (new_w, new_h), interpolation=cv2.INTER_AREA)
+                        img = cv2.resize(
+                            img, (new_w, new_h), interpolation=cv2.INTER_AREA
+                        )
                 # Convert to requested return_type
                 if to_pil:
                     out.append(Image.fromarray(img, mode="RGB"))
@@ -872,7 +940,10 @@ def decode_batch_cv2(
 
     return out
 
-def iter_batches_from_plan(batch_plan: List[Dict[str, Any]]) -> Iterator[Dict[str, Any]]:
+
+def iter_batches_from_plan(
+    batch_plan: List[Dict[str, Any]],
+) -> Iterator[Dict[str, Any]]:
     """
     Iterate over a batch plan from `plan_image_batches` and normalize flags.
 
@@ -914,7 +985,9 @@ def iter_batches_from_plan(batch_plan: List[Dict[str, Any]]) -> Iterator[Dict[st
 
     for i, b in enumerate(batch_plan):
         if not isinstance(b, dict):
-            raise ValueError(f"Batch plan entry {i} must be a dict, got {type(b).__name__}.")
+            raise ValueError(
+                f"Batch plan entry {i} must be a dict, got {type(b).__name__}."
+            )
 
         # Validate required keys
         for k in ("items", "est_decoded_bytes", "is_last"):
@@ -926,19 +999,24 @@ def iter_batches_from_plan(batch_plan: List[Dict[str, Any]]) -> Iterator[Dict[st
         is_last = bool(b["is_last"])
 
         if not isinstance(items, list):
-            raise ValueError(f"Batch plan entry {i} 'items' must be a list, got {type(items).__name__}.")
+            raise ValueError(
+                f"Batch plan entry {i} 'items' must be a list, got {type(items).__name__}."
+            )
         if not isinstance(est, int):
             # allow ints that arrive as bools? no—force int to catch bugs early
-            raise ValueError(f"Batch plan entry {i} 'est_decoded_bytes' must be int, got {type(est).__name__}.")
+            raise ValueError(
+                f"Batch plan entry {i} 'est_decoded_bytes' must be int, got {type(est).__name__}."
+            )
 
         # Normalize final flag: only the last entry should be True
-        norm_is_last = (i == last_idx)
+        norm_is_last = i == last_idx
 
         yield {
             "items": items,
             "est_decoded_bytes": est,
             "is_last": norm_is_last if is_last != norm_is_last else is_last,
         }
+
 
 def compute_batch_hash(root_hash: str, items: List[Dict[str, Any]]) -> str:
     """

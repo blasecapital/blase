@@ -12,28 +12,39 @@ from data_preparation.components.create_targets import CreateTargets
 
 
 class TestCreateTargets(unittest.TestCase):
-
     @patch("data_preparation.components.create_targets.EnvLoader")
     def setUp(self, MockEnvLoader):
         """Set up an in-memory database and mock environment loader."""
         self.mock_env_loader = MockEnvLoader.return_value
-        self.mock_env_loader.get.side_effect = lambda key: "mock_db_path" if key in [
-            "base_source", "feature_source", "target_source", "BASE_DATABASE",
-            "FEATURE_DATASE", "TARGET_DATABASE"] else None
+        self.mock_env_loader.get.side_effect = (
+            lambda key: "mock_db_path"
+            if key
+            in [
+                "base_source",
+                "feature_source",
+                "target_source",
+                "BASE_DATABASE",
+                "FEATURE_DATASE",
+                "TARGET_DATABASE",
+            ]
+            else None
+        )
         self.mock_env_loader.get.return_value = "/mock/config.py"
 
         self.mock_env_loader.load_config_module.return_value = {
             "main_target_module": "test_function",
             "target_storage_map": "storage_map",
-            "primary_key": ['id', 'obj'],
-            "pair_query": {"BASE_DATABASE": "SELECT pair FROM pairs"}
+            "primary_key": ["id", "obj"],
+            "pair_query": {"BASE_DATABASE": "SELECT pair FROM pairs"},
         }
 
-        self.mock_df = pd.DataFrame({
-            'id': [1, 2, 3],
-            'obj': ['a', 'b', 'c'],
-            'value': ['data1', 'data2', 'data3']
-        })
+        self.mock_df = pd.DataFrame(
+            {
+                "id": [1, 2, 3],
+                "obj": ["a", "b", "c"],
+                "value": ["data1", "data2", "data3"],
+            }
+        )
 
         self.create_targets = CreateTargets()
 
@@ -45,13 +56,13 @@ def test_function():
         """
         with tempfile.TemporaryDirectory() as temp_dir:
             module_path = os.path.join(temp_dir, "test_module.py")
-            
+
             # Write test function to a temporary module file
             with open(module_path, "w") as f:
                 f.write(function_code)
 
             # Set module_path in PrepData
-            self.create_targets.module_path = module_path  
+            self.create_targets.module_path = module_path
 
             # Call `_import_function` and check if it correctly loads `test_function`
             imported_function = self.create_targets._import_target_module()
@@ -67,22 +78,22 @@ storage_map = {
         """
         with tempfile.TemporaryDirectory() as temp_dir:
             module_path = os.path.join(temp_dir, "test_module.py")
-            
+
             # Write test function to a temporary module file
             with open(module_path, "w") as f:
                 f.write(storage_map)
 
             # Set module_path in PrepData
-            self.create_targets.module_path = module_path  
+            self.create_targets.module_path = module_path
 
             imported_map = self.create_targets._import_storage_map()
             self.assertEqual(imported_map, {"feature1": "data1", "feature2": "data2"})
 
     def test_store_original_columns(self):
         """Test that store_original_columns stores the original columns."""
-        expected_columns = ['value']
-        result_columns  = self.create_targets._store_original_columns(self.mock_df)
-        self.assertEqual(expected_columns, result_columns )
+        expected_columns = ["value"]
+        result_columns = self.create_targets._store_original_columns(self.mock_df)
+        self.assertEqual(expected_columns, result_columns)
 
     @patch("data_preparation.components.create_targets.pd.read_sql_query")
     @patch("data_preparation.components.create_targets.sqlite3.connect")
@@ -98,7 +109,7 @@ storage_map = {
         result = self.create_targets._create_pairs_list(pair_query)
 
         expected_pairs = ["EURUSD", "GBPUSD", "AUDUSD"]
-        self.assertEqual(result, expected_pairs) 
+        self.assertEqual(result, expected_pairs)
 
         mock_sqlite_connect.assert_called_once_with("mock_db_path")
         mock_read_sql.assert_called_once_with("SELECT pair FROM pairs", mock_conn)
@@ -144,5 +155,5 @@ storage_map = {
         self.assertEqual(result, expected)
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     unittest.main()

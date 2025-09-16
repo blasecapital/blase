@@ -13,6 +13,7 @@ from blase.utils.hashing import Hash
 
 # --------- run discovery helpers ---------
 
+
 def _runs_root(cwd: Optional[Path] = None) -> Path:
     cwd = cwd or Path.cwd()
     for p in (cwd, cwd.parent):
@@ -23,6 +24,7 @@ def _runs_root(cwd: Optional[Path] = None) -> Path:
     r.mkdir(parents=True, exist_ok=True)
     return r
 
+
 def _active_run_id(run_root: Path) -> Optional[str]:
     cfg = run_root / "active_run.blase"
     if not cfg.exists():
@@ -31,6 +33,7 @@ def _active_run_id(run_root: Path) -> Optional[str]:
         return (json.loads(cfg.read_text()) or {}).get("run_id")
     except Exception:
         return None
+
 
 def _resolve_run_path(run_arg: Optional[str]) -> Path:
     """
@@ -69,6 +72,7 @@ def _resolve_run_path(run_arg: Optional[str]) -> Path:
         raise SystemExit("[restore] no active run; pass --run <ID|PATH>")
     return rr / rid
 
+
 def _open_db(run_path: Path) -> sqlite3.Connection:
     db = run_path / "nodes" / "nodes.db"
     if not db.exists():
@@ -77,10 +81,14 @@ def _open_db(run_path: Path) -> sqlite3.Connection:
     con.row_factory = sqlite3.Row
     return con
 
+
 def _assert_path_matches_hash(path: Path, expected_hash: str, what: str) -> None:
     got = Hash().hash_file(path)
     if got != expected_hash:
-        raise SystemExit(f"restore: {what} hash mismatch: got {got}, expected {expected_hash}")
+        raise SystemExit(
+            f"restore: {what} hash mismatch: got {got}, expected {expected_hash}"
+        )
+
 
 def _resolve_source_no_copy(
     run_path: Path,
@@ -103,13 +111,17 @@ def _resolve_source_no_copy(
 
     # Fallback: ensure locally (may trigger replay of the producer; will copy/link into /restored)
     p, created = _ensure_data_local_or_replay(
-        run_path, source_hash, store.get_data_kind(run_path, source_hash) or "csv",
-        seen_steps=seen_steps, created_paths=created_paths
+        run_path,
+        source_hash,
+        store.get_data_kind(run_path, source_hash) or "csv",
+        seen_steps=seen_steps,
+        created_paths=created_paths,
     )
     # Track for cleanup if we had to copy
     if created and created_paths is not None:
         created_paths.append(p)
     return p, created
+
 
 def _resolve_seed_no_copy_or_ephemeral(
     run_path: Path,
@@ -137,14 +149,17 @@ def _resolve_seed_no_copy_or_ephemeral(
     # 3) No local copy → replay the seed into a temporary file (EPHEMERAL)
     prod = store.producer_step_for_data(run_path, seed_hash)
     if not prod:
-        raise SystemExit(f"restore: seed {seed_hash} missing and no producer step recorded")
+        raise SystemExit(
+            f"restore: seed {seed_hash} missing and no producer step recorded"
+        )
 
     tmpdir = Path(tempfile.mkdtemp(prefix="blase-seed-"))
     tmpfile = tmpdir / f"{seed_hash}.csv"
 
     # Execute only the seed’s plan, writing to tmpfile; prevent materialization records.
     _exec_plan_for_step(
-        run_path, prod,
+        run_path,
+        prod,
         to_path=str(tmpfile),
         backend_override=None,
         seen_steps=seen_steps,
@@ -159,6 +174,7 @@ def _resolve_seed_no_copy_or_ephemeral(
         created_paths.append(tmpfile)
 
     return tmpfile, True
+
 
 def _upstream_gen_for_sink(run_path: Path, target_step_hash: str):
     """
@@ -215,18 +231,20 @@ def _upstream_gen_for_sink(run_path: Path, target_step_hash: str):
         # helpful debug: show what we actually saw
         dbg = " → ".join(f"{n['function_fqn']}[{n['step_hash'][:8]}]" for n in nodes)
         raise SystemExit(
-            "No upstream compute step found for sink replay.\n"
-            f"[debug] plan: {dbg}"
+            f"No upstream compute step found for sink replay.\n[debug] plan: {dbg}"
         )
 
     # delegate to the generic streaming builder for whatever node we found
     return _build_stream_for_step(run_path, upstream_node["step_hash"])
 
+
 # --------- pretty helpers ---------
+
 
 def _print_rows(rows):
     for r in rows:
         print(" | ".join(str(v) for v in r))
+
 
 def _print_step(con, step_hash: str):
     s = con.execute("SELECT * FROM steps WHERE step_hash=?", (step_hash,)).fetchone()
@@ -236,48 +254,70 @@ def _print_step(con, step_hash: str):
     print(f"step: {s['step_hash']}  fqn={s['function_fqn']}  status={s['status']}")
     print(f"  run_id={s['run_id']}  ts_start={s['ts_start']}  ts_end={s['ts_end']}")
     print(f"  params={s['params_json']}")
-    ins = con.execute("SELECT data_hash, role, arg_name FROM step_inputs WHERE step_hash=?", (step_hash,)).fetchall()
+    ins = con.execute(
+        "SELECT data_hash, role, arg_name FROM step_inputs WHERE step_hash=?",
+        (step_hash,),
+    ).fetchall()
     print("  inputs:")
     for r in ins:
         print(f"    - {r['role']:8s} {r['data_hash']} arg={r['arg_name']}")
-    outs = con.execute("SELECT data_hash, name FROM step_outputs WHERE step_hash=?", (step_hash,)).fetchall()
+    outs = con.execute(
+        "SELECT data_hash, name FROM step_outputs WHERE step_hash=?", (step_hash,)
+    ).fetchall()
     print("  outputs:")
     for r in outs:
         print(f"    - {r['name']:8s} {r['data_hash']}")
 
+
 # --------- list/show/plan ---------
+
 
 def cmd_list(args):
     run_path = _resolve_run_path(args.run)
     con = _open_db(run_path)
-    rows = con.execute("""
+    rows = con.execute(
+        """
         SELECT step_hash, function_fqn, status, ts_start, ts_end
         FROM steps
         ORDER BY ts_start DESC
         LIMIT ?
-    """, (args.limit or 20,)).fetchall()
+    """,
+        (args.limit or 20,),
+    ).fetchall()
     if args.like_fqn:
         rows = [r for r in rows if args.like_fqn in r["function_fqn"]]
     if not rows:
         print("[restore] no steps found")
         return
-    _print_rows([[r["step_hash"], r["function_fqn"], r["status"], r["ts_start"], r["ts_end"]] for r in rows])
+    _print_rows(
+        [
+            [r["step_hash"], r["function_fqn"], r["status"], r["ts_start"], r["ts_end"]]
+            for r in rows
+        ]
+    )
+
 
 def cmd_show(args):
     run_path = _resolve_run_path(args.run)
     con = _open_db(run_path)
     _print_step(con, args.step)
 
+
 def _data_present(con, run_path: Path, data_hash: str) -> Dict[str, Any]:
     """Check CAS/materialization availability for a data hash."""
     # infer kind
-    row = con.execute("SELECT kind FROM data WHERE data_hash=?", (data_hash,)).fetchone()
+    row = con.execute(
+        "SELECT kind FROM data WHERE data_hash=?", (data_hash,)
+    ).fetchone()
     kind = row["kind"] if row else "data"
     cas_path = cas.path_for(run_path, kind=kind, data_hash=data_hash)
     have_cas = cas_path.exists()
-    mat = con.execute("""
+    mat = con.execute(
+        """
         SELECT path, ts FROM materializations WHERE data_hash=? ORDER BY ts DESC LIMIT 1
-    """, (data_hash,)).fetchone()
+    """,
+        (data_hash,),
+    ).fetchone()
     return {
         "kind": kind,
         "cas": have_cas,
@@ -285,6 +325,7 @@ def _data_present(con, run_path: Path, data_hash: str) -> Dict[str, Any]:
         "materialized": bool(mat),
         "materialized_path": (mat["path"] if mat else None),
     }
+
 
 def cmd_plan(args):
     """
@@ -356,11 +397,15 @@ def cmd_plan(args):
     """
     run_path = _resolve_run_path(args.run)
     con = _open_db(run_path)
-    s = con.execute("SELECT function_fqn FROM steps WHERE step_hash=?", (args.step,)).fetchone()
+    s = con.execute(
+        "SELECT function_fqn FROM steps WHERE step_hash=?", (args.step,)
+    ).fetchone()
     if not s:
         raise SystemExit(f"[restore] step not found: {args.step}")
     print(f"Plan for step {args.step} ({s['function_fqn']}):")
-    ins = con.execute("SELECT data_hash, role FROM step_inputs WHERE step_hash=?", (args.step,)).fetchall()
+    ins = con.execute(
+        "SELECT data_hash, role FROM step_inputs WHERE step_hash=?", (args.step,)
+    ).fetchall()
     for r in ins:
         st = _data_present(con, run_path, r["data_hash"])
         if st["cas"] or st["materialized"]:
@@ -368,12 +413,21 @@ def cmd_plan(args):
             print(f"  ✓ input {r['role']:<8s} {r['data_hash']}  ({src})")
         else:
             # try to find producer step
-            prod = con.execute("SELECT step_hash FROM step_outputs WHERE data_hash=?", (r["data_hash"],)).fetchone()
+            prod = con.execute(
+                "SELECT step_hash FROM step_outputs WHERE data_hash=?",
+                (r["data_hash"],),
+            ).fetchone()
             if prod:
-                print(f"  ↻ need replay for input {r['role']:<8s} {r['data_hash']}  (producer step {prod['step_hash']})")
+                print(
+                    f"  ↻ need replay for input {r['role']:<8s} {r['data_hash']}  (producer step {prod['step_hash']})"
+                )
             else:
-                print(f"  ✗ missing input {r['role']:<8s} {r['data_hash']}  (no CAS/materialization; unknown producer)")
-    outs = con.execute("SELECT data_hash, name FROM step_outputs WHERE step_hash=?", (args.step,)).fetchall()
+                print(
+                    f"  ✗ missing input {r['role']:<8s} {r['data_hash']}  (no CAS/materialization; unknown producer)"
+                )
+    outs = con.execute(
+        "SELECT data_hash, name FROM step_outputs WHERE step_hash=?", (args.step,)
+    ).fetchall()
     if outs:
         print("  outputs:")
         for r in outs:
@@ -381,7 +435,9 @@ def cmd_plan(args):
             src = "CAS" if st["cas"] else ("MAT" if st["materialized"] else "MISSING")
             print(f"    - {r['name']:<8s} {r['data_hash']}  ({src})")
 
+
 # --------- run (verify/materialize/replay) ---------
+
 
 def _exec_plan_for_step(
     run_path: Path,
@@ -467,33 +523,39 @@ def _exec_plan_for_step(
 
         if fqn == "blase.Extract.read_csv":
             ins = store.load_step_inputs(run_path, sh)
-            src_hash = next((i["data_hash"] for i in ins if i["role"] == "source"), None)
+            src_hash = next(
+                (i["data_hash"] for i in ins if i["role"] == "source"), None
+            )
             realized = {}
             if src_hash:
                 realized["__expected_source_hash__"] = src_hash
             upstream = bindings.run_read_csv_restore(
-                run_path=run_path, params=st["params"], realized=realized, transform_fn=None
+                run_path=run_path,
+                params=st["params"],
+                realized=realized,
+                transform_fn=None,
             )
             continue
 
         if fqn == "blase.Extract.read_images":
-            ins  = store.load_step_inputs(run_path, sh)      # code/env only
-            outs = store.load_step_outputs(run_path, sh)     # manifest + batch_desc_*
-
-            # optional sanity
-            code_hash = store.pick_code_hash(ins)
-            env_hash  = next((i["data_hash"] for i in ins if i["role"] == "env"), None)
+            ins = store.load_step_inputs(run_path, sh)  # code/env only
+            outs = store.load_step_outputs(run_path, sh)  # manifest + batch_desc_*
 
             # recorded artifacts come from outputs
-            manifest_hash = next((o["data_hash"] for o in outs if o["name"] == "manifest"), None)
+            manifest_hash = next(
+                (o["data_hash"] for o in outs if o["name"] == "manifest"), None
+            )
 
             def _ord(o):
                 n = o["name"]
-                try: return int(n.rsplit("_", 1)[-1])
-                except: return 0
+                try:
+                    return int(n.rsplit("_", 1)[-1])
+                except Exception:
+                    return 0
 
             batch_descs = [
-                o["data_hash"] for o in sorted(outs, key=_ord)
+                o["data_hash"]
+                for o in sorted(outs, key=_ord)
                 if o["name"].startswith("batch_desc_")
             ]
 
@@ -503,7 +565,7 @@ def _exec_plan_for_step(
             if manifest_hash:
                 realized["manifest"] = manifest_hash
             if batch_descs:
-                realized["batch_descs"] = batch_descs   # your reader should accept this
+                realized["batch_descs"] = batch_descs  # your reader should accept this
 
             upstream = bindings.run_read_images_restore(
                 run_path=run_path,
@@ -515,17 +577,22 @@ def _exec_plan_for_step(
 
         if fqn == "blase.Transform.apply_function":
             ins = store.load_step_inputs(run_path, sh)
-            fn  = code.load_callable_from_blob(cas.path_for(run_path, "code", store.pick_code_hash(ins)))
+            fn = code.load_callable_from_blob(
+                cas.path_for(run_path, "code", store.pick_code_hash(ins))
+            )
 
             # If an upstream generator already exists, consume it.
             if upstream is not None:
                 upstream = bindings.run_apply_function_restore(
-                    run_path=run_path, params=st["params"], realized={"source_gen": upstream}, transform_fn=fn
+                    run_path=run_path,
+                    params=st["params"],
+                    realized={"source_gen": upstream},
+                    transform_fn=fn,
                 )
                 continue
 
             # Otherwise, anchor by manifest/source and build the upstream now.
-            def _pick_anchor(roles=("source","manifest","dataset","manifest_root")):
+            def _pick_anchor(roles=("source", "manifest", "dataset", "manifest_root")):
                 for r in roles:
                     h = next((i["data_hash"] for i in ins if i["role"] == r), None)
                     if h:
@@ -534,37 +601,60 @@ def _exec_plan_for_step(
 
             role, anchor_hash = _pick_anchor()
             if not anchor_hash:
-                raise SystemExit("replay: Transform.apply_function missing anchor (source|manifest|dataset)")
+                raise SystemExit(
+                    "replay: Transform.apply_function missing anchor (source|manifest|dataset)"
+                )
 
             if role == "source":
-                src_path, _ = _resolve_source_no_copy(run_path, anchor_hash, seen_steps=seen_steps, created_paths=created_paths)
+                src_path, _ = _resolve_source_no_copy(
+                    run_path,
+                    anchor_hash,
+                    seen_steps=seen_steps,
+                    created_paths=created_paths,
+                )
                 upstream = bindings.run_apply_function_restore(
-                    run_path=run_path, params=st["params"], realized={"source": src_path}, transform_fn=fn
+                    run_path=run_path,
+                    params=st["params"],
+                    realized={"source": src_path},
+                    transform_fn=fn,
                 )
             else:
                 # treat anchor as the manifest
                 man_hash = anchor_hash
                 ts_before = planner._step_row(planner._db(run_path), sh)["ts_start"]
-                ri_params = store.read_images_params_for_manifest(run_path, man_hash, ts_before=ts_before)
+                ri_params = store.read_images_params_for_manifest(
+                    run_path, man_hash, ts_before=ts_before
+                )
                 if not ri_params:
-                    raise SystemExit("replay: cannot find read_images params for manifest")
+                    raise SystemExit(
+                        "replay: cannot find read_images params for manifest"
+                    )
 
                 ins_tr = store.load_step_inputs(run_path, sh)
-                batch_descs = [i["data_hash"] for i in ins_tr if i["role"] in ("batch_desc","batch")]
+                batch_descs = [
+                    i["data_hash"]
+                    for i in ins_tr
+                    if i["role"] in ("batch_desc", "batch")
+                ]
                 gen = bindings.run_read_images_restore(
                     run_path=run_path,
                     params=ri_params,
-                    realized={"source": ri_params.get("directory"),
-                            "manifest": man_hash,
-                            "batch": batch_descs},    # your reader should normalize 'batch'/'batch_descs'
+                    realized={
+                        "source": ri_params.get("directory"),
+                        "manifest": man_hash,
+                        "batch": batch_descs,
+                    },  # your reader should normalize 'batch'/'batch_descs'
                 )
                 upstream = bindings.run_apply_function_restore(
-                    run_path=run_path, params=st["params"], realized={"source_gen": gen}, transform_fn=fn
+                    run_path=run_path,
+                    params=st["params"],
+                    realized={"source_gen": gen},
+                    transform_fn=fn,
                 )
             continue
 
         if fqn == "blase.Load.save_to_csv":
-            ins  = store.load_step_inputs(run_path, sh)
+            ins = store.load_step_inputs(run_path, sh)
             outs = store.load_step_outputs(run_path, sh)
             expected_out_hash = outs[0]["data_hash"] if outs else None
 
@@ -577,7 +667,10 @@ def _exec_plan_for_step(
             seed_hash = _pick_viable_seed(run_path, ins)
             if seed_hash:
                 preseed_path, created_seed = _resolve_seed_no_copy_or_ephemeral(
-                    run_path, seed_hash, seen_steps=seen_steps, created_paths=created_paths
+                    run_path,
+                    seed_hash,
+                    seen_steps=seen_steps,
+                    created_paths=created_paths,
                 )
                 if created_seed and created_paths is not None:
                     created_paths.append(preseed_path)
@@ -587,11 +680,15 @@ def _exec_plan_for_step(
                 target_override_this_sink = to_path
                 conflict_policy = "overwrite"
             elif expected_out_hash:
-                target_override_this_sink = str((RESTORE_DEFAULT_DIR / f"{expected_out_hash}.csv").resolve())
+                target_override_this_sink = str(
+                    (RESTORE_DEFAULT_DIR / f"{expected_out_hash}.csv").resolve()
+                )
                 conflict_policy = "overwrite"
             else:
                 default_name = Path(st["params"]["target"]).name
-                target_override_this_sink = str((RESTORE_DEFAULT_DIR / default_name).resolve())
+                target_override_this_sink = str(
+                    (RESTORE_DEFAULT_DIR / default_name).resolve()
+                )
                 conflict_policy = "overwrite"
 
             upstream_gen = upstream
@@ -622,17 +719,20 @@ def _exec_plan_for_step(
             continue
 
         if fqn == "blase.Load.save_images_to_parquet":
-            ins  = store.load_step_inputs(run_path, sh)
+            ins = store.load_step_inputs(run_path, sh)
             outs = store.load_step_outputs(run_path, sh)
             st = store.load_step(run_path, sh)
 
             def _ord(o):
                 n = o["name"]
                 return int(n.split("_")[-1]) if n.startswith("parquet_shard_") else 0
+
             outs.sort(key=_ord)
 
             # Collect expected hashes (one per shard) if they were recorded.
-            expected_out_hashes = [o["data_hash"] for o in outs if o["name"].startswith("parquet_shard")]
+            expected_out_hashes = [
+                o["data_hash"] for o in outs if o["name"].startswith("parquet_shard")
+            ]
 
             # Destination: a directory
             if to_path:
@@ -684,9 +784,11 @@ def _exec_plan_for_step(
 
         # Fallback for non-stream steps, if any
         from blase import restore as _restore
+
         _restore.step(run_path, sh)
 
     return produced
+
 
 def _ensure_data_local_or_replay(
     run_path: Path,
@@ -704,30 +806,51 @@ def _ensure_data_local_or_replay(
     if not kind:
         kind = store.kind_for_hash(run_path, data_hash)
     try:
-        ext = {"parquet": ".parquet", "parquet.shard": ".parquet",
-       "image.manifest": ".json", "image.batch.meta": ".json",
-       "code": ".py", "env": ".json"}.get(kind, ".bin")
+        ext = {
+            "parquet": ".parquet",
+            "parquet.shard": ".parquet",
+            "image.manifest": ".json",
+            "image.batch.meta": ".json",
+            "code": ".py",
+            "env": ".json",
+        }.get(kind, ".bin")
         target_name = f"{data_hash}{ext}"
-        p = materialize.ensure_local(run_path, data_hash, kind=kind, policy="reuse", to_dir=None, target_name=target_name)
+        p = materialize.ensure_local(
+            run_path,
+            data_hash,
+            kind=kind,
+            policy="reuse",
+            to_dir=None,
+            target_name=target_name,
+        )
         _assert_path_matches_hash(p, data_hash, f"{kind} materialization")
         return p, False
     except NeedReplay:
         prod = store.producer_step_for_data(run_path, data_hash)
         if not prod:
-            raise SystemExit(f"restore: missing local copy and no producer for {data_hash}")
+            raise SystemExit(
+                f"restore: missing local copy and no producer for {data_hash}"
+            )
 
         produced = _exec_plan_for_step(
-            run_path, prod, to_path=None, backend_override=None,
-            seen_steps=seen_steps, created_paths=created_paths
+            run_path,
+            prod,
+            to_path=None,
+            backend_override=None,
+            seen_steps=seen_steps,
+            created_paths=created_paths,
         )
 
         p = produced.get(data_hash) if produced else None
         if p is None:
             # fallback: now that replay happened, ensure_local should succeed
-            p = materialize.ensure_local(run_path, data_hash, kind=kind, policy="reuse", to_dir=None)
+            p = materialize.ensure_local(
+                run_path, data_hash, kind=kind, policy="reuse", to_dir=None
+            )
 
         _assert_path_matches_hash(p, data_hash, f"{kind} materialization after replay")
         return p, True
+
 
 def _pick_viable_seed(run_path: Path, ins: list[dict]) -> Optional[str]:
     """
@@ -743,11 +866,14 @@ def _pick_viable_seed(run_path: Path, ins: list[dict]) -> Optional[str]:
     for dh in seeds:
         try:
             kind = store.get_data_kind(run_path, dh) or "csv"
-            materialize.ensure_local(run_path, dh, kind=kind, policy="reuse", to_dir=None)
+            materialize.ensure_local(
+                run_path, dh, kind=kind, policy="reuse", to_dir=None
+            )
             return dh
         except Exception:
             pass
     return None
+
 
 def _normalize_plan_nodes(run_path: Path, plan):
     """
@@ -759,13 +885,25 @@ def _normalize_plan_nodes(run_path: Path, plan):
     for node in plan:
         if isinstance(node, dict):
             if "step_hash" in node and "function_fqn" in node:
-                out.append({"step_hash": node["step_hash"], "function_fqn": node["function_fqn"]})
+                out.append(
+                    {
+                        "step_hash": node["step_hash"],
+                        "function_fqn": node["function_fqn"],
+                    }
+                )
             elif "hash" in node:
                 st = store.load_step(run_path, node["hash"])
-                out.append({"step_hash": node["hash"], "function_fqn": st["function_fqn"]})
+                out.append(
+                    {"step_hash": node["hash"], "function_fqn": st["function_fqn"]}
+                )
             else:
                 # Last resort: try to find something that looks like a hash
-                h = node.get("id") or node.get("step") or node.get("node") or node.get("sha")
+                h = (
+                    node.get("id")
+                    or node.get("step")
+                    or node.get("node")
+                    or node.get("sha")
+                )
                 if not h:
                     continue
                 st = store.load_step(run_path, h)
@@ -780,14 +918,17 @@ def _normalize_plan_nodes(run_path: Path, plan):
             out.append({"step_hash": h, "function_fqn": st["function_fqn"]})
     return out
 
+
 STREAM_FQNS = (
     "blase.Extract.read_csv",
     "blase.Extract.read_images",
     "blase.Transform.apply_function",
 )
 
+
 def _is_stream_fqn(fqn: str) -> bool:
     return any(fqn.endswith(s) for s in STREAM_FQNS)
+
 
 def _build_stream_for_step(run_path: Path, step_hash: str):
     """
@@ -842,7 +983,7 @@ def _build_stream_for_step(run_path: Path, step_hash: str):
     run_apply_function_restore
     blase.restore.step
     """
-    st  = store.load_step(run_path, step_hash)
+    st = store.load_step(run_path, step_hash)
     fqn = st["function_fqn"]
 
     # ---- Extract.read_csv ----
@@ -859,8 +1000,10 @@ def _build_stream_for_step(run_path: Path, step_hash: str):
     # ---- Extract.read_images ----
     if fqn.endswith("Extract.read_images"):
         ins = store.load_step_inputs(run_path, step_hash)
-        manifest_hash = next((i["data_hash"] for i in ins if i["role"] == "manifest"), None)
-        batch_hashes  = [i["data_hash"] for i in ins if i["role"] == "batch"]
+        manifest_hash = next(
+            (i["data_hash"] for i in ins if i["role"] == "manifest"), None
+        )
+        batch_hashes = [i["data_hash"] for i in ins if i["role"] == "batch"]
         realized = {"source": st["params"].get("directory")}
         if manifest_hash:
             realized["manifest"] = manifest_hash
@@ -875,13 +1018,14 @@ def _build_stream_for_step(run_path: Path, step_hash: str):
         raw_plan = planner.plan_for_step(run_path, step_hash) or []
         nodes = _normalize_plan_nodes(run_path, raw_plan)
         try:
-            idx = next(i for i,n in enumerate(nodes) if n["step_hash"] == step_hash)
+            idx = next(i for i, n in enumerate(nodes) if n["step_hash"] == step_hash)
         except StopIteration:
             raise SystemExit("restore: transform step not found in plan")
         upstream_node = None
-        for j in range(idx-1, -1, -1):
+        for j in range(idx - 1, -1, -1):
             if _is_stream_fqn(nodes[j]["function_fqn"]):
-                upstream_node = nodes[j]; break
+                upstream_node = nodes[j]
+                break
         if upstream_node is None:
             # ---- Resolve by lineage hashes (manifest / batch_desc / batch) ----
             ins = store.load_step_inputs(run_path, step_hash)
@@ -891,31 +1035,71 @@ def _build_stream_for_step(run_path: Path, step_hash: str):
             if man:
                 ex = store.producer_step_for_data(run_path, man)
                 if ex:
-                    upstream_node = {"step_hash": ex, "function_fqn": store.load_step(run_path, ex)["function_fqn"]}
+                    upstream_node = {
+                        "step_hash": ex,
+                        "function_fqn": store.load_step(run_path, ex)["function_fqn"],
+                    }
 
             # else try batch_desc, then batch
             if upstream_node is None:
-                bdesc = next((i["data_hash"] for i in ins if i["role"] in ("batch_desc","batch_meta","batchmeta","batch_desc_1","batch_desc_2")), None)
+                bdesc = next(
+                    (
+                        i["data_hash"]
+                        for i in ins
+                        if i["role"]
+                        in (
+                            "batch_desc",
+                            "batch_meta",
+                            "batchmeta",
+                            "batch_desc_1",
+                            "batch_desc_2",
+                        )
+                    ),
+                    None,
+                )
                 if bdesc:
                     ex = store.producer_step_for_data(run_path, bdesc)
                     if ex:
-                        upstream_node = {"step_hash": ex, "function_fqn": store.load_step(run_path, ex)["function_fqn"]}
+                        upstream_node = {
+                            "step_hash": ex,
+                            "function_fqn": store.load_step(run_path, ex)[
+                                "function_fqn"
+                            ],
+                        }
 
             if upstream_node is None:
-                b = next((i["data_hash"] for i in ins if i["role"] in ("batch","image.batch")), None)
+                b = next(
+                    (
+                        i["data_hash"]
+                        for i in ins
+                        if i["role"] in ("batch", "image.batch")
+                    ),
+                    None,
+                )
                 if b:
                     ex = store.producer_step_for_data(run_path, b)
                     if ex:
-                        upstream_node = {"step_hash": ex, "function_fqn": store.load_step(run_path, ex)["function_fqn"]}
+                        upstream_node = {
+                            "step_hash": ex,
+                            "function_fqn": store.load_step(run_path, ex)[
+                                "function_fqn"
+                            ],
+                        }
         if upstream_node is None:
             # Fallback: use recorded CSV source path if present (older runs)
             ins = store.load_step_inputs(run_path, step_hash)
             src = next((i["data_hash"] for i in ins if i["role"] == "source"), None)
             if not src:  # nothing to chain
-                raise SystemExit("restore: cannot locate upstream producer for Transform.apply_function")
-            p = store.get_materialized_path(run_path, src) or store.get_recorded_source_path(run_path, src)
+                raise SystemExit(
+                    "restore: cannot locate upstream producer for Transform.apply_function"
+                )
+            p = store.get_materialized_path(
+                run_path, src
+            ) or store.get_recorded_source_path(run_path, src)
             if not p or not p.exists():
-                p = materialize.ensure_local(run_path, src, kind=store.get_data_kind(run_path, src))
+                p = materialize.ensure_local(
+                    run_path, src, kind=store.get_data_kind(run_path, src)
+                )
             upstream_gen = p.as_posix()  # path-like; binding will read CSV
         else:
             upstream_gen = _build_stream_for_step(run_path, upstream_node["step_hash"])
@@ -926,13 +1110,17 @@ def _build_stream_for_step(run_path: Path, step_hash: str):
         fn = code.load_callable_from_blob(cas.path_for(run_path, "code", code_hash))
 
         return bindings.run_apply_function_restore(
-            run_path=run_path, params=st["params"],
-            realized={"source": upstream_gen}, transform_fn=fn
+            run_path=run_path,
+            params=st["params"],
+            realized={"source": upstream_gen},
+            transform_fn=fn,
         )
 
     # Non-stream fallback
     from blase import restore as restore_mod
+
     return restore_mod.step(run_path, step_hash, kind="data")
+
 
 def cmd_run(args):
     """
@@ -1029,15 +1217,25 @@ def cmd_run(args):
         try:
             if args.to:
                 to_path = Path(args.to).resolve()
-                out = materialize.ensure_local(run_path, data_hash, kind=kind,
-                                            to_dir=to_path.parent, target_name=to_path.name,
-                                            on_conflict=args.on_conflict)
+                out = materialize.ensure_local(
+                    run_path,
+                    data_hash,
+                    kind=kind,
+                    to_dir=to_path.parent,
+                    target_name=to_path.name,
+                    on_conflict=args.on_conflict,
+                )
             else:
                 RESTORE_DEFAULT_DIR.mkdir(parents=True, exist_ok=True)
                 ext = "csv" if kind == "csv" else "bin"
-                out = materialize.ensure_local(run_path, data_hash, kind=kind,
-                                            to_dir=RESTORE_DEFAULT_DIR, target_name=f"{data_hash}.{ext}",
-                                            on_conflict=args.on_conflict)
+                out = materialize.ensure_local(
+                    run_path,
+                    data_hash,
+                    kind=kind,
+                    to_dir=RESTORE_DEFAULT_DIR,
+                    target_name=f"{data_hash}.{ext}",
+                    on_conflict=args.on_conflict,
+                )
             _assert_path_matches_hash(Path(out), data_hash, "fast-path materialize")
             print(f"Materialized: {out}")
             return 0
@@ -1051,10 +1249,14 @@ def cmd_run(args):
         # find the producer step and execute its forward plan
         prod = store.producer_step_for_data(run_path, data_hash)
         if not prod:
-            raise SystemExit(f"[restore] no producer step recorded for data {data_hash}")
-        
+            raise SystemExit(
+                f"[restore] no producer step recorded for data {data_hash}"
+            )
+
         produced = _exec_plan_for_step(
-            run_path, prod, to_path=args.to,
+            run_path,
+            prod,
+            to_path=args.to,
             backend_override=getattr(args, "backend", None),
             seen_steps=seen_steps,
             created_paths=created_paths,
@@ -1072,13 +1274,19 @@ def cmd_run(args):
                 # fallback to sink target basename under RESTORE_DEFAULT_DIR
                 sink_step = store.producer_step_for_data(run_path, data_hash)
                 if not sink_step:
-                    raise SystemExit("restore: cannot locate producing sink for final verification")
+                    raise SystemExit(
+                        "restore: cannot locate producing sink for final verification"
+                    )
                 sink_meta = store.load_step(run_path, sink_step)
-                default_name = Path(sink_meta["params"].get("target", f"{data_hash}.csv")).name
+                default_name = Path(
+                    sink_meta["params"].get("target", f"{data_hash}.csv")
+                ).name
                 final_path = (RESTORE_DEFAULT_DIR / default_name).resolve()
 
         if not final_path.exists():
-            raise SystemExit(f"restore: expected final output does not exist: {final_path}")
+            raise SystemExit(
+                f"restore: expected final output does not exist: {final_path}"
+            )
 
         _assert_path_matches_hash(final_path, data_hash, "final output")
         print(f"Verified: {final_path} == {data_hash[:16]}…")
@@ -1109,32 +1317,39 @@ def cmd_run(args):
 
         # Non-sink producer: stream verify only for now
         if args.mode in ("verify",):
-            gen = _build_stream_for_step(run_path, prod) if _is_stream_fqn(store.load_step(run_path, prod)["function_fqn"]) \
+            gen = (
+                _build_stream_for_step(run_path, prod)
+                if _is_stream_fqn(store.load_step(run_path, prod)["function_fqn"])
                 else restore_step(run_path, prod, kind="data")
+            )
             total = 0
             for i, (b, last) in enumerate(gen, 1):
                 n = len(b) if hasattr(b, "__len__") else "?"
                 print(f"[verify] batch {i}: {n} rows  last={last}")
-                if isinstance(n, int): 
+                if isinstance(n, int):
                     total += n
                 if getattr(args, "limit_batches", None) and i >= args.limit_batches:
                     break
             print(f"[verify] total rows (best-effort): {total}")
             return 0
 
-        raise SystemExit("restore: replay for non-sink data is not implemented yet in --data mode. "
-                            "Use `--step <producer_step>` or `--mode verify`.")
+        raise SystemExit(
+            "restore: replay for non-sink data is not implemented yet in --data mode. "
+            "Use `--step <producer_step>` or `--mode verify`."
+        )
 
     # ---------------------------
     # STEP-CENTRIC RESTORE PATH
     # ---------------------------
     if not getattr(args, "step", None):
-        raise SystemExit("restore: either --step or --data is required (mutually exclusive).")
+        raise SystemExit(
+            "restore: either --step or --data is required (mutually exclusive)."
+        )
 
     step_hash = args.step
 
     # Load step metadata up front (so we can decide sink vs non-sink)
-    st = store.load_step(run_path, step_hash)   # {'function_fqn','params','status'}
+    st = store.load_step(run_path, step_hash)  # {'function_fqn','params','status'}
     fqn = st["function_fqn"]
 
     # Wrapper for "verify" and "replay"
@@ -1158,9 +1373,12 @@ def cmd_run(args):
 
         try:
             path = materialize.ensure_local(
-                run_path, out_hash, kind=kind,
-                to_dir=to_dir, target_name=target_name,
-                on_conflict=args.on_conflict
+                run_path,
+                out_hash,
+                kind=kind,
+                to_dir=to_dir,
+                target_name=target_name,
+                on_conflict=args.on_conflict,
             )
             print(f"Materialized: {path}")
             return 0
@@ -1211,12 +1429,12 @@ def cmd_run(args):
     if args.mode == "replay":
         if fqn in ("blase.Load.save_to_csv", "blase.Load.save_images_to_parquet"):
             upstream_gen = _upstream_gen_for_sink(run_path, step_hash)
-            handler = bindings.RESTORE_HANDLERS[fqn]   # handler must exist for both FQNs
+            handler = bindings.RESTORE_HANDLERS[fqn]  # handler must exist for both FQNs
             out_path = handler(
                 run_path=run_path,
                 params=st["params"],
-                realized={},                       # sinks don’t need extra realized inputs
-                upstream_gen=upstream_gen,         # (batch, is_last) generator
+                realized={},  # sinks don’t need extra realized inputs
+                upstream_gen=upstream_gen,  # (batch, is_last) generator
                 target_override=getattr(args, "to", None),
                 backend_override=getattr(args, "backend", None),
             )
@@ -1224,10 +1442,13 @@ def cmd_run(args):
             return 0
 
         # non-sinks: as before
-        gen = _build_stream_for_step(run_path, step_hash) if _is_stream_fqn(fqn) \
+        gen = (
+            _build_stream_for_step(run_path, step_hash)
+            if _is_stream_fqn(fqn)
             else restore_step(run_path, step_hash, kind="data")
+        )
         for i, (b, last) in enumerate(gen, 1):
-            n = (len(b) if hasattr(b, "__len__") else "?")
+            n = len(b) if hasattr(b, "__len__") else "?"
             print(f"batch {i}: {n} items, last={last}")
             if getattr(args, "limit_batches", None) and i >= args.limit_batches:
                 break

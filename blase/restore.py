@@ -5,8 +5,14 @@ import inspect
 
 from blase.restoring import store, cas, code, materialize, bindings
 
-def step(run_path: Path, step_hash: str, kind: str = "data", policy: str = "reuse",
-         materialize_to: Optional[Path] = None):
+
+def step(
+    run_path: Path,
+    step_hash: str,
+    kind: str = "data",
+    policy: str = "reuse",
+    materialize_to: Optional[Path] = None,
+):
     """
     Restore and execute a tracked pipeline step by replaying or materializing its inputs.
 
@@ -69,21 +75,23 @@ def step(run_path: Path, step_hash: str, kind: str = "data", policy: str = "reus
       parameters and resolved inputs, with filtering against the function
       signature to avoid passing unexpected parameters.
     """
-    st  = store.load_step(run_path, step_hash)
+    st = store.load_step(run_path, step_hash)
     ins = store.load_step_inputs(run_path, step_hash)
     kinds = store.load_data_kinds(run_path, ins)
 
     realized: Dict[str, Any] = {}
     for i in ins:
         role = i["role"]
-        dh   = i["data_hash"]
+        dh = i["data_hash"]
         if role in ("code", "env"):
             realized[role] = cas.path_for(run_path, kind=role, data_hash=dh)
             continue
 
         k = kinds[dh]
         try:
-            p = store.get_materialized_path(run_path, dh) or store.get_recorded_source_path(run_path, dh)
+            p = store.get_materialized_path(
+                run_path, dh
+            ) or store.get_recorded_source_path(run_path, dh)
             if p and p.exists():
                 realized[role] = p
             else:
@@ -111,8 +119,10 @@ def step(run_path: Path, step_hash: str, kind: str = "data", policy: str = "reus
     fqn = st["function_fqn"]
     handler = bindings.RESTORE_HANDLERS.get(fqn)
     if handler is not None:
-        return handler(run_path=run_path, params=st["params"], realized=realized, transform_fn=fn)
-    
+        return handler(
+            run_path=run_path, params=st["params"], realized=realized, transform_fn=fn
+        )
+
     if fqn == "blase.Load.save_to_csv":
         raise RuntimeError(
             "Direct restore of Load.save_to_csv is not supported. "
@@ -123,7 +133,9 @@ def step(run_path: Path, step_hash: str, kind: str = "data", policy: str = "reus
     kwargs = dict(st["params"])
     for i in ins:
         if i["arg_name"]:
-            kwargs[i["arg_name"]] = str(realized.get(i["role"], kwargs.get(i["arg_name"])))
+            kwargs[i["arg_name"]] = str(
+                realized.get(i["role"], kwargs.get(i["arg_name"]))
+            )
     bindings.apply_registry(fqn, realized, kwargs)
 
     try:

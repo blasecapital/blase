@@ -12,6 +12,7 @@ import pytest
 
 # ----- Helpers -----
 
+
 def import_blase_fresh(project_root: Path) -> ModuleType:
     os.environ["BLASE_HOME"] = str(project_root)
     os.chdir(project_root)  # match what your lib expects
@@ -45,18 +46,20 @@ def gen_data(data_root: Path) -> Path:
         w = csv.writer(f)
         w.writerow(["Posted On", "BHK", "Rent", "Size", "City"])
         for i in range(3001):
-            w.writerow([
-                f"2024-01-{(i % 28) + 1:02d}",
-                (i % 4) + 1,
-                1000 + i,
-                500 + (i % 100),
-                f"City{(i % 5)}",
-            ])
+            w.writerow(
+                [
+                    f"2024-01-{(i % 28) + 1:02d}",
+                    (i % 4) + 1,
+                    1000 + i,
+                    500 + (i % 100),
+                    f"City{(i % 5)}",
+                ]
+            )
     return src
 
 
 def run_pipeline_once(src: Path, blase_mod=None) -> Path:
-    blase = blase_mod or import_blase_fresh(src.parents[3]) 
+    blase = blase_mod or import_blase_fresh(src.parents[3])
     ex, tr, ld = blase.Extract(), blase.Transform(), blase.Load()
 
     def func_pandas(df):
@@ -65,7 +68,9 @@ def run_pipeline_once(src: Path, blase_mod=None) -> Path:
             df["Rent_per_sqft"] = df["Rent"] / df["Size"].replace({0: 1})
         return df
 
-    gen = ex.read_csv(str(src), backend="pandas", mode="manual", batch_size=2500, track=True)
+    gen = ex.read_csv(
+        str(src), backend="pandas", mode="manual", batch_size=2500, track=True
+    )
     final_path = None
     try:
         for i, (b, last, meta) in enumerate(gen, 1):
@@ -136,7 +141,9 @@ def _latest_run_path(project_root: Path) -> Path:
             except Exception:
                 items = []
             details.append(f"{rr} -> {len(items)} entries")
-        raise AssertionError("No runs found with nodes/nodes.db. Scanned:\n" + "\n".join(details))
+        raise AssertionError(
+            "No runs found with nodes/nodes.db. Scanned:\n" + "\n".join(details)
+        )
 
     candidates.sort(reverse=True)
     return candidates[0][1]
@@ -169,21 +176,32 @@ def sink_hash_for_latest(project_root: Path) -> str:
 def data_hash_for_step(project_root: Path, step_hash: str) -> str:
     c = con(project_root)
     try:
-        row = c.execute("SELECT data_hash FROM step_outputs WHERE step_hash=?", (step_hash,)).fetchone()
+        row = c.execute(
+            "SELECT data_hash FROM step_outputs WHERE step_hash=?", (step_hash,)
+        ).fetchone()
         assert row, "No output recorded for sink step"
         return row["data_hash"]
     finally:
         c.close()
 
 
-def step_replay(project_root: Path, step_hash: str, final_path: Path) -> subprocess.CompletedProcess:
+def step_replay(
+    project_root: Path, step_hash: str, final_path: Path
+) -> subprocess.CompletedProcess:
     cmd = [
-        sys.executable, "-m", "blase.cli.cli",
-        "restore", "run",
-        "--step", step_hash,
-        "--mode", "replay",
-        "--to", str(final_path),
-        "--on-conflict", "overwrite",
+        sys.executable,
+        "-m",
+        "blase.cli.cli",
+        "restore",
+        "run",
+        "--step",
+        step_hash,
+        "--mode",
+        "replay",
+        "--to",
+        str(final_path),
+        "--on-conflict",
+        "overwrite",
     ]
     return subprocess.run(cmd, cwd=project_root, capture_output=True, text=True)
 
@@ -191,13 +209,21 @@ def step_replay(project_root: Path, step_hash: str, final_path: Path) -> subproc
 def data_replay(project_root: Path, data_hash: str, final_path: Path):
     run_path = _latest_run_path(project_root)
     cmd = [
-        sys.executable, "-m", "blase.cli.cli",
-        "restore", "run",
-        "--run", str(run_path),
-        "--data", data_hash,
-        "--mode", "replay",
-        "--to", str(final_path),
-        "--on-conflict", "overwrite",
+        sys.executable,
+        "-m",
+        "blase.cli.cli",
+        "restore",
+        "run",
+        "--run",
+        str(run_path),
+        "--data",
+        data_hash,
+        "--mode",
+        "replay",
+        "--to",
+        str(final_path),
+        "--on-conflict",
+        "overwrite",
     ]
     return subprocess.run(cmd, cwd=project_root, capture_output=True, text=True)
 
@@ -205,23 +231,32 @@ def data_replay(project_root: Path, data_hash: str, final_path: Path):
 def data_materialize(project_root: Path, data_hash: str, final_path: Path):
     run_path = _latest_run_path(project_root)
     cmd = [
-        sys.executable, "-m", "blase.cli.cli",
-        "restore", "run",
-        "--run", str(run_path),
-        "--data", data_hash,
-        "--mode", "materialize",
-        "--to", str(final_path),
-        "--on-conflict", "overwrite",
+        sys.executable,
+        "-m",
+        "blase.cli.cli",
+        "restore",
+        "run",
+        "--run",
+        str(run_path),
+        "--data",
+        data_hash,
+        "--mode",
+        "materialize",
+        "--to",
+        str(final_path),
+        "--on-conflict",
+        "overwrite",
     ]
     return subprocess.run(cmd, cwd=project_root, capture_output=True, text=True)
 
 
 # ----- Tests -----
 
+
 @pytest.mark.integration
 def test_restore_cli_step_replay(tmp_path, monkeypatch):
     from blase.utils.hashing import Hash
-    
+
     project_root, data_root = workspace(tmp_path, monkeypatch)
     blase = import_blase_fresh(project_root)
     src = gen_data(data_root)
@@ -259,6 +294,7 @@ def test_restore_cli_step_replay(tmp_path, monkeypatch):
 
     final_path.unlink(missing_ok=True)
 
+
 @pytest.mark.integration
 def test_restore_cli_duplicate_append_then_restore(tmp_path, monkeypatch):
     """
@@ -280,7 +316,7 @@ def test_restore_cli_duplicate_append_then_restore(tmp_path, monkeypatch):
     assert hash2 != hash1
 
     # sanity: doubled rows
-    total_rows = sum(1 for _ in csv.reader(final_path.open()) ) - 1
+    total_rows = sum(1 for _ in csv.reader(final_path.open())) - 1
     assert total_rows == 3001 * 2
 
     # ---- Prefer materialize FIRST (fast-path copy) WITHOUT deleting the source
@@ -288,13 +324,17 @@ def test_restore_cli_duplicate_append_then_restore(tmp_path, monkeypatch):
     if restored_copy.exists():
         restored_copy.unlink()
     res = data_materialize(project_root, hash2, restored_copy)
-    assert res.returncode == 0, f"CLI materialize failed:\nSTDOUT:\n{res.stdout}\nSTDERR:\n{res.stderr}"
+    assert res.returncode == 0, (
+        f"CLI materialize failed:\nSTDOUT:\n{res.stdout}\nSTDERR:\n{res.stderr}"
+    )
     assert restored_copy.exists()
     assert Hash().hash_file(restored_copy) == hash2
     restored_copy.unlink(missing_ok=True)
 
     # ---- If you want to keep a replay check, make it xfail until CLI/planner is fixed
-    final_path.unlink(missing_ok=True)  # remove the original now so replay must generate
+    final_path.unlink(
+        missing_ok=True
+    )  # remove the original now so replay must generate
     res = data_replay(project_root, hash2, final_path)
     assert Hash().hash_file(final_path) == hash2
     final_path.unlink(missing_ok=True)

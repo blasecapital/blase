@@ -62,7 +62,6 @@ DDL = [
          source_path   TEXT,
          metadata_json TEXT
        )""",
-
     # ----------------------------------------------------------------------
     # step_inputs / step_outputs (edges in the compute DAG)
     # Restore uses these to plan which steps to re-run after jumping to a checkpoint.
@@ -74,7 +73,6 @@ DDL = [
          arg_name  TEXT,
          PRIMARY KEY (step_hash, data_hash, role)
        )""",
-
     """CREATE TABLE IF NOT EXISTS step_outputs (
          step_hash TEXT NOT NULL,
          data_hash TEXT NOT NULL,
@@ -135,18 +133,16 @@ DDL = [
     "CREATE INDEX IF NOT EXISTS idx_outputs_step          ON step_outputs(step_hash)",
     "CREATE INDEX IF NOT EXISTS idx_steps_sig             ON steps(sig_hash)",
     "CREATE INDEX IF NOT EXISTS idx_data_kind             ON data(kind)",
-
     # Helpful for CLI/Inspect: quick scan of all members of a dataset,
     # and reverse lookups from an item to its containing datasets.
     "CREATE INDEX IF NOT EXISTS idx_dataset_members_ds    ON dataset_members(dataset_id)",
     "CREATE INDEX IF NOT EXISTS idx_dataset_members_data  ON dataset_members(data_hash)",
-
     # Quickly filter manifests/batches by kind (images vs generic).
     "CREATE INDEX IF NOT EXISTS idx_datasets_kind         ON datasets(kind)",
-
     # This accelerates the lookup via datasets.manifest_hash.
-    "CREATE INDEX IF NOT EXISTS idx_materializations_hash ON materializations(data_hash)"
+    "CREATE INDEX IF NOT EXISTS idx_materializations_hash ON materializations(data_hash)",
 ]
+
 
 def _conn(db: Path) -> sqlite3.Connection:
     c = sqlite3.connect(db)
@@ -154,6 +150,7 @@ def _conn(db: Path) -> sqlite3.Connection:
     c.execute("PRAGMA synchronous=NORMAL;")
     c.execute("PRAGMA foreign_keys=OFF;")  # no FKs until you add migrations
     return c
+
 
 def ensure_schema(run_path: Path) -> None:
     db = run_path / "nodes" / "nodes.db"
@@ -163,8 +160,10 @@ def ensure_schema(run_path: Path) -> None:
             c.execute(stmt)
         c.commit()
 
+
 def _now() -> str:
     return time.strftime("%Y-%m-%dT%H:%M:%S")
+
 
 def _normalize_params(p: Dict[str, Any]) -> Dict[str, Any]:
     # Strip non-serializables like Track objects, Path → str, etc.
@@ -182,7 +181,9 @@ def _normalize_params(p: Dict[str, Any]) -> Dict[str, Any]:
                 out[k] = repr(v)
     return out
 
+
 # --- CAS ---
+
 
 class CAS:
     @staticmethod
@@ -190,16 +191,20 @@ class CAS:
         hasher = Hash()
         file_hash = hasher.hash_file(path)
         return file_hash, os.path.getsize(path)
+
     @staticmethod
     def put_bytes(b: bytes, kind: str) -> Tuple[str, int]:
         hasher = Hash()
         h = hasher.hash_bytes(b)
         return h, len(b)
-    
+
+
 # --- hashing ---
+
 
 def _attempt_id() -> str:
     return uuid.uuid4().hex
+
 
 def canonical_signature_payload(
     *,
@@ -215,7 +220,10 @@ def canonical_signature_payload(
         "v": 1,
         "function_fqn": function_fqn,
         "params": params,  # already normalized & sorted
-        "inputs": sorted([{"id": h, "role": r} for h, r in inputs], key=lambda x: (x["role"], x["id"])),
+        "inputs": sorted(
+            [{"id": h, "role": r} for h, r in inputs],
+            key=lambda x: (x["role"], x["id"]),
+        ),
         "code": code_hash,
         "env": env_hash,
         "materializers": mats or {},
@@ -224,11 +232,14 @@ def canonical_signature_payload(
     # Canonical JSON: sorted keys, no spaces
     return json.dumps(doc, sort_keys=True, separators=(",", ":")).encode("utf-8")
 
+
 def step_signature_hash(payload_bytes: bytes) -> str:
     hasher = Hash()
     return hasher.hash_bytes(payload_bytes)
 
+
 # --- StepOps + StepContext ---
+
 
 class StepOps:
     """
@@ -267,13 +278,16 @@ class StepOps:
     cas_policy : str
         CAS policy in effect for this step (see above).
     """
+
     def __init__(self, run_path: Path, step_hash: str, cas_policy: str = "index"):
         self.run_path = run_path
         self.step_hash = step_hash
         self.db = run_path / "nodes" / "nodes.db"
         self.cas_policy = cas_policy  # "index" | "link" | "copy"
 
-    def add_input(self, data_hash: str, role: str, arg_name: Optional[str] = None) -> None:
+    def add_input(
+        self, data_hash: str, role: str, arg_name: Optional[str] = None
+    ) -> None:
         """
         Record an input edge for this step.
 
@@ -293,9 +307,11 @@ class StepOps:
         None
         """
         with _conn(self.db) as c:
-            c.execute("""INSERT OR REPLACE INTO step_inputs(step_hash,data_hash,role,arg_name)
+            c.execute(
+                """INSERT OR REPLACE INTO step_inputs(step_hash,data_hash,role,arg_name)
                         VALUES(?,?,?,?)""",
-                    (self.step_hash, data_hash, role, arg_name))
+                (self.step_hash, data_hash, role, arg_name),
+            )
             c.commit()
 
     def add_output(self, data_hash: str, name: str) -> None:
@@ -314,12 +330,21 @@ class StepOps:
         None
         """
         with _conn(self.db) as c:
-            c.execute("INSERT OR IGNORE INTO step_outputs(step_hash,data_hash,name) VALUES(?,?,?)",
-                      (self.step_hash, data_hash, name))
+            c.execute(
+                "INSERT OR IGNORE INTO step_outputs(step_hash,data_hash,name) VALUES(?,?,?)",
+                (self.step_hash, data_hash, name),
+            )
             c.commit()
 
-    def register_data(self, *, kind: str, version: str, path_or_bytes, metadata: Optional[Dict[str, Any]] = None,
-                      source_path: Optional[str] = None) -> str:
+    def register_data(
+        self,
+        *,
+        kind: str,
+        version: str,
+        path_or_bytes,
+        metadata: Optional[Dict[str, Any]] = None,
+        source_path: Optional[str] = None,
+    ) -> str:
         """
         Register data in CAS and the tracking DB, returning its content hash.
 
@@ -384,14 +409,26 @@ class StepOps:
 
             # optional: remember usable materialization
             with _conn(self.db) as c:
-                c.execute("""INSERT OR IGNORE INTO materializations(data_hash,path,ts)
-                            VALUES(?,?,?)""", (data_hash, src_path_for_db, _now()))
+                c.execute(
+                    """INSERT OR IGNORE INTO materializations(data_hash,path,ts)
+                            VALUES(?,?,?)""",
+                    (data_hash, src_path_for_db, _now()),
+                )
                 c.commit()
 
         with _conn(self.db) as c:
-            c.execute("""INSERT OR IGNORE INTO data(data_hash,kind,version,byte_len,source_path,metadata_json)
+            c.execute(
+                """INSERT OR IGNORE INTO data(data_hash,kind,version,byte_len,source_path,metadata_json)
                         VALUES(?,?,?,?,?,?)""",
-                    (data_hash, kind, version, byte_len, src_path_for_db, json.dumps(metadata or {})))
+                (
+                    data_hash,
+                    kind,
+                    version,
+                    byte_len,
+                    src_path_for_db,
+                    json.dumps(metadata or {}),
+                ),
+            )
             c.commit()
         return data_hash
 
@@ -413,9 +450,14 @@ class StepOps:
         None
         """
         with _conn(self.db) as c:
-            c.execute("INSERT OR IGNORE INTO datasets(dataset_id) VALUES (?)", (dataset_id,))
-            c.execute("""INSERT OR IGNORE INTO dataset_members(dataset_id,data_hash,ordinal)
-                         VALUES (?,?,?)""", (dataset_id, data_hash, ordinal))
+            c.execute(
+                "INSERT OR IGNORE INTO datasets(dataset_id) VALUES (?)", (dataset_id,)
+            )
+            c.execute(
+                """INSERT OR IGNORE INTO dataset_members(dataset_id,data_hash,ordinal)
+                         VALUES (?,?,?)""",
+                (dataset_id, data_hash, ordinal),
+            )
             c.commit()
 
     def mark_completed(self) -> None:
@@ -429,7 +471,8 @@ class StepOps:
         """
         with _conn(self.db) as c:
             # Don't downgrade an already-completed step, and don't flip explicit failures.
-            c.execute("""
+            c.execute(
+                """
                 UPDATE steps
                 SET status = CASE
                                 WHEN status = 'completed' THEN status
@@ -437,7 +480,9 @@ class StepOps:
                                 END,
                     ts_end = COALESCE(ts_end, ?)
                 WHERE step_hash = ?
-            """, (_now(), self.step_hash))
+            """,
+                (_now(), self.step_hash),
+            )
             c.commit()
 
     def mark_aborted(self) -> None:
@@ -449,7 +494,8 @@ class StepOps:
         Does not downgrade a completed step. Stamps ``ts_end``.
         """
         with _conn(self.db) as c:
-            c.execute("""
+            c.execute(
+                """
                 UPDATE steps
                 SET status = CASE
                                 WHEN status = 'completed' THEN status
@@ -457,7 +503,9 @@ class StepOps:
                                 END,
                     ts_end = COALESCE(ts_end, ?)
                 WHERE step_hash = ?
-            """, (_now(), self.step_hash))
+            """,
+                (_now(), self.step_hash),
+            )
             c.commit()
 
     def snapshot_callable(self, fn) -> str:
@@ -476,7 +524,9 @@ class StepOps:
         """
         try:
             blob, meta = build_code_blob(fn)
-            code_hash = self.register_data(kind="code", version="1", path_or_bytes=blob, metadata=meta)
+            code_hash = self.register_data(
+                kind="code", version="1", path_or_bytes=blob, metadata=meta
+            )
             self.add_input(code_hash, role="code")
             return code_hash
         except Exception:
@@ -493,7 +543,9 @@ class StepOps:
         """
         try:
             blob, meta = build_env_manifest()
-            env_hash = self.register_data(kind="env", version="1", path_or_bytes=blob, metadata=meta)
+            env_hash = self.register_data(
+                kind="env", version="1", path_or_bytes=blob, metadata=meta
+            )
             self.add_input(env_hash, role="env")
             return env_hash
         except Exception:
@@ -513,10 +565,10 @@ class StepOps:
         -------
         None
         """
-        if not meta: 
+        if not meta:
             return
         ups = meta.get("upstream")
-        if not isinstance(ups, list): 
+        if not isinstance(ups, list):
             return
         for u in ups:
             dh = u.get("id")
@@ -538,8 +590,12 @@ class StepOps:
         None
         """
         with _conn(self.db) as c:
-            c.execute("DELETE FROM step_inputs WHERE step_hash=? AND role=?", (self.step_hash, role))
+            c.execute(
+                "DELETE FROM step_inputs WHERE step_hash=? AND role=?",
+                (self.step_hash, role),
+            )
             c.commit()
+
 
 class StepContext(contextlib.AbstractContextManager[StepOps]):
     """
@@ -574,14 +630,21 @@ class StepContext(contextlib.AbstractContextManager[StepOps]):
     ops : StepOps
         Operational surface to record inputs/outputs/metadata.
     """
-    def __init__(self, run_path: Path, function_fqn: str, params: Dict[str, Any], run_id: Optional[str] = None):
+
+    def __init__(
+        self,
+        run_path: Path,
+        function_fqn: str,
+        params: Dict[str, Any],
+        run_id: Optional[str] = None,
+    ):
         self.run_path = run_path
         self.db = run_path / "nodes" / "nodes.db"
         ensure_schema(run_path)
         self.function_fqn = function_fqn
         self.params_json = _normalize_params(params)
         self.ts_start = _now()
-        self.step_hash = _attempt_id() 
+        self.step_hash = _attempt_id()
         self.run_id = run_id or run_path.name
         self.ops = StepOps(run_path, self.step_hash, cas_policy=_cas_policy_default())
         self._code_hash = None
@@ -597,23 +660,38 @@ class StepContext(contextlib.AbstractContextManager[StepOps]):
             Operational helper bound to this step.
         """
         with _conn(self.db) as c:
-            c.execute("""
+            c.execute(
+                """
             INSERT INTO steps(step_hash,run_id,step_id,function_fqn,params_json,seeds_json,ts_start,status,attempt_id)
             VALUES(?,?,?,?,?,?,?,?,?)
-            """, (self.step_hash, self.run_id, None, self.function_fqn,
-                json.dumps(self.params_json), None, self.ts_start, "running", self.step_hash))
+            """,
+                (
+                    self.step_hash,
+                    self.run_id,
+                    None,
+                    self.function_fqn,
+                    json.dumps(self.params_json),
+                    None,
+                    self.ts_start,
+                    "running",
+                    self.step_hash,
+                ),
+            )
             c.commit()
         return self.ops
-    
+
     def _finalize_signature(self):
         # pull inputs from DB
         with _conn(self.db) as c:
-            rows = c.execute("SELECT data_hash, role FROM step_inputs WHERE step_hash=?", (self.step_hash,)).fetchall()
+            rows = c.execute(
+                "SELECT data_hash, role FROM step_inputs WHERE step_hash=?",
+                (self.step_hash,),
+            ).fetchall()
         inputs = [(r[0], r[1]) for r in rows]
 
         # optional: fetch code/env from inputs by role
         code_hash = next((h for (h, r) in inputs if r == "code"), None)
-        env_hash  = next((h for (h, r) in inputs if r == "env"), None)
+        env_hash = next((h for (h, r) in inputs if r == "env"), None)
 
         payload = canonical_signature_payload(
             function_fqn=self.function_fqn,
@@ -627,7 +705,9 @@ class StepContext(contextlib.AbstractContextManager[StepOps]):
         sig = step_signature_hash(payload)
         with _conn(self.db) as c:
             # add a column once: ALTER TABLE steps ADD COLUMN sig_hash TEXT;
-            c.execute("UPDATE steps SET sig_hash=? WHERE step_hash=?", (sig, self.step_hash))
+            c.execute(
+                "UPDATE steps SET sig_hash=? WHERE step_hash=?", (sig, self.step_hash)
+            )
             c.commit()
 
     def __exit__(self, exc_type, exc, tb) -> bool:
@@ -647,7 +727,9 @@ class StepContext(contextlib.AbstractContextManager[StepOps]):
         self._finalize_signature()
         # Read current status to avoid downgrades
         with _conn(self.db) as c:
-            row = c.execute("SELECT status FROM steps WHERE step_hash=?", (self.step_hash,)).fetchone()
+            row = c.execute(
+                "SELECT status FROM steps WHERE step_hash=?", (self.step_hash,)
+            ).fetchone()
             current = row[0] if row else None
 
         if current == "completed":
@@ -663,11 +745,14 @@ class StepContext(contextlib.AbstractContextManager[StepOps]):
                 status = "failed"
 
         with _conn(self.db) as c:
-            c.execute("UPDATE steps SET status=?, ts_end=? WHERE step_hash=?",
-                    (status, _now(), self.step_hash))
+            c.execute(
+                "UPDATE steps SET status=?, ts_end=? WHERE step_hash=?",
+                (status, _now(), self.step_hash),
+            )
             c.commit()
         return False
-    
+
+
 class StreamStep:
     """
     Manage a single step over a stream of batches.
@@ -696,7 +781,10 @@ class StreamStep:
     step : StepOps
         Operational surface of the underlying step.
     """
-    def __init__(self, tracker, function_fqn: str, params: Dict[str, Any], *, code_fn=None):
+
+    def __init__(
+        self, tracker, function_fqn: str, params: Dict[str, Any], *, code_fn=None
+    ):
         self._cm = tracker.step(function_fqn, params)
         self.step: StepOps = self._cm.__enter__()
         # snapshot code/env once
@@ -716,7 +804,9 @@ class StreamStep:
         """
         return self.step.step_hash
 
-    def emit(self, *, last_batch: bool, meta: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    def emit(
+        self, *, last_batch: bool, meta: Optional[Dict[str, Any]]
+    ) -> Dict[str, Any]:
         """
         Record per-batch lineage and produce downstream metadata.
 

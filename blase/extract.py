@@ -4,10 +4,14 @@ import json
 
 import numpy as np
 
-from blase.extracting.csv_backend import memory_aware_batcher, read_batches_pandas, read_batches_polars
+from blase.extracting.csv_backend import (
+    memory_aware_batcher,
+    read_batches_pandas,
+    read_batches_polars,
+)
 from blase.extracting.image_backend import (
-    auto_target_bytes_from_system, 
-    scan_manifest_headers, 
+    auto_target_bytes_from_system,
+    scan_manifest_headers,
     shuffle_manifest,
     ensure_item_content_hashes,
     compute_manifest_root_hash,
@@ -15,9 +19,12 @@ from blase.extracting.image_backend import (
     decode_batch_pil,
     decode_batch_cv2,
     iter_batches_from_plan,
-    compute_batch_hash
+    compute_batch_hash,
 )
-from blase.extracting.manifest_utils import build_manifest_descriptor, ensure_dataset_for_manifest
+from blase.extracting.manifest_utils import (
+    build_manifest_descriptor,
+    ensure_dataset_for_manifest,
+)
 from blase.utils.backends import resolve_backend_csv, resolve_backend_images
 from blase.track import Track
 
@@ -27,7 +34,7 @@ class Extract:
     Handles batch extraction of raw data from various local sources, with optional extension to cloud storage.
     It support two primary workflows:
         - Full-dataset iteration: Stream the entire dataset in memory-safe batches using a simple loop.
-        - Targeted batch reading: For structured or file-based sources (e.g., databases, directories), 
+        - Targeted batch reading: For structured or file-based sources (e.g., databases, directories),
           users can specify filters, WHERE clauses, or custom logic to read specific subsets of data.
 
     This module enables memory-efficient reading of structured and unstructured data by **processing in batches**.
@@ -102,7 +109,7 @@ class Extract:
         use_cols: Optional[List[str]] = None,
         filter_by: Optional[list] = None,
         backend: str = "polars",
-        track: bool = True
+        track: bool = True,
     ) -> Iterable[Any]:
         """
         Stream a CSV in memory-safe batches with optional lineage tracking.
@@ -220,23 +227,41 @@ class Extract:
         # untracked path (no DAG/CAS)
         if tracker is None:
             if backend == "polars":
-                yield from ((b, last, None) for (b, last) in read_batches_polars(file_path, batch_size, use_cols, filter_by))
+                yield from (
+                    (b, last, None)
+                    for (b, last) in read_batches_polars(
+                        file_path, batch_size, use_cols, filter_by
+                    )
+                )
             else:
-                yield from ((b, last, None) for (b, last) in read_batches_pandas(file_path, batch_size, use_cols, filter_by))
+                yield from (
+                    (b, last, None)
+                    for (b, last) in read_batches_pandas(
+                        file_path, batch_size, use_cols, filter_by
+                    )
+                )
             return
 
         # tracked path
-        params = {"file_path": str(file_path), "batch_size": batch_size, "backend": backend}
+        params = {
+            "file_path": str(file_path),
+            "batch_size": batch_size,
+            "backend": backend,
+        }
         impl = read_batches_pandas if backend == "pandas" else read_batches_polars
 
         stream = tracker.stream("blase.Extract.read_csv", params, code_fn=impl)
 
         # register the source file as data + input binding
-        src_hash = stream.step.register_data(kind="csv", version="1", path_or_bytes=file_path, metadata={})
+        src_hash = stream.step.register_data(
+            kind="csv", version="1", path_or_bytes=file_path, metadata={}
+        )
         stream.step.add_input(src_hash, role="source", arg_name="file_path")
 
         try:
-            for i, (batch, is_last) in enumerate(impl(file_path, batch_size, use_cols, filter_by), 1):
+            for i, (batch, is_last) in enumerate(
+                impl(file_path, batch_size, use_cols, filter_by), 1
+            ):
                 meta = {
                     "upstream": [{"id": src_hash, "role": "source"}],
                     "producer_step": stream.step.step_hash,  # <-- fix
@@ -259,9 +284,9 @@ class Extract:
         pattern: str = "**/*.jpg",
         backend: Literal["pil", "cv2"] = "pil",
         return_type: Literal["np", "pil", "tensor"] = "np",
-        mode: Literal["auto", "manual"]="auto",
-        safety_margin: float = 0.15, 
-        max_item_decoded_bytes: Optional[int]=None,
+        mode: Literal["auto", "manual"] = "auto",
+        safety_margin: float = 0.15,
+        max_item_decoded_bytes: Optional[int] = None,
         batch_size: Optional[int] = None,
         target_batch_bytes: Optional[int] = None,
         filename_filter: Optional[Callable[[str], bool]] = None,
@@ -270,7 +295,7 @@ class Extract:
         recursive: bool = True,
         color: Literal["rgb", "gray"] = "rgb",
         max_side: Optional[int] = None,
-        track: bool = True
+        track: bool = True,
     ) -> Iterator:
         """
         Yield memory-aware batches of decoded images from a directory.
@@ -356,7 +381,9 @@ class Extract:
 
         if mode == "auto" and target_batch_bytes is None:
             # Try to infer from system memory; fall back to a conservative default
-            target_batch_bytes = auto_target_bytes_from_system(return_type) or (256 * 1024 * 1024)
+            target_batch_bytes = auto_target_bytes_from_system(return_type) or (
+                256 * 1024 * 1024
+            )
 
         if shuffle and seed is None:
             seed = 42  # deterministic default
@@ -375,7 +402,9 @@ class Extract:
         # Compute per-item content hashes (or incremental updates) and manifest Merkle root.
         # Helpers should fill/return item["hash_content"] (hex) and the ordered list used.
         print("Ensuring item content hashes...")
-        manifest = ensure_item_content_hashes(manifest)  # may reuse cached hashes when (mtime,size) unchanged
+        manifest = ensure_item_content_hashes(
+            manifest
+        )  # may reuse cached hashes when (mtime,size) unchanged
         print("Computing manifest root hash...")
         root_hash = compute_manifest_root_hash(
             manifest=manifest,
@@ -404,7 +433,9 @@ class Extract:
         if tracker is None:
             impl_decode = decode_batch_pil if backend == "pil" else decode_batch_cv2
             for i, batch in enumerate(iter_batches_from_plan(batch_plan), 1):
-                batch_hash = compute_batch_hash(root_hash, batch["items"])  # uses ordered item content hashes
+                batch_hash = compute_batch_hash(
+                    root_hash, batch["items"]
+                )  # uses ordered item content hashes
                 decoded = impl_decode(batch["items"], return_type, color, max_side)
                 meta = {
                     "ordinal": i,
@@ -426,9 +457,11 @@ class Extract:
                     "shuffle": shuffle,
                     "seed": seed,
                 }
-                yield {"paths": [it["abs_path"] for it in batch["items"]],
+                yield {
+                    "paths": [it["abs_path"] for it in batch["items"]],
                     "images": decoded,
-                    "meta": meta}
+                    "meta": meta,
+                }
             return
 
         # ---------------- tracked path ----------------
@@ -465,9 +498,11 @@ class Extract:
                 hash_mode="content",
             )
             manifest_hash = stream.step.register_data(
-                kind="image.manifest", 
+                kind="image.manifest",
                 version="1",
-                path_or_bytes=json.dumps(manifest_desc, ensure_ascii=False).encode("utf-8"),
+                path_or_bytes=json.dumps(manifest_desc, ensure_ascii=False).encode(
+                    "utf-8"
+                ),
                 metadata=manifest_desc,
             )
             stream.step.add_output(manifest_hash, name="manifest")
@@ -498,16 +533,23 @@ class Extract:
                     "manifest_root_hash": root_hash,
                 }
                 batch_desc_hash = stream.step.register_data(
-                    kind="image.batch.meta", 
+                    kind="image.batch.meta",
                     version="1",
-                    path_or_bytes=json.dumps(batch_meta_desc, ensure_ascii=False).encode("utf-8"),
+                    path_or_bytes=json.dumps(
+                        batch_meta_desc, ensure_ascii=False
+                    ).encode("utf-8"),
                     metadata=batch_meta_desc,
                 )
                 stream.step.add_output(batch_desc_hash, name=f"batch_desc_{i}")
                 batch_token_hash = stream.step.register_data(
-                    kind="image.batch", version="1",
+                    kind="image.batch",
+                    version="1",
                     path_or_bytes=batch_hash.encode("utf-8"),
-                    metadata={"batch_hash": batch_hash, "manifest_hash": manifest_hash, "ordinal": i},
+                    metadata={
+                        "batch_hash": batch_hash,
+                        "manifest_hash": manifest_hash,
+                        "ordinal": i,
+                    },
                 )
                 stream.step.add_output(batch_token_hash, name=f"batch_{i}")
 
@@ -547,7 +589,12 @@ class Extract:
                 new_meta = stream.emit(last_batch=batch["is_last"], meta=meta_no_up)
                 new_meta["upstream"] = meta["upstream"]
 
-                yield [it["abs_path"] for it in batch["items"]], batch["is_last"], decoded, new_meta
+                yield (
+                    [it["abs_path"] for it in batch["items"]],
+                    batch["is_last"],
+                    decoded,
+                    new_meta,
+                )
 
             stream.close_ok()
 
@@ -561,7 +608,7 @@ class Extract:
         mode: str = "auto",
         batch_size: Optional[int] = None,
         backend: str = "polars",
-        track: bool = True
+        track: bool = True,
     ) -> Iterable[Any]:
         """
         Read a JSON file in memory-safe batches using the specified backend.
@@ -587,7 +634,7 @@ class Extract:
             The data handling library to use for reading and parsing.
             - "polars": Optimized for speed and memory efficiency.
             - "pandas": Standard and robust.
-            
+
         track : bool, default=True
             Whether to log the operation via the `Track` system (if initialized).
 
@@ -610,22 +657,45 @@ class Extract:
         """
 
         backend = resolve_backend_csv(backend)
-    
-    def read_parquet(self, file_path: str, batch_size: int = None) -> Iterable[Any]: pass
-    def read_hdf5(self, file_path: str, batch_size: int = None) -> Iterable[np.ndarray]: pass
-    def read_orc(self, file_path: str, batch_size: int = None) -> Iterable[Any]: pass
-    def read_excel(self, file_path: str, sheet_name: str = None, batch_size: int = None) -> Iterable[Any]: pass
-    def read_tsv(self, file_path: str, batch_size: int = None) -> Iterable[Any]: pass
-    def read_xml(self, file_path: str, batch_size: int = None) -> Iterable[dict]: pass
-    def read_audio(self, file_path: str, batch_size: int = None) -> Iterable[np.ndarray]: pass
-    def read_npy(self, file_path: str, batch_size: int) -> Iterable[np.ndarray]: pass
-    def read_sql(self, query: str, connection, batch_size: int) -> Iterable[Any]: pass
+
+    def read_parquet(self, file_path: str, batch_size: int = None) -> Iterable[Any]:
+        pass
+
+    def read_hdf5(self, file_path: str, batch_size: int = None) -> Iterable[np.ndarray]:
+        pass
+
+    def read_orc(self, file_path: str, batch_size: int = None) -> Iterable[Any]:
+        pass
+
+    def read_excel(
+        self, file_path: str, sheet_name: str = None, batch_size: int = None
+    ) -> Iterable[Any]:
+        pass
+
+    def read_tsv(self, file_path: str, batch_size: int = None) -> Iterable[Any]:
+        pass
+
+    def read_xml(self, file_path: str, batch_size: int = None) -> Iterable[dict]:
+        pass
+
+    def read_audio(
+        self, file_path: str, batch_size: int = None
+    ) -> Iterable[np.ndarray]:
+        pass
+
+    def read_npy(self, file_path: str, batch_size: int) -> Iterable[np.ndarray]:
+        pass
+
+    def read_sql(self, query: str, connection, batch_size: int) -> Iterable[Any]:
+        pass
+
     def read_api(
-        self, 
-        endpoint: str, 
-        params: Dict[str, Any] = None, 
-        headers: Dict[str, str] = None, 
-        batch_size: int = 100, 
-        max_pages: int = None, 
-        rate_limit: float = 1.0
-    ) -> Iterable[Any]: pass
+        self,
+        endpoint: str,
+        params: Dict[str, Any] = None,
+        headers: Dict[str, str] = None,
+        batch_size: int = 100,
+        max_pages: int = None,
+        rate_limit: float = 1.0,
+    ) -> Iterable[Any]:
+        pass

@@ -7,11 +7,12 @@ import sqlite3
 
 import blase.restoring.bindings as b
 
+
 def _fake_manifest(n=5):
     return [
         {
             "rel_path": f"{i}.jpg",
-            "relpath": f"{i}.jpg",   # some code paths read this key
+            "relpath": f"{i}.jpg",  # some code paths read this key
             "path": f"/img/{i}.jpg",
             "abs_path": f"/img/{i}.jpg",
             "bytes": 1234,
@@ -30,10 +31,13 @@ def _fake_manifest(n=5):
 def _fake_plan(items, sizes):
     out, i = [], 0
     for k in sizes:
-        chunk = items[i:i+k]
+        chunk = items[i : i + k]
         i += k
-        out.append({"items": chunk, "est_decoded_bytes": 4096*k, "is_last": i >= len(items)})
+        out.append(
+            {"items": chunk, "est_decoded_bytes": 4096 * k, "is_last": i >= len(items)}
+        )
     return out
+
 
 def _write_blob(base: Path, kind: str, h: str, data: dict, reversed_order=False):
     """Write JSON to one of the candidate CAS layouts."""
@@ -45,16 +49,21 @@ def _write_blob(base: Path, kind: str, h: str, data: dict, reversed_order=False)
     p.parent.mkdir(parents=True, exist_ok=True)
     p.write_text(json.dumps(data))
 
+
 def _init_db(base: Path):
     db_dir = base / "nodes"
     db_dir.mkdir()
     db_path = db_dir / "nodes.db"
     con = sqlite3.connect(db_path)
-    con.execute("CREATE TABLE data (data_hash TEXT PRIMARY KEY, kind TEXT, metadata_json TEXT)")
+    con.execute(
+        "CREATE TABLE data (data_hash TEXT PRIMARY KEY, kind TEXT, metadata_json TEXT)"
+    )
     con.commit()
     return db_path
 
+
 # ---------- fixture to stub dependencies in the bindings namespace ----------
+
 
 @pytest.fixture
 def isolate_restore(monkeypatch):
@@ -69,14 +78,21 @@ def isolate_restore(monkeypatch):
     def _plan(**kw):
         items = _fake_manifest(5)
         return _fake_plan(items, [2, 2, 1])
+
     monkeypatch.setattr(b, "plan_image_batches", _plan)
     monkeypatch.setattr(b, "iter_batches_from_plan", lambda plan: iter(plan))
 
     # decoders
-    monkeypatch.setattr(b, "decode_batch_pil",
-        lambda items, rt, color, ms: [f"im:{x['rel_path']}" for x in items])
-    monkeypatch.setattr(b, "decode_batch_cv2",
-        lambda items, rt, color, ms: [f"im:{x['rel_path']}" for x in items])
+    monkeypatch.setattr(
+        b,
+        "decode_batch_pil",
+        lambda items, rt, color, ms: [f"im:{x['rel_path']}" for x in items],
+    )
+    monkeypatch.setattr(
+        b,
+        "decode_batch_cv2",
+        lambda items, rt, color, ms: [f"im:{x['rel_path']}" for x in items],
+    )
 
     # CAS loader
     def _load_cas_json(run_path, h, kind):
@@ -94,56 +110,87 @@ def isolate_restore(monkeypatch):
                 "batch_desc_hash": h,
             }
         if kind == "image.batch":
-            return {"manifest_hash": "manifest1", "batch_hash": "BH2", "ordinal": 1, "count": 2}
+            return {
+                "manifest_hash": "manifest1",
+                "batch_hash": "BH2",
+                "ordinal": 1,
+                "count": 2,
+            }
         raise FileNotFoundError(h)
+
     monkeypatch.setattr(b, "_load_cas_json", _load_cas_json)
 
     yield
+
 
 @pytest.fixture
 def isolate_save(monkeypatch, tmp_path):
     # ---- fake Hash ----
     class FakeHash:
-        def hash_bytes(self, x): return "hb_" + str(len(x))
-        def hash_file(self, p): return "hf_" + p.name
+        def hash_bytes(self, x):
+            return "hb_" + str(len(x))
+
+        def hash_file(self, p):
+            return "hf_" + p.name
+
     monkeypatch.setattr(b, "Hash", FakeHash)
 
     # ---- fake buffer with Arrow-like API ----
     class FakeBuffer:
-        def to_pybytes(self): return b"xx"
+        def to_pybytes(self):
+            return b"xx"
 
     # ---- fake table ----
     class FakeTable:
         def __init__(self, n=3):
             self._rows = n
             self._schema = ["img_bytes", "path"]
+
         @property
-        def num_rows(self): return self._rows
+        def num_rows(self):
+            return self._rows
+
         @property
-        def num_columns(self): return len(self._schema)
+        def num_columns(self):
+            return len(self._schema)
+
         @property
-        def schema(self): return SimpleNamespace(names=self._schema)
+        def schema(self):
+            return SimpleNamespace(names=self._schema)
+
         def column(self, name):
             if name == "img_bytes":
                 # combine_chunks() returns an object exposing buffers()
                 return SimpleNamespace(
                     to_pylist=lambda: [b"x"] * self._rows,
-                    combine_chunks=lambda: SimpleNamespace(buffers=lambda: [FakeBuffer()])
+                    combine_chunks=lambda: SimpleNamespace(
+                        buffers=lambda: [FakeBuffer()]
+                    ),
                 )
             if name == "path":
                 return SimpleNamespace(to_pylist=lambda: ["/a.jpg"] * self._rows)
             return SimpleNamespace(to_pylist=lambda: [])
 
     # ---- stub helpers used by the function ----
-    monkeypatch.setitem(b.__dict__, "_build_parquet_table_from_images", lambda **kw: FakeTable())
-    monkeypatch.setitem(b.__dict__, "_deterministic_shard_path",
-                        lambda td, prefix, ord: (td / f"{prefix}_{ord}.parquet"))
-    monkeypatch.setitem(b.__dict__, "_write_parquet_table",
-                        lambda table, path, **kw: path)  # no real I/O
-    monkeypatch.setitem(b.__dict__, "resolve_conflict_path",
-                        lambda p, policy, suffix: p)
-    monkeypatch.setitem(b.__dict__, "store",
-                        SimpleNamespace(record_materialization=lambda *a, **k: None))
+    monkeypatch.setitem(
+        b.__dict__, "_build_parquet_table_from_images", lambda **kw: FakeTable()
+    )
+    monkeypatch.setitem(
+        b.__dict__,
+        "_deterministic_shard_path",
+        lambda td, prefix, ord: (td / f"{prefix}_{ord}.parquet"),
+    )
+    monkeypatch.setitem(
+        b.__dict__, "_write_parquet_table", lambda table, path, **kw: path
+    )  # no real I/O
+    monkeypatch.setitem(
+        b.__dict__, "resolve_conflict_path", lambda p, policy, suffix: p
+    )
+    monkeypatch.setitem(
+        b.__dict__,
+        "store",
+        SimpleNamespace(record_materialization=lambda *a, **k: None),
+    )
     monkeypatch.setitem(b.__dict__, "RECORDED_WRITER_CFG", {"engine": "pyarrow"})
 
     # ---- install fake pyarrow + pyarrow.parquet into sys.modules ----
@@ -170,22 +217,25 @@ def isolate_save(monkeypatch, tmp_path):
         )
 
     fake_pq = ModuleType("pyarrow.parquet")
-    fake_pq.ParquetFile   = lambda path: _md()
+    fake_pq.ParquetFile = lambda path: _md()
     fake_pq.read_metadata = lambda path: _md()
-    fake_pq.read_table    = lambda path: FakeTable()
+    fake_pq.read_table = lambda path: FakeTable()
 
     monkeypatch.setitem(sys.modules, "pyarrow", fake_pa)
     monkeypatch.setitem(sys.modules, "pyarrow.parquet", fake_pq)
 
     yield tmp_path
 
+
 # ---------------- apply_registry ----------------
+
 
 def test_apply_registry_maps_roles_to_kwargs():
     kwargs = {}
     realized = {"source": "/tmp/data.csv"}
     b.apply_registry("blase.Extract.read_csv", realized, kwargs)
     assert kwargs["file_path"] == "/tmp/data.csv"
+
 
 def test_apply_registry_no_mapping_noop():
     kwargs = {}
@@ -195,14 +245,21 @@ def test_apply_registry_no_mapping_noop():
 
 # --------------- _pick_replay_target ---------------
 
+
 def test__pick_replay_target_default_and_conflicts(tmp_path, monkeypatch):
     # deterministic timestamp for rename branch
-    monkeypatch.setattr(b, "datetime", SimpleNamespace(
-        now=lambda: SimpleNamespace(strftime=lambda fmt: "20250101-120000")
-    ))
+    monkeypatch.setattr(
+        b,
+        "datetime",
+        SimpleNamespace(
+            now=lambda: SimpleNamespace(strftime=lambda fmt: "20250101-120000")
+        ),
+    )
 
     # 1) no target in params → fallback path, created
-    p = b._pick_replay_target(params={}, target_override=None, on_conflict="overwrite", allow_append=False)
+    p = b._pick_replay_target(
+        params={}, target_override=None, on_conflict="overwrite", allow_append=False
+    )
     assert p.name == "output.csv"
     assert p.parent.name == "replayed"  # data/working/replayed/output.csv
     assert p.parent.exists()
@@ -210,23 +267,32 @@ def test__pick_replay_target_default_and_conflicts(tmp_path, monkeypatch):
     # 2) target exists + allow_append -> returns same path
     t = tmp_path / "out.csv"
     t.write_text("old\n")
-    p2 = b._pick_replay_target({"target": str(t)}, None, on_conflict="fail", allow_append=True)
+    p2 = b._pick_replay_target(
+        {"target": str(t)}, None, on_conflict="fail", allow_append=True
+    )
     assert p2 == t
 
     # 3) exists + fail -> raises
     with pytest.raises(FileExistsError):
-        b._pick_replay_target({"target": str(t)}, None, on_conflict="fail", allow_append=False)
+        b._pick_replay_target(
+            {"target": str(t)}, None, on_conflict="fail", allow_append=False
+        )
 
     # 4) exists + overwrite -> returns the same path
-    p4 = b._pick_replay_target({"target": str(t)}, None, on_conflict="overwrite", allow_append=False)
+    p4 = b._pick_replay_target(
+        {"target": str(t)}, None, on_conflict="overwrite", allow_append=False
+    )
     assert p4 == t
 
     # 5) exists + rename -> suffixed with timestamp
-    p5 = b._pick_replay_target({"target": str(t)}, None, on_conflict="rename", allow_append=False)
+    p5 = b._pick_replay_target(
+        {"target": str(t)}, None, on_conflict="rename", allow_append=False
+    )
     assert p5.name.startswith("out_replayed_20250101-120000")
 
 
 # --------------- run_read_csv_restore ---------------
+
 
 @pytest.mark.parametrize("backend", ["pandas", "polars"])
 def test_run_read_csv_restore_backend_and_hash_check(tmp_path, monkeypatch, backend):
@@ -236,8 +302,9 @@ def test_run_read_csv_restore_backend_and_hash_check(tmp_path, monkeypatch, back
 
     # mock the readers to yield exactly one batch
     called = {}
+
     def fake_reader(path, batch_size, use_cols, filter_by):
-        called["used"] = ("pandas" if backend == "pandas" else "polars")
+        called["used"] = "pandas" if backend == "pandas" else "polars"
         assert str(path) == str(f)
         yield (["row"], True)
 
@@ -258,6 +325,7 @@ def test_run_read_csv_restore_backend_and_hash_check(tmp_path, monkeypatch, back
     assert batch == ["row"] and last is True
     assert called["used"] == backend
 
+
 def test_run_read_csv_restore_hash_mismatch_raises(tmp_path, monkeypatch):
     f = tmp_path / "src.csv"
     f.write_text("x\n")
@@ -265,14 +333,18 @@ def test_run_read_csv_restore_hash_mismatch_raises(tmp_path, monkeypatch):
     # reader stub (won't be reached due to error)
     monkeypatch.setattr(b, "read_batches_pandas", lambda *a, **k: iter([]))
     with pytest.raises(RuntimeError):
-        list(b.run_read_csv_restore(
-            run_path=tmp_path,
-            params={"backend": "pandas"},
-            realized={"source": str(f), "__expected_source_hash__": "EXPECTED"},
-            transform_fn=None,
-        ))
+        list(
+            b.run_read_csv_restore(
+                run_path=tmp_path,
+                params={"backend": "pandas"},
+                realized={"source": str(f), "__expected_source_hash__": "EXPECTED"},
+                transform_fn=None,
+            )
+        )
+
 
 # --------------- run_apply_function_restore ---------------
+
 
 def test_run_apply_function_restore_happy(tmp_path, monkeypatch):
     f = tmp_path / "src.csv"
@@ -282,32 +354,41 @@ def test_run_apply_function_restore_happy(tmp_path, monkeypatch):
     def reader(path, batch_size, use_cols, filter_by):
         yield (["r1"], False)
         yield (["r2"], True)
+
     monkeypatch.setattr(b, "read_batches_pandas", reader)
 
     def fn(batch):
         return [x.upper() for x in batch]
-    out = list(b.run_apply_function_restore(
-        run_path=tmp_path,
-        params={"backend": "pandas"},
-        realized={"source": str(f)},
-        transform_fn=fn,
-    ))
+
+    out = list(
+        b.run_apply_function_restore(
+            run_path=tmp_path,
+            params={"backend": "pandas"},
+            realized={"source": str(f)},
+            transform_fn=fn,
+        )
+    )
     assert out == [(["R1"], False), (["R2"], True)]
+
 
 def test_run_apply_function_restore_missing_source_raises(tmp_path):
     with pytest.raises(RuntimeError):
-        list(b.run_apply_function_restore(
-            run_path=tmp_path,
-            params={},
-            realized={},          # no "source"
-            transform_fn=lambda x: x,
-        ))
+        list(
+            b.run_apply_function_restore(
+                run_path=tmp_path,
+                params={},
+                realized={},  # no "source"
+                transform_fn=lambda x: x,
+            )
+        )
 
 
 # --------------- run_save_to_csv_replay ---------------
 
+
 def _fake_saver(records):
     """Return a Load.save_to_csv replacement that appends 'records' to the tmp file."""
+
     def _save_to_csv(*, data, last_batch, meta, path, backend, track, use_blase_path):
         # append one line per element in 'data'
         p = Path(path)
@@ -315,25 +396,31 @@ def _fake_saver(records):
         with p.open(mode) as fh:
             for r in data:
                 fh.write(str(r) + "\n")
+
     return _save_to_csv
+
 
 def test_run_save_to_csv_replay_writes_and_overwrites(tmp_path, monkeypatch):
     target = tmp_path / "final.csv"
     # upstream yields two batches
     upstream = iter([(["a"], False), (["b"], True)])
     # make Load.save_to_csv write to the tmp path
-    monkeypatch.setattr(b.Load, "save_to_csv", staticmethod(_fake_saver(["a","b"])))
+    monkeypatch.setattr(b.Load, "save_to_csv", staticmethod(_fake_saver(["a", "b"])))
+
     # hash matches after write
     def fake_hash(self, p):
         # temp file should contain two lines "a\nb\n"
         text = Path(p).read_text()
         return "OK" if text.strip().splitlines() == ["a", "b"] else "BAD"
+
     monkeypatch.setattr(b.Hash, "hash_file", fake_hash)
 
     # make sure record_materialization is called
     recorded = {}
+
     def record_materialization(run_path, data_hash, path):
-        recorded["ok"] = (data_hash == "OK" and Path(path) == target)
+        recorded["ok"] = data_hash == "OK" and Path(path) == target
+
     monkeypatch.setattr(b.store, "record_materialization", record_materialization)
 
     out = b.run_save_to_csv_replay(
@@ -347,6 +434,7 @@ def test_run_save_to_csv_replay_writes_and_overwrites(tmp_path, monkeypatch):
     assert target.read_text().strip().splitlines() == ["a", "b"]
     assert recorded.get("ok") is True
 
+
 def test_run_save_to_csv_replay_fail_without_upstream(tmp_path):
     with pytest.raises(RuntimeError):
         b.run_save_to_csv_replay(
@@ -354,6 +442,7 @@ def test_run_save_to_csv_replay_fail_without_upstream(tmp_path):
             params={"target": str(tmp_path / "x.csv")},
             upstream_gen=None,
         )
+
 
 def test_run_save_to_csv_replay_hash_mismatch_raises(tmp_path, monkeypatch):
     target = tmp_path / "x.csv"
@@ -368,11 +457,16 @@ def test_run_save_to_csv_replay_hash_mismatch_raises(tmp_path, monkeypatch):
             expected_out_hash="EXPECTED",
         )
 
+
 def test_run_save_to_csv_replay_rename_conflict(tmp_path, monkeypatch):
     # deterministic timestamp for rename
-    monkeypatch.setattr(b, "datetime", SimpleNamespace(
-        now=lambda: SimpleNamespace(strftime=lambda fmt: "20250101-120000")
-    ))
+    monkeypatch.setattr(
+        b,
+        "datetime",
+        SimpleNamespace(
+            now=lambda: SimpleNamespace(strftime=lambda fmt: "20250101-120000")
+        ),
+    )
     # existing target
     target = tmp_path / "out.csv"
     target.write_text("old\n")
@@ -394,12 +488,13 @@ def test_run_save_to_csv_replay_rename_conflict(tmp_path, monkeypatch):
     # original remains
     assert target.read_text() == "old\n"
 
+
 def test_run_save_to_csv_replay_preseed_appends(tmp_path, monkeypatch):
     target = tmp_path / "out.csv"
     pre = tmp_path / "seed.csv"
     pre.write_text("seed\n")
     upstream = iter([(["n1"], False), (["n2"], True)])
-    monkeypatch.setattr(b.Load, "save_to_csv", staticmethod(_fake_saver(["n1","n2"])))
+    monkeypatch.setattr(b.Load, "save_to_csv", staticmethod(_fake_saver(["n1", "n2"])))
     # hash returns something, not enforcing a particular value
     monkeypatch.setattr(b.Hash, "hash_file", lambda self, p: "HASH")
 
@@ -413,6 +508,7 @@ def test_run_save_to_csv_replay_preseed_appends(tmp_path, monkeypatch):
     lines = Path(out).read_text().splitlines()
     # should include seed + new lines (order preserved)
     assert lines == ["seed", "n1", "n2"]
+
 
 # ----- run_read_images_restore tests -----
 def test_restore_happy_path_with_manifest_and_batch_descs(isolate_restore, tmp_path):
@@ -439,7 +535,7 @@ def test_restore_happy_path_with_manifest_and_batch_descs(isolate_restore, tmp_p
     for i, (images, meta, is_last) in enumerate(outs, 1):
         assert isinstance(images, list) and images
         assert meta["manifest_root_hash"] == "rootHASH"
-        assert meta["batch_hash"] == f"BH{2 if i<3 else 1}"
+        assert meta["batch_hash"] == f"BH{2 if i < 3 else 1}"
         assert meta["manifest"] == "manifest1"
         assert isinstance(is_last, bool)
         # upstream should include manifest and batch entries
@@ -451,23 +547,39 @@ def test_restore_requires_source_or_directory(isolate_restore, tmp_path):
     params = {}
     realized = {}  # no source, no params['directory']
     with pytest.raises(RuntimeError):
-        next(b.run_read_images_restore(run_path=tmp_path, params=params, realized=realized))
+        next(
+            b.run_read_images_restore(
+                run_path=tmp_path, params=params, realized=realized
+            )
+        )
 
 
 def test_restore_shuffle_without_seed_raises(isolate_restore, tmp_path):
     params = {"shuffle": True}  # seed missing
     realized = {"source": "/x"}
     with pytest.raises(RuntimeError):
-        next(b.run_read_images_restore(run_path=tmp_path, params=params, realized=realized))
+        next(
+            b.run_read_images_restore(
+                run_path=tmp_path, params=params, realized=realized
+            )
+        )
 
 
 def test_restore_root_hash_mismatch_raises(isolate_restore, monkeypatch, tmp_path):
     # Make manifest CAS report a different root hash
-    monkeypatch.setattr(b, "_load_cas_json", lambda rp, h, kind: {"root_hash": "DIFF"} if kind=="image.manifest" else {})
+    monkeypatch.setattr(
+        b,
+        "_load_cas_json",
+        lambda rp, h, kind: {"root_hash": "DIFF"} if kind == "image.manifest" else {},
+    )
     params = {"shuffle": False}
     realized = {"source": "/x", "manifest": "manifest1"}
     with pytest.raises(RuntimeError):
-        next(b.run_read_images_restore(run_path=tmp_path, params=params, realized=realized))
+        next(
+            b.run_read_images_restore(
+                run_path=tmp_path, params=params, realized=realized
+            )
+        )
 
 
 def test_restore_validates_batch_count_and_hash(isolate_restore, monkeypatch, tmp_path):
@@ -479,18 +591,29 @@ def test_restore_validates_batch_count_and_hash(isolate_restore, monkeypatch, tm
             idx = int(h.split("_")[-1])
             count = [2, 2, 1][idx - 1]
             bad = "BAD" if idx == 2 else f"BH{count}"
-            return {"manifest_hash": "manifest1", "ordinal": idx, "count": count, "batch_hash": bad}
+            return {
+                "manifest_hash": "manifest1",
+                "ordinal": idx,
+                "count": count,
+                "batch_hash": bad,
+            }
         raise FileNotFoundError
+
     monkeypatch.setattr(b, "_load_cas_json", _load_cas_json_bad_hash)
 
     params = {"shuffle": False}
-    realized = {"source": "/x", "manifest": "manifest1", "batch_descs": ["desc_1", "desc_2", "desc_3"]}
+    realized = {
+        "source": "/x",
+        "manifest": "manifest1",
+        "batch_descs": ["desc_1", "desc_2", "desc_3"],
+    }
     # Should fail on second batch due to hash mismatch
     gen = b.run_read_images_restore(run_path=tmp_path, params=params, realized=realized)
     # consume first ok batch
     next(gen)
     with pytest.raises(RuntimeError):
         next(gen)
+
 
 # ----- _load_cas_json tests -----
 def test_load_from_canonical(tmp_path):
@@ -533,15 +656,16 @@ def test_load_from_reversed_order(tmp_path):
 
 
 def test_kind_required(tmp_path):
-    h = "deadbeef"*8
+    h = "deadbeef" * 8
     with pytest.raises(ValueError):
         b._load_cas_json(tmp_path, h, kind=None)
 
 
 def test_not_found_raises(tmp_path):
-    h = "deadbeef"*8
+    h = "deadbeef" * 8
     with pytest.raises(FileNotFoundError):
         b._load_cas_json(tmp_path, h, kind="image.manifest")
+
 
 # ----- _lookup_data_row tests -----
 def test_lookup_returns_expected(tmp_path):
@@ -579,6 +703,7 @@ def test_lookup_handles_bad_json(tmp_path):
     out = b._lookup_data_row(tmp_path, h)
     assert out == {"kind": "image.manifest", "metadata": None}
 
+
 # ----- _try_load_batch_desc tests -----
 def test_loads_from_cas_meta_first(monkeypatch, tmp_path):
     h = "hashmeta"
@@ -598,8 +723,16 @@ def test_loads_from_cas_meta_first(monkeypatch, tmp_path):
 def test_falls_back_to_data_row(monkeypatch, tmp_path):
     h = "hashrow"
     payload = {"via": "data-row"}
-    monkeypatch.setattr(b, "_load_cas_json", lambda rp, hh, kind: (_ for _ in ()).throw(FileNotFoundError()))
-    monkeypatch.setattr(b, "_lookup_data_row", lambda rp, hh: {"kind": "image.batch.meta", "metadata": payload})
+    monkeypatch.setattr(
+        b,
+        "_load_cas_json",
+        lambda rp, hh, kind: (_ for _ in ()).throw(FileNotFoundError()),
+    )
+    monkeypatch.setattr(
+        b,
+        "_lookup_data_row",
+        lambda rp, hh: {"kind": "image.batch.meta", "metadata": payload},
+    )
 
     out = b._try_load_batch_desc(tmp_path, h)
     assert out == payload
@@ -608,6 +741,7 @@ def test_falls_back_to_data_row(monkeypatch, tmp_path):
 def test_falls_back_to_cas_batch(monkeypatch, tmp_path):
     h = "hashbatch"
     payload = {"via": "cas-batch"}
+
     # first call (meta) raises, second call (batch) returns payload
     def fake_load(run_path, hh, kind):
         if kind == "image.batch.meta":
@@ -615,6 +749,7 @@ def test_falls_back_to_cas_batch(monkeypatch, tmp_path):
         elif kind == "image.batch":
             return payload
         raise AssertionError("unexpected kind")
+
     monkeypatch.setattr(b, "_load_cas_json", fake_load)
     monkeypatch.setattr(b, "_lookup_data_row", lambda rp, hh: None)
 
@@ -624,16 +759,22 @@ def test_falls_back_to_cas_batch(monkeypatch, tmp_path):
 
 def test_returns_empty_if_all_fail(monkeypatch, tmp_path):
     h = "hashnone"
-    monkeypatch.setattr(b, "_load_cas_json", lambda rp, hh, kind: (_ for _ in ()).throw(FileNotFoundError()))
+    monkeypatch.setattr(
+        b,
+        "_load_cas_json",
+        lambda rp, hh, kind: (_ for _ in ()).throw(FileNotFoundError()),
+    )
     monkeypatch.setattr(b, "_lookup_data_row", lambda rp, hh: None)
 
     out = b._try_load_batch_desc(tmp_path, h)
     assert out == {}
 
+
 # ----- run_save_images_to_parquet_replay tests -----
 def test_basic_replay(isolate_save):
     run_path = isolate_save
     params = {"target_dir": str(run_path), "shard_prefix": "b"}
+
     # upstream generator yields two batches
     def upstream():
         yield (["im1"], {"ordinal": 1}, False)
@@ -652,6 +793,7 @@ def test_basic_replay(isolate_save):
 def test_expected_hash_mismatch_raises(isolate_save):
     run_path = isolate_save
     params = {"target_dir": str(run_path), "shard_prefix": "b"}
+
     # one batch
     def upstream():
         yield (["im1"], {"ordinal": 1}, True)
@@ -671,6 +813,7 @@ def test_target_override_and_on_conflict(isolate_save):
     run_path = isolate_save
     override_dir = run_path / "custom"
     params = {"shard_prefix": "c"}
+
     def upstream():
         yield (["im1"], {"ordinal": 1}, True)
 

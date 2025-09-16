@@ -3,11 +3,11 @@ class Pipeline:
     Automates an end-to-end machine learning workflow based on a user-defined configuration file.
 
     The `Pipeline` class provides a high-level interface for executing the full `blase` training
-    process using a single command or script. It wraps the Extract, Transform, Clean, Prepare, 
-    Train, Evaluate, and Deploy modules, and allows users to control each step through a YAML or 
+    process using a single command or script. It wraps the Extract, Transform, Clean, Prepare,
+    Train, Evaluate, and Deploy modules, and allows users to control each step through a YAML or
     JSON configuration.
 
-    This module is ideal for users who want to reproduce results, run pipelines headlessly (e.g., 
+    This module is ideal for users who want to reproduce results, run pipelines headlessly (e.g.,
     in production), or simplify experimentation by changing configurations instead of code.
 
     Features:

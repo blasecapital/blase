@@ -5,6 +5,7 @@ from statistics import median
 from typing import Any, Dict, List, Optional
 import json
 
+
 def build_manifest_descriptor(
     manifest: List[Dict[str, Any]],
     directory: str,
@@ -72,10 +73,10 @@ def build_manifest_descriptor(
     (12873, '9c41f2d0')
     """
     # Pull simple sequences for stats (ignore missing/None)
-    widths  = [int(r["width"])  for r in manifest if (r.get("width")  is not None)]
+    widths = [int(r["width"]) for r in manifest if (r.get("width") is not None)]
     heights = [int(r["height"]) for r in manifest if (r.get("height") is not None)]
-    sizes   = [int(r["bytes"])  for r in manifest if (r.get("bytes")  is not None)]
-    modes   = [str(r["mode"])   for r in manifest if r.get("mode")]
+    sizes = [int(r["bytes"]) for r in manifest if (r.get("bytes") is not None)]
+    modes = [str(r["mode"]) for r in manifest if r.get("mode")]
 
     def _mmmed(xs: List[int]) -> Dict[str, Optional[int]]:
         if not xs:
@@ -127,6 +128,7 @@ def build_manifest_descriptor(
         },
     }
     return descriptor
+
 
 def ensure_dataset_for_manifest(
     manifest_hash: str,
@@ -256,9 +258,9 @@ def ensure_dataset_for_manifest(
     dm_cols = table_cols(conn, "dataset_members")
     # Determine which member columns we can fill
     has_role = "role" in dm_cols
-    has_ic   = "is_corrupt" in dm_cols
-    has_w    = "width" in dm_cols
-    has_h    = "height" in dm_cols
+    has_ic = "is_corrupt" in dm_cols
+    has_w = "width" in dm_cols
+    has_h = "height" in dm_cols
 
     member_rows = []
     for ordinal, rec in enumerate(manifest, 1):

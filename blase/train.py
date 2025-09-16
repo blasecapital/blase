@@ -11,7 +11,7 @@ class Train:
     high-level API that works across TensorFlow, PyTorch, and other supported ML libraries, while allowing users
     to pass in custom model architectures, losses, and training routines.
 
-    This module emphasizes local, memory-efficient execution by streaming data in batches from binary formats 
+    This module emphasizes local, memory-efficient execution by streaming data in batches from binary formats
     such as `.npy`, `.npz`, or `.tfrecord`, aligning with `blase`'s design philosophy. Training metadata,
     hyperparameters, and model checkpoints are logged using an internal hashing and tagging system to ensure
     that every training run is reproducible and easily auditable.
@@ -85,10 +85,7 @@ class Train:
         pass
 
     def configure_training(
-        self,
-        optimizer: Any,
-        loss_fn: Any,
-        metrics: Optional[List[Any]] = None
+        self, optimizer: Any, loss_fn: Any, metrics: Optional[List[Any]] = None
     ) -> None:
         pass
 
@@ -96,7 +93,7 @@ class Train:
         self,
         mode: str = "from_scratch",  # options: "from_scratch", "resume", "fine_tune"
         checkpoint_path: Optional[str] = None,
-        freeze_layers: Optional[List[str]] = None
+        freeze_layers: Optional[List[str]] = None,
     ) -> None:
         pass
 
@@ -105,7 +102,7 @@ class Train:
         data_dir: str,
         k: int = 5,
         shuffle: bool = True,
-        seed: Optional[int] = None
+        seed: Optional[int] = None,
     ) -> None:
         pass
 
@@ -117,10 +114,9 @@ class Train:
         auto_save: bool = True,
         auto_log: bool = True,
         model_save_path: Optional[str] = None,
-        log_save_path: Optional[str] = None
+        log_save_path: Optional[str] = None,
     ) -> None:
         pass
-
 
     def save_model(self, path: str) -> None:
         pass

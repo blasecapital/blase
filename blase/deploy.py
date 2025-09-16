@@ -88,7 +88,7 @@ class Deploy:
         metadata: Optional[Dict[str, Any]] = None,
         include_api: bool = False,
         include_docker: bool = False,
-        include_requirements: bool = True
+        include_requirements: bool = True,
     ) -> None:
         """
         Packages the model and supporting artifacts for deployment.
@@ -96,10 +96,7 @@ class Deploy:
         pass
 
     def export_onnx(
-        self,
-        model: Any,
-        save_path: str,
-        input_sample: Optional[Any] = None
+        self, model: Any, save_path: str, input_sample: Optional[Any] = None
     ) -> None:
         """
         Converts a compatible model to ONNX format.
@@ -107,10 +104,7 @@ class Deploy:
         pass
 
     def generate_api_wrapper(
-        self,
-        save_path: str,
-        framework: str = "tensorflow",
-        use_fastapi: bool = True
+        self, save_path: str, framework: str = "tensorflow", use_fastapi: bool = True
     ) -> None:
         """
         Generates a REST API wrapper script (FastAPI or Flask).
@@ -118,29 +112,21 @@ class Deploy:
         pass
 
     def generate_docker_assets(
-        self,
-        save_path: str,
-        base_image: str = "python:3.10-slim"
+        self, save_path: str, base_image: str = "python:3.10-slim"
     ) -> None:
         """
         Generates Dockerfile and docker-compose.yml for deployment.
         """
         pass
 
-    def archive_deployment(
-        self,
-        save_path: str,
-        format: str = "zip"
-    ) -> None:
+    def archive_deployment(self, save_path: str, format: str = "zip") -> None:
         """
         Archives the deployment directory into a zip or tarball.
         """
         pass
 
     def register_custom_deployer(
-        self,
-        name: str,
-        deploy_fn: Callable[[Any, str, Optional[Dict[str, Any]]], None]
+        self, name: str, deploy_fn: Callable[[Any, str, Optional[Dict[str, Any]]], None]
     ) -> None:
         """
         Registers a user-defined deployment function under a custom method name.

@@ -94,7 +94,7 @@ class Hash:
         """
         source = inspect.getsource(func)
         h = self._hasher()
-        h.update(source.encode('utf-8'))
+        h.update(source.encode("utf-8"))
         return h.hexdigest()
 
     def hash_file(self, file_path: Union[str, Path]) -> str:
@@ -124,8 +124,8 @@ class Hash:
         directory = Path(directory_path)
         for path in sorted(directory.rglob("*")):
             if path.is_file():
-                h.update(path.name.encode('utf-8'))
-                h.update(self.hash_file(path).encode('utf-8'))
+                h.update(path.name.encode("utf-8"))
+                h.update(self.hash_file(path).encode("utf-8"))
         return h.hexdigest()
 
     def hash_object(self, obj: Any) -> str:
@@ -141,7 +141,7 @@ class Hash:
         serialized = pickle.dumps(obj)
         obj_hash = byte_hasher(serialized)
         return obj_hash
-    
+
     def hash_bytes(self, bytes: bytes) -> str:
         """
         Generate a hash of any collection of bytes.

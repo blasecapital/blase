@@ -11,12 +11,15 @@ from data_preparation.components.load_data import LoadData
 
 
 class TestLoadData(unittest.TestCase):
-
     @patch("data_preparation.components.load_data.EnvLoader")
     def setUp(self, MockEnvLoader):
         """Set up an in-memory database and mock environment loader."""
         self.mock_env_loader = MockEnvLoader.return_value
-        self.mock_env_loader.get.side_effect = lambda key: "mock_db_path" if key in ["base_source", "feature_source", "target_source"] else None
+        self.mock_env_loader.get.side_effect = (
+            lambda key: "mock_db_path"
+            if key in ["base_source", "feature_source", "target_source"]
+            else None
+        )
 
         self.mock_env_loader.load_config_module.return_value = {
             "base_query": "SELECT * FROM base_table WHERE pair IN ({placeholders})",
@@ -49,11 +52,14 @@ class TestLoadData(unittest.TestCase):
         """)
 
         # Insert mock data
-        cursor.executemany("INSERT INTO base_table (pair, value) VALUES (?, ?)", [
-            ("EURUSD", "data1"),
-            ("GBPUSD", "data2"),
-            ("AUDUSD", "data3"),
-        ])
+        cursor.executemany(
+            "INSERT INTO base_table (pair, value) VALUES (?, ?)",
+            [
+                ("EURUSD", "data1"),
+                ("GBPUSD", "data2"),
+                ("AUDUSD", "data3"),
+            ],
+        )
 
         self.mock_db.commit()
 
@@ -68,14 +74,22 @@ class TestLoadData(unittest.TestCase):
         """Test loading data in batches from the in-memory database."""
         df = self.load_data.load_data("base", batch=["EURUSD", "GBPUSD"])
 
-        expected_df = pd.DataFrame({"id": [1, 2], "pair": ["EURUSD", "GBPUSD"], "value": ["data1", "data2"]})
+        expected_df = pd.DataFrame(
+            {"id": [1, 2], "pair": ["EURUSD", "GBPUSD"], "value": ["data1", "data2"]}
+        )
         pd.testing.assert_frame_equal(df, expected_df)
 
     def test_load_data_full_dataset(self):
         """Test loading all data from the in-memory database."""
         df = self.load_data.load_data("base")
 
-        expected_df = pd.DataFrame({"id": [1, 2, 3], "pair": ["EURUSD", "GBPUSD", "AUDUSD"], "value": ["data1", "data2", "data3"]})
+        expected_df = pd.DataFrame(
+            {
+                "id": [1, 2, 3],
+                "pair": ["EURUSD", "GBPUSD", "AUDUSD"],
+                "value": ["data1", "data2", "data3"],
+            }
+        )
         pd.testing.assert_frame_equal(df, expected_df)
 
     def tearDown(self):
@@ -83,5 +97,5 @@ class TestLoadData(unittest.TestCase):
         self.mock_db.close()
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     unittest.main(verbosity=2)

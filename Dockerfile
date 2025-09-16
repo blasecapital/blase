@@ -48,6 +48,9 @@ RUN conda install -y \
     tqdm \
     lime \
     pytest \
+    pytest-cov \
+    opencv \
+    ruff \
     more-itertools \
     numpy=2.0.2 \
     pandas && \
@@ -73,6 +76,8 @@ ENV PATH="/root/.cargo/bin:${PATH}"
 
 # Install maturin globally (used to build Rust Python bindings)
 RUN pip install maturin
+COPY rust/target/wheels/rust-0.1.0-cp39-cp39-manylinux_2_31_x86_64.whl /tmp/
+RUN pip install /tmp/rust-0.1.0-cp39-cp39-manylinux_2_31_x86_64.whl && rm /tmp/*.whl
 
 RUN python -c "import tensorflow as tf; print('TensorFlow:', tf.__version__)"
 RUN python -c "import numpy as np; print('NumPy:', np.__version__)"

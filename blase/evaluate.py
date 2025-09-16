@@ -119,15 +119,12 @@ class Evaluate:
         model_path: str,
         test_data_dir: str,
         task_type: str = "classification",
-        save_preds: bool = False
+        save_preds: bool = False,
     ) -> None:
         pass
 
     def evaluate_from_saved_preds(
-        self,
-        preds_path: str,
-        targets_path: str,
-        task_type: str = "classification"
+        self, preds_path: str, targets_path: str, task_type: str = "classification"
     ) -> None:
         pass
 

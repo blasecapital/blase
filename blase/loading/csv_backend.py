@@ -1,6 +1,7 @@
 from pathlib import Path
 from typing import Any
 
+
 def save_batch_pandas(df: Any, path: Path, file_exists: bool):
     """
     Save a batch of data to a CSV file using Pandas.
@@ -14,12 +15,10 @@ def save_batch_pandas(df: Any, path: Path, file_exists: bool):
         file_exists (bool): Whether the file already exists.
     """
     df.to_csv(
-        path,
-        mode="a" if file_exists else "w",
-        header=not file_exists,
-        index=False
+        path, mode="a" if file_exists else "w", header=not file_exists, index=False
     )
     return path
+
 
 def save_batch_polars(df: Any, base_path: Path, file_exists: bool):
     """

@@ -71,9 +71,20 @@ class Clean:
 
     """
 
-    def apply_filter(self, batch: Any, filter_fn: Callable) -> None: pass
-    def remove_keys(self, batch: Any) -> Any: pass
-    def validate_keys(self, batch: Any, key_fn: Callable) -> List[str]: pass
-    def save_keys(self, tag: str, path: Optional[str] = None) -> None: pass
-    def load_keys(self, tag: str, path: Optional[str] = None) -> None: pass
-    def clear_keys(self) -> None: pass
+    def apply_filter(self, batch: Any, filter_fn: Callable) -> None:
+        pass
+
+    def remove_keys(self, batch: Any) -> Any:
+        pass
+
+    def validate_keys(self, batch: Any, key_fn: Callable) -> List[str]:
+        pass
+
+    def save_keys(self, tag: str, path: Optional[str] = None) -> None:
+        pass
+
+    def load_keys(self, tag: str, path: Optional[str] = None) -> None:
+        pass
+
+    def clear_keys(self) -> None:
+        pass

@@ -3,6 +3,7 @@ from typing import Iterable
 
 from blase.track import Track
 
+
 class Transform:
     """
     A utility class for applying user-defined and built-in transformations to batched datasets.
@@ -58,18 +59,13 @@ class Transform:
     - Works as an **intermediate step** between data extraction and model training.
     - Provides flexibility to use **either inline functions, classes, or external scripts** for transformations.
     """
+
     def __init__(self):
         self._stream = None
         self._fn_tag = None
 
     def apply_function(
-        self,
-        *,
-        data,
-        transform_func,
-        last_batch,
-        meta=None,
-        track=True
+        self, *, data, transform_func, last_batch, meta=None, track=True
     ):
         """
         Apply a user transform to one batch in a tracked stream, propagating lineage.
@@ -158,46 +154,85 @@ class Transform:
         """
         tracker = Track.get(track)
 
-        # Untracked path: just run the function and propagate meta.
         if tracker is None:
             out = transform_func(data)
             return out, last_batch, (meta or {})
 
-        # Identify the callable for stream grouping (one step per function per stream)
-        fn_qual = getattr(transform_func, "__qualname__", getattr(transform_func, "__name__", "callable"))
+        fn_qual = getattr(
+            transform_func,
+            "__qualname__",
+            getattr(transform_func, "__name__", "callable"),
+        )
 
         # If new stream or function changed, (re)open a StreamStep and stash replay hints
-        if getattr(self, "_stream", None) is None or getattr(self, "_fn_tag", None) != fn_qual:
+        if (
+            getattr(self, "_stream", None) is None
+            or getattr(self, "_fn_tag", None) != fn_qual
+        ):
             # Close any prior open step cleanly
             if getattr(self, "_stream", None) is not None:
                 self._stream.close_ok()
 
-            # Pull replay hints from meta (provided by Extract.read_csv) — all optional
             m = meta or {}
             params = {
                 "fn_qualname": fn_qual,
-                # pull from Extract meta; ok if None, restore will still have a fallback
-                "batch_size": m.get("chunk_size"),
-                "reader_backend": m.get("reader_backend"),
-                "use_cols": m.get("use_cols"),
-                "filter_by": m.get("filter_by"),
             }
 
-            # Open one tracked step for the whole stream; snapshot code/env once
-            self._stream = tracker.stream("blase.Transform.apply_function", params, code_fn=transform_func)
+            bs = m.get("chunk_size")
+            if bs is None:
+                bs = m.get("batch_size")
+            if bs is not None:
+                params["batch_size"] = int(bs)
+
+            # backend aliasing (old runs used 'reader_backend')
+            be = m.get("reader_backend") or m.get("backend")
+            if be is not None:
+                params["backend"] = be
+
+            # keep existing CSV hints
+            for k in ("use_cols", "filter_by"):
+                if m.get(k) is not None:
+                    params[k] = m[k]
+
+            # image-ish hints
+            for k in ("return_type", "color", "max_side", "mode", "target_batch_bytes"):
+                if m.get(k) is not None:
+                    params[k] = m[k]
+
+            self._stream = tracker.stream(
+                "blase.Transform.apply_function", params, code_fn=transform_func
+            )
+            m = meta or {}
+            up = m.get("upstream") or []
+            for u in up:
+                rid = u.get("id")
+                role = u.get("role")
+                if rid and role in {"manifest", "batch_desc", "batch"}:
+                    try:
+                        self._stream.step.add_input(rid, role=role, arg_name=None)
+                    except Exception:
+                        pass  # tolerate replays/duplicates
+
+            # you can also store manifest root for convenience (optional)
+            root = m.get("manifest_root_hash") or m.get("root_hash")
+            if root:
+                try:
+                    self._stream.step.add_input(
+                        root, role="manifest_root", arg_name=None
+                    )
+                except Exception:
+                    pass
             self._fn_tag = fn_qual
 
-        # Execute user code
         try:
             out = transform_func(data)
         except Exception as e:
-            # mark failed/aborted and reset stream state
             self._stream.close_error(type(e), e, e.__traceback__)
             self._stream = None
             self._fn_tag = None
             raise
 
-        # Record upstream lineage for this batch; seal on last
+        self._stream.step.add_upstream_from_meta(meta)
         new_meta = self._stream.emit(last_batch=last_batch, meta=meta)
 
         if last_batch:
@@ -207,6 +242,12 @@ class Transform:
 
         return out, last_batch, new_meta
 
-    def apply_from_module(self, data: Iterable, module_path: str, function_name: str) -> Iterable: pass
-    def apply_standard_transformation(self, data, transformation: str, columns: list): pass
+    def apply_from_module(
+        self, data: Iterable, module_path: str, function_name: str
+    ) -> Iterable:
+        pass
+
+    def apply_standard_transformation(self, data, transformation: str, columns: list):
+        pass
+
     # Maybe include a fill missing values explicitly here or include it in standard transformation

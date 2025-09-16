@@ -15,25 +15,30 @@ from training.components.clean_raw_data import CleanRawData
 
 
 class TestCleanRawData(unittest.TestCase):
-
-    @patch('training.components.clean_raw_data.EnvLoader')
+    @patch("training.components.clean_raw_data.EnvLoader")
     def setUp(self, MockEnvLoader):
         self.mock_env_loader = MockEnvLoader.return_value
-        self.mock_env_loader.get.side_effect = lambda key: ":memory:" if key in ["DATABASE_1", "DATABASE_2"] else None
+        self.mock_env_loader.get.side_effect = (
+            lambda key: ":memory:" if key in ["DATABASE_1", "DATABASE_2"] else None
+        )
         self.mock_env_loader.load_config_module.return_value = {
             "source_query": {
-                "table1" : ("DATABASE_1", 
-                """
+                "table1": (
+                    "DATABASE_1",
+                    """
                 SELECT * FROM base_table
                 ORDER BY date, pair
-                """),
-                "table2" : ("DATABASE_2", 
-                """
+                """,
+                ),
+                "table2": (
+                    "DATABASE_2",
+                    """
                 SELECT * FROM base_table
-                """)
+                """,
+                ),
             },
             "primary_key": ["date", "pair"],
-            "clean_function": "clean_fn"
+            "clean_function": "clean_fn",
         }
 
         # Create an in-memory SQLite database
@@ -63,18 +68,21 @@ class TestCleanRawData(unittest.TestCase):
         """)
 
         # Insert mock data
-        cursor.executemany("INSERT INTO base_table (pair, value) VALUES (?, ?)", [
-            ("EURUSD", 4),
-            ("GBPUSD", 9),
-            ("AUDUSD", 14),
-            ("USDJPY", 19),
-            ("EURUSD", 24),
-            ("GBPUSD", 29),
-            ("AUDUSD", 34),
-            ("USDJPY", 39),
-            ("EURUSD", 44),
-            ("GBPUSD", 49),
-        ])
+        cursor.executemany(
+            "INSERT INTO base_table (pair, value) VALUES (?, ?)",
+            [
+                ("EURUSD", 4),
+                ("GBPUSD", 9),
+                ("AUDUSD", 14),
+                ("USDJPY", 19),
+                ("EURUSD", 24),
+                ("GBPUSD", 29),
+                ("AUDUSD", 34),
+                ("USDJPY", 39),
+                ("EURUSD", 44),
+                ("GBPUSD", 49),
+            ],
+        )
 
         self.mock_db.commit()
 
@@ -83,18 +91,19 @@ class TestCleanRawData(unittest.TestCase):
         total_count = 100
         bin_edges = [0, 10, 20, 30, 40, 50]
         bin_frequencies = {
-            "underflow": 0, 
-            "overflow": 0, 
-            0: 10, 
-            1: 20, 
-            2: 40, 
-            3: 20, 
-            4: 10}
+            "underflow": 0,
+            "overflow": 0,
+            0: 10,
+            1: 20,
+            2: 40,
+            3: 20,
+            4: 10,
+        }
         expected_result = {"25%": 7.5, "50%": 15.0, "75%": 22.5}
         result = self.clean_raw_data._calculate_percentiles(
             bin_edges=bin_edges,
             bin_frequencies=bin_frequencies,
-            total_count=total_count
+            total_count=total_count,
         )
         self.assertEqual(result, expected_result)
 
@@ -117,7 +126,9 @@ class TestCleanRawData(unittest.TestCase):
         mock_executor_instance.submit.side_effect = sync_submit
 
         expected_result = {"value": np.linspace(4, 49, num=101)}
-        result = self.clean_raw_data._initialize_bins_from_sql(col_list=["value"], key="table1")
+        result = self.clean_raw_data._initialize_bins_from_sql(
+            col_list=["value"], key="table1"
+        )
         np.testing.assert_array_almost_equal(result["value"], expected_result["value"])
 
     def test_collect_cols(self):
@@ -146,19 +157,23 @@ def test_function():
         """
         with tempfile.TemporaryDirectory() as temp_dir:
             module_path = os.path.join(temp_dir, "test_module.py")
-            
+
             # Write test function to a temporary module file
             with open(module_path, "w") as f:
                 f.write(function_code)
 
             # Set module_path in PrepData
-            self.clean_raw_data.module_path = module_path  
+            self.clean_raw_data.module_path = module_path
 
             # Call `_import_function` and check if it correctly loads `test_function`
             imported_function = self.clean_raw_data._import_function("test_function")
             self.assertEqual(imported_function(), "Hello, World!")
 
-    @patch("builtins.open", new_callable=mock_open, read_data="('EURUSD', '2024-03-12')\n('GBPUSD', '2024-03-10')")
+    @patch(
+        "builtins.open",
+        new_callable=mock_open,
+        read_data="('EURUSD', '2024-03-12')\n('GBPUSD', '2024-03-10')",
+    )
     @patch("os.listdir", return_value=["mock_bad_keys_bad_keys.txt"])
     def test_create_bad_key_set(self, mock_listdir, mock_open_file):
         """Test extracting bad keys from a simulated bad_keys.txt file."""
@@ -170,11 +185,12 @@ def test_function():
     def test_remove_bad_keys(self):
         """Test removing bad keys from the dataset."""
         bad_keys = {("EURUSD", 9), ("GBPUSD", 10)}
-        expected_df = self.df[~self.df.apply(lambda row: (row["pair"], row["date"]) in bad_keys, axis=1)].reset_index(drop=True)
+        expected_df = self.df[
+            ~self.df.apply(lambda row: (row["pair"], row["date"]) in bad_keys, axis=1)
+        ].reset_index(drop=True)
         result = self.clean_raw_data._remove_bad_keys(self.df, bad_keys)
         pd.testing.assert_frame_equal(result, expected_df)
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     unittest.main()
-    

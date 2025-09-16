@@ -11,11 +11,16 @@ from datetime import datetime
 from blase.tracking.step_backend import ensure_schema, StepContext, StreamStep
 import blase.utils.config as config
 
+
 def _now() -> str:
     return datetime.now().isoformat(timespec="seconds")
 
+
 def _write_active(run_root: Path, run_id: str, status: str = "active") -> None:
-    (run_root / "active_run.blase").write_text(json.dumps({"run_id": run_id, "status": status}, indent=2))
+    (run_root / "active_run.blase").write_text(
+        json.dumps({"run_id": run_id, "status": status}, indent=2)
+    )
+
 
 class Track:
     """
@@ -66,6 +71,7 @@ class Track:
 
         trk.end_run()
     """
+
     _singleton: Optional["Track"] = None
 
     def __init__(self, runs_dir: Optional[Path] = None, reuse: bool = True):
@@ -96,7 +102,9 @@ class Track:
 
     # ---------- class helpers ----------
     @classmethod
-    def get(cls, enable: bool, *, runs_dir: Optional[Path] = None, reuse: bool = True) -> Optional["Track"]:
+    def get(
+        cls, enable: bool, *, runs_dir: Optional[Path] = None, reuse: bool = True
+    ) -> Optional["Track"]:
         """
         Return a process-wide singleton tracker if enabled.
 
@@ -123,7 +131,7 @@ class Track:
             return None
         if cls._singleton is None:
             cls._singleton = cls(runs_dir=runs_dir, reuse=reuse)
-            cls._singleton.start_run()                 # ensure metadata & pointer
+            cls._singleton.start_run()  # ensure metadata & pointer
         return cls._singleton
 
     # ---------- public step APIs ----------
@@ -148,9 +156,13 @@ class Track:
         The returned :class:`StepContext` exposes :class:`StepOps` via its
         ``ops`` attribute for recording inputs/outputs.
         """
-        return StepContext(self.run_path, function_fqn=function_fqn, params=params, run_id=self.run_id)
+        return StepContext(
+            self.run_path, function_fqn=function_fqn, params=params, run_id=self.run_id
+        )
 
-    def stream(self, function_fqn: str, params: Dict[str, Any], *, code_fn=None) -> StreamStep:
+    def stream(
+        self, function_fqn: str, params: Dict[str, Any], *, code_fn=None
+    ) -> StreamStep:
         """
         Create a streaming (batched) step helper.
 
@@ -176,7 +188,9 @@ class Track:
         return StreamStep(self, function_fqn, params, code_fn=code_fn)
 
     # ---------- run lifecycle ----------
-    def start_run(self, run_name: Optional[str] = None, metadata: Optional[Dict[str, Any]] = None) -> None:
+    def start_run(
+        self, run_name: Optional[str] = None, metadata: Optional[Dict[str, Any]] = None
+    ) -> None:
         """
         Idempotently initialize or update the active run metadata.
 
@@ -211,7 +225,7 @@ class Track:
             meta.update(metadata)
         run_meta_path.write_text(json.dumps(meta, indent=2))
         # keep pointer fresh
-        _write_active(self.run_root, self.run_id, status="active")   # <-- use self.run_root
+        _write_active(self.run_root, self.run_id, status="active")
 
     def end_run(self, status: str = "completed") -> None:
         """
@@ -248,10 +262,11 @@ class Track:
         """
         return {
             "project_root": config.PROJECT_ROOT,
-            "data_sot":     config.DATA_SOURCE_OF_TRUTH,
+            "data_sot": config.DATA_SOURCE_OF_TRUTH,
             "data_working": config.DATA_WORKING,
-            "restore_dir":  config.RESTORE_DEFAULT_DIR,
+            "restore_dir": config.RESTORE_DEFAULT_DIR,
         }
+
     @property
     def cas_policy(self) -> str:
         """
@@ -288,16 +303,23 @@ class Track:
         run_path = self.runs_dir / run_id
         run_path.mkdir(parents=True, exist_ok=True)
 
-        (run_path / "run.json").write_text(json.dumps({
-            "created_at": _now(),
-            "system": platform.system(),
-            "platform": platform.platform(),
-            "python_version": sys.version,
-        }, indent=2))
+        (run_path / "run.json").write_text(
+            json.dumps(
+                {
+                    "created_at": _now(),
+                    "system": platform.system(),
+                    "platform": platform.platform(),
+                    "python_version": sys.version,
+                },
+                indent=2,
+            )
+        )
 
         try:
             (run_path / "dependencies.txt").write_text(
-                subprocess.check_output([sys.executable, "-m", "pip", "freeze"], timeout=15).decode("utf-8")
+                subprocess.check_output(
+                    [sys.executable, "-m", "pip", "freeze"], timeout=15
+                ).decode("utf-8")
             )
         except Exception:
             pass

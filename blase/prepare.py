@@ -11,9 +11,9 @@ class Prepare:
     dataset splits, and writes training-ready files in efficient I/O formats such as
     `.npy`, `.npz`, `.tfrecord`, and others.
 
-    It is designed to be flexible across data types—including tabular, time series, 
+    It is designed to be flexible across data types—including tabular, time series,
     text, image, audio, and reinforcement learning inputs—and can integrate outputs
-    from the `Extract`, `Transform`, and `Clean` modules. For time-dependent or 
+    from the `Extract`, `Transform`, and `Clean` modules. For time-dependent or
     episodic data (e.g., RL or forecasting), it supports rolling window generation
     and grouped sampling.
 
@@ -73,13 +73,21 @@ class Prepare:
     def load_exclusion_keys(self, tag: str, path: Optional[str] = None) -> None:
         pass
 
-    def set_split(self, train: float, val: float = 0.0, test: float = 0.0, seed: Optional[int] = None) -> None:
+    def set_split(
+        self,
+        train: float,
+        val: float = 0.0,
+        test: float = 0.0,
+        seed: Optional[int] = None,
+    ) -> None:
         pass
 
     def apply_rolling_windows(self, window_size: int, step: int = 1) -> None:
         pass
 
-    def convert(self, output_format: str = "npy", output_dir: str = "./data/processed/") -> None:
+    def convert(
+        self, output_format: str = "npy", output_dir: str = "./data/processed/"
+    ) -> None:
         pass
 
     def prepare_rl_dataset(
@@ -90,9 +98,9 @@ class Prepare:
         next_state_source: Iterable,
         done_source: Iterable,
         output_format: str = "npy",
-        output_dir: str = "./data/rl/"
+        output_dir: str = "./data/rl/",
     ) -> None:
         pass
 
     def save_metadata(self, path: str = "./data/processed/metadata.json") -> None:
-        pass    
+        pass

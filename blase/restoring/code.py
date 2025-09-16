@@ -3,6 +3,7 @@ from pathlib import Path
 import json
 import types
 
+
 def load_callable_from_blob(blob_path: Path):
     """
     Load a Python callable from a serialized code snapshot blob.
@@ -20,7 +21,7 @@ def load_callable_from_blob(blob_path: Path):
     blob_path : Path
         Path to the JSON blob file produced by ``snapshot.build_code_blob``.
         The file is expected to contain:
-        
+
         - ``entry``: metadata about the callable (qualname, module).
         - ``module_source``: source code for helper symbols and imports.
         - ``function_source``: source code for the target callable.
@@ -111,10 +112,12 @@ def load_callable_from_blob(blob_path: Path):
     try:
         line0 = function_source.strip().splitlines()[0]
         if line0.startswith("def ") and "(" in line0:
-            cand = line0[4: line0.index("(")].strip()
+            cand = line0[4 : line0.index("(")].strip()
             if cand in g and callable(g[cand]):
                 return g[cand]
     except Exception:
         pass
 
-    raise AttributeError(f"Could not resolve callable from blob (qualname='{qualname}', module='{mod_hint}').")
+    raise AttributeError(
+        f"Could not resolve callable from blob (qualname='{qualname}', module='{mod_hint}')."
+    )

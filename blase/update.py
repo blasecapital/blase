@@ -7,18 +7,18 @@ class Update:
     by integrating new data and retraining or fine-tuning as needed.
 
     The `Update` class acts as an orchestration layer across the `Extract`, `Transform`,
-    `Prepare`, `Train`, and optionally `Evaluate` modules. It allows users to retrain models 
-    on newly available data while minimizing redundant computation and storage. 
+    `Prepare`, `Train`, and optionally `Evaluate` modules. It allows users to retrain models
+    on newly available data while minimizing redundant computation and storage.
 
     It uses logged metadata and data hashing to determine what has changed since the last
-    training run, making updates both **efficient** and **traceable**. Whether performing 
+    training run, making updates both **efficient** and **traceable**. Whether performing
     full retraining or light fine-tuning, `Update` enables production-ready iteration with
     minimal setup.
 
     Features:
     ---------
     - Automatically detects and integrates new raw data.
-    - Supports update modes like: 
+    - Supports update modes like:
         * 'append_only' – fine-tune using only new data
         * 'full_retrain' – retrain on all data (old + new)
         * 'rolling' – keep only the latest `n` batches
@@ -27,12 +27,12 @@ class Update:
     - Tracks version lineage and logs new model metadata.
     - Optionally evaluates updated models and stores predictions and metrics.
     - Offers a `dry_run()` option to simulate an update for verification.
-    
+
     Parameters for `run()`:
     -----------------------
     base_model_path : str
         Path to the previously trained model directory or checkpoint.
-    
+
     new_data_path : str
         Path to the new raw data to integrate into the update.
 

@@ -264,14 +264,12 @@ class Load:
                 "subdir": subdir,
                 "use_blase_path": bool(use_blase_path),
             }
-            # snapshot the callable/env once per stream
             self._stream = tracker.stream(
                 "blase.Load.save_to_csv", params, code_fn=self.save_to_csv
             )
             self._target_path = target
             self._backend = backend
 
-            # If target exists, snapshot its current bytes as a "seed" input
             self._stream.step.remove_inputs_by_role("seed")
             if target.exists():
                 seed_hash = self._stream.step.register_data(
@@ -282,7 +280,6 @@ class Load:
                 )
                 self._stream.step.add_input(seed_hash, role="seed", arg_name=None)
 
-        # 1) write the shard via your csv_backend functions (exactly like original)
         file_exists = target.exists()
         try:
             if backend == "pandas":
@@ -290,7 +287,6 @@ class Load:
             else:
                 save_batch_polars(data, target, file_exists)
         except Exception as e:
-            # record failure and close context
             if self._stream is not None:
                 self._stream.close_error(type(e), e, e.__traceback__)
                 self._stream = None
@@ -298,11 +294,9 @@ class Load:
                 self._backend = None
             raise
 
-        # 2) per-batch lineage + seal on last batch
         self._stream.step.add_upstream_from_meta(meta)
         new_meta = self._stream.emit(last_batch=last_batch, meta=meta)
 
-        # 3) on final batch, register final file and close the stream
         if last_batch:
             out_hash = self._stream.step.register_data(
                 kind="csv",
@@ -340,37 +334,79 @@ class Load:
         track: bool = True,
     ) -> Tuple[str, bool, Dict[str, Any]]:
         """
-        Write one Parquet shard per incoming batch of images.
+        Write one Parquet shard for a batch of images.
 
-        - Encodes images (np/tensor/PIL) to JPEG/PNG bytes.
-        - Builds a small tabular schema (img_bytes + label + basic dims + lineage).
-        - One tracked stream per (target_dir, shard_prefix, encode, compression).
+        Encodes images (NumPy/PIL/torch) to JPEG or PNG bytes, builds a tabular batch
+        (schema: image bytes, optional label, optional path, basic dims, and lineage),
+        and writes a single Parquet file per call. When tracking is enabled, batches
+        are emitted on a stable stream and shard outputs are registered.
 
         Parameters
         ----------
         data : Any
-            _description_
-        meta : Optional[Dict[str, Any]], optional
-            _description_, by default None
-        encode : Literal[&quot;jpeg&quot;, &quot;png&quot;], optional
-            _description_, by default "jpeg"
-        jpeg_quality : int, optional
-            _description_, by default 95
-        compression : Literal[&quot;zstd&quot;, &quot;snappy&quot;], optional
-            _description_, by default "zstd"
-        include_paths : bool, optional
-            _description_, by default True
-        track : bool, optional
-            _description_, by default True
+            Batch to persist. Either:
+            - images
+            - (images, labels)
+            - (images, labels, paths)
+            where *images* is a list/array of HxWxC uint8 RGB (or HxW for gray)
+            NumPy arrays, PIL.Image objects, or torch tensors. *labels* is optional
+            and can be any sequence alignable to images. *paths* are optional
+            original relative paths for lineage.
+        last_batch : bool
+            True if this is the final batch for the current stream.
+        meta : dict, optional
+            Upstream lineage and batch metadata (e.g., ``manifest_root_hash``,
+            ``batch_hash``, ``ordinal``, ``upstream``). Passed through and used for
+            deterministic shard naming when ``ordinal`` is present.
+        path : str, optional
+            Base directory to write shards into. If omitted, the target directory is
+            derived from ``use_blase_path`` and ``subdir``.
+        file_name : str, optional
+            Ignored for Parquet shards; kept for API symmetry with CSV sinks.
+        subdir : str, default "parquet_data"
+            Subdirectory used when resolving a default target with
+            ``use_blase_path=True``.
+        shard_prefix : str, default "batch"
+            File prefix for shard names, e.g., ``batch_00001.parquet``.
+        encode : {"jpeg", "png"}, default "jpeg"
+            Image encoding format for the ``img_bytes`` column.
+        jpeg_quality : int, default 95
+            JPEG quality (only used when ``encode="jpeg"``).
+        compression : {"zstd", "snappy"}, default "zstd"
+            Parquet column-chunk compression codec.
+        include_paths : bool, default True
+            If True, include a ``path`` column with original relative paths when
+            provided in ``data`` and/or ``meta``.
+        use_blase_path : bool, default True
+            If True, resolve the target directory using the library’s standard
+            workspace layout. If False, ``path`` must be provided.
+        on_conflict : {"overwrite", "fail", "rename"}, default "overwrite"
+            Behavior when the target shard path already exists.
+        track : bool, default True
+            If True, record a tracked stream, register shard outputs, and emit
+            per-batch lineage; otherwise write untracked.
 
         Returns
         -------
-        Tuple[str, bool, Dict[str, Any]]
-            (shard_path:str, last_batch:bool, meta_out:dict)
+        tuple[str, bool, dict]
+            ``(shard_path, last_batch, meta_out)`` where:
+            - ``shard_path`` is the absolute path to the written Parquet file,
+            - ``last_batch`` is the input flag echoed back,
+            - ``meta_out`` is the (possibly enriched) metadata emitted by tracking.
+
+        Notes
+        -----
+        - One stream is reused across calls that share
+        ``(target_dir, shard_prefix, encode, compression)``. A new stream is opened
+        if any of those change or after the final batch closes the stream.
+        - The Parquet schema minimally contains:
+        ``img_bytes`` (binary), optional ``label``, optional ``path``,
+        ``height`` (int32), ``width`` (int32), and any lineage fields your builder
+        includes from ``meta``.
+        - Decoding is not performed here; images are only re-encoded to bytes.
         """
         tracker = Track.get(track)
 
-        # ---------- Resolve where shards go ----------
         base_dir = self._resolve_target_path(
             tracker=tracker,
             use_blase_path=use_blase_path,
@@ -411,7 +447,6 @@ class Load:
             return str(shard_path), last_batch, (meta or {})
 
         # ---------- Tracked path ----------
-        # Stream identity: one stream per (base_dir, prefix, encode, compression)
         new_stream = (
             self._stream is None
             or self._parquet_base_dir != base_dir
@@ -436,7 +471,6 @@ class Load:
             self._parquet_comp = compression
             self._parquet_counter = 0
 
-        # 1) Build deterministic shard path (prefer meta["ordinal"] if present)
         shard_path = _compute_shard_path(
             base_dir=base_dir,
             shard_prefix=shard_prefix,
@@ -444,7 +478,6 @@ class Load:
             fallback_idx=self._bump_stream_counter(),
         )
 
-        # 2) Encode + build Arrow table
         try:
             table = _build_parquet_table_from_images(
                 data=data,
@@ -473,8 +506,6 @@ class Load:
             self._parquet_counter = 0
             raise
 
-        # 3) Per-batch lineage (upstream goes via meta)
-        # try to capture upstream lineage
         if isinstance(meta, dict):
             up = meta.get("upstream") or []
             for u in up:
@@ -485,7 +516,6 @@ class Load:
                         self._stream.step.add_input(rid, role=role, arg_name=None)
                     except Exception:
                         pass
-        # optionally also keep the root hash for debugging
         rh = (meta or {}).get("manifest_root_hash")
         if rh:
             try:
@@ -494,7 +524,6 @@ class Load:
                 pass
         new_meta = self._stream.emit(last_batch=last_batch, meta=meta)
 
-        # 4) Register shard as a data output (kind='parquet'); on last, optionally write an index
         shard_hash = self._stream.step.register_data(
             kind="parquet",
             version="1",
@@ -506,11 +535,6 @@ class Load:
         )
 
         if last_batch:
-            # OPTIONAL: write a tiny JSON index of shards (placeholder)
-            # idx_path = _write_parquet_index(self._stream.step, base_dir, shard_prefix)
-            # idx_hash = self._stream.step.register_data(kind="parquet.index", version="1", path_or_bytes=idx_path)
-            # self._stream.step.add_output(idx_hash, name="parquet_index")
-
             self._stream.close_ok()
             self._stream = None
             self._parquet_base_dir = None

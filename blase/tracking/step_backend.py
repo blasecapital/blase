@@ -148,7 +148,7 @@ def _conn(db: Path) -> sqlite3.Connection:
     c = sqlite3.connect(db)
     c.execute("PRAGMA journal_mode=WAL;")
     c.execute("PRAGMA synchronous=NORMAL;")
-    c.execute("PRAGMA foreign_keys=OFF;")  # no FKs until you add migrations
+    c.execute("PRAGMA foreign_keys=OFF;")  # no FKs until migrations added
     return c
 
 
@@ -229,7 +229,6 @@ def canonical_signature_payload(
         "materializers": mats or {},
         "seeds": seeds or {},
     }
-    # Canonical JSON: sorted keys, no spaces
     return json.dumps(doc, sort_keys=True, separators=(",", ":")).encode("utf-8")
 
 
@@ -407,7 +406,6 @@ class StepOps:
                 elif policy == "copy":
                     shutil.copy2(str(p), cas_path)
 
-            # optional: remember usable materialization
             with _conn(self.db) as c:
                 c.execute(
                     """INSERT OR IGNORE INTO materializations(data_hash,path,ts)
@@ -681,7 +679,6 @@ class StepContext(contextlib.AbstractContextManager[StepOps]):
         return self.ops
 
     def _finalize_signature(self):
-        # pull inputs from DB
         with _conn(self.db) as c:
             rows = c.execute(
                 "SELECT data_hash, role FROM step_inputs WHERE step_hash=?",
@@ -689,7 +686,6 @@ class StepContext(contextlib.AbstractContextManager[StepOps]):
             ).fetchall()
         inputs = [(r[0], r[1]) for r in rows]
 
-        # optional: fetch code/env from inputs by role
         code_hash = next((h for (h, r) in inputs if r == "code"), None)
         env_hash = next((h for (h, r) in inputs if r == "env"), None)
 
@@ -704,7 +700,6 @@ class StepContext(contextlib.AbstractContextManager[StepOps]):
         )
         sig = step_signature_hash(payload)
         with _conn(self.db) as c:
-            # add a column once: ALTER TABLE steps ADD COLUMN sig_hash TEXT;
             c.execute(
                 "UPDATE steps SET sig_hash=? WHERE step_hash=?", (sig, self.step_hash)
             )
@@ -733,7 +728,6 @@ class StepContext(contextlib.AbstractContextManager[StepOps]):
             current = row[0] if row else None
 
         if current == "completed":
-            # Already sealed elsewhere (e.g., on last batch) — leave it.
             status = "completed"
         else:
             if exc_type is GeneratorExit:
@@ -787,7 +781,6 @@ class StreamStep:
     ):
         self._cm = tracker.step(function_fqn, params)
         self.step: StepOps = self._cm.__enter__()
-        # snapshot code/env once
         if code_fn is not None:
             self.step.snapshot_callable(code_fn)
         self.step.snapshot_env()
@@ -827,10 +820,8 @@ class StreamStep:
             Downstream metadata for the batch (includes ``"producer_step"`` and
             preserves caller-provided ``"ordinal"`` if present).
         """
-        # preserve caller meta (hints) and overlay our bookkeeping
         out = dict(meta or {})
         out["producer_step"] = self.step.step_hash
-        # keep caller-provided ordinal if present; else pass through whatever you computed
         if "ordinal" not in out and meta and "ordinal" in meta:
             out["ordinal"] = meta["ordinal"]
 

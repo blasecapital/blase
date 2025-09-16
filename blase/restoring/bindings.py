@@ -253,57 +253,6 @@ def run_read_csv_restore(
         yield batch, is_last
 
 
-def _lookup_data_row(run_path: Path, h: str):
-    """Return {'kind', 'metadata'} for a CAS data row or None if missing."""
-    db = run_path / "nodes" / "nodes.db"
-    import sqlite3
-    import json as _json
-
-    con = sqlite3.connect(db)
-    try:
-        con.row_factory = sqlite3.Row
-        row = con.execute(
-            "SELECT kind, metadata_json FROM data WHERE data_hash=?", (h,)
-        ).fetchone()
-        if not row:
-            return None
-        md = None
-        try:
-            md = _json.loads(row["metadata_json"]) if row["metadata_json"] else None
-        except Exception:
-            md = None
-        return {"kind": row["kind"], "metadata": md}
-    finally:
-        con.close()
-
-
-def _try_load_batch_desc(run_path: Path, h: str) -> dict:
-    """Return a batch descriptor dict by trying CAS meta, data row, or batch blob in order."""
-    # 1) First try the canonical batch-meta blob
-    try:
-        return _load_cas_json(run_path, h, kind="image.batch.meta")
-    except FileNotFoundError:
-        pass
-    except Exception:
-        # tolerate older runs with odd contents
-        pass
-
-    # 2) Fallback: check data row kind + metadata_json
-    row = _lookup_data_row(run_path, h)
-    if row:
-        k = (row.get("kind") or "").lower()
-        if k in ("image.batch.meta", "image.batch"):
-            if isinstance(row.get("metadata"), dict):
-                return row["metadata"]
-
-    # 3) Last resort: try loading the CAS blob as JSON without enforcing kind
-    try:
-        return _load_cas_json(run_path, h, kind="image.batch")
-    except Exception:
-        # give a benign empty descriptor so restore can continue
-        return {}
-
-
 def run_read_images_restore(
     *,
     run_path: Path,
@@ -510,8 +459,7 @@ def run_read_images_restore(
             "manifest": manifest_hash,
             "manifest_root_hash": root_hash,
             "batch_hash": batch_hash,
-            "recorded": rec,  # include fields you used at write-time
-            # "paths": paths,
+            "recorded": rec,
             "upstream": [
                 {"id": manifest_hash, "role": "manifest"},
                 *(
@@ -521,7 +469,6 @@ def run_read_images_restore(
                 ),
                 {"id": batch_hash, "role": "batch"},
             ],
-            # "items_rel_paths": items_rel_paths,
         }
 
         yield decoded, meta, is_last
@@ -532,7 +479,7 @@ def run_apply_function_restore(
     run_path: Path,
     params: Dict[str, Any],
     realized: Dict[str, Any],
-    transform_fn,  # loaded from the code blob for this step
+    transform_fn,
 ) -> Iterator[Tuple[Any, bool]]:
     """
     Replay a ``Transform.apply_function`` step without tracking.
@@ -581,7 +528,7 @@ def run_apply_function_restore(
             else read_batches_pandas(source_path, batch_size, use_cols, filter_by)
         )
     else:
-        gen = upstream  # passthrough
+        gen = upstream
 
     for item in gen:
         if isinstance(item, tuple):
@@ -703,13 +650,11 @@ def run_save_to_csv_replay(
             use_blase_path=False,
         )
 
-    # Verify against expected_out_hash if available
     computed = Hash().hash_file(tmp)
     if expected_out_hash and computed != expected_out_hash:
         raise RuntimeError("Replay output hash does not match recorded output.")
     final_hash = expected_out_hash or computed
 
-    # move into place with chosen conflict policy
     target_path = Path(target)
     if target_path.exists() and on_conflict == "overwrite":
         target_path.unlink()
@@ -730,7 +675,6 @@ def _deterministic_shard_path(
     shard_prefix: str,
     ordinal: int,
 ) -> Path:
-    # Matches your runtime shard naming scheme (prefix-000001.parquet)
     return (target_dir / f"{shard_prefix}-{ordinal:06d}.parquet").resolve()
 
 
@@ -741,9 +685,9 @@ def run_save_images_to_parquet_replay(
     realized: Dict[str, Any],  # not used currently, kept for parity
     backend_override: Optional[str] = None,
     upstream_gen: Iterator[Tuple[Any, bool]],
-    target_override: Optional[str] = None,  # if provided, use this directory
+    target_override: Optional[str] = None,
     on_conflict: str = "overwrite",
-    expected_out_hashes: Optional[List[str]] = None,  # optional strict check
+    expected_out_hashes: Optional[List[str]] = None,
     record_materialization: bool = True,
 ) -> List[Path]:
     """
@@ -804,13 +748,6 @@ def run_save_images_to_parquet_replay(
     jpeg_quality = int(params.get("jpeg_quality", 95))
     include_paths = bool(params.get("include_paths", True))
 
-    # optional: if the recorded step logged batch_desc inputs we can map ordinals
-    # to tighten determinism of lineage meta (ordinal, hashes, etc.)
-    # We only *read* them to reconstruct meta columns; not required to run.
-    # Fetch via step_inputs if you need them here, or let the caller pass them.
-    # (Keeping it simple: we recompute ordinals 1..N; _build_parquet_table_from_images
-    # uses meta for lineage; if you want strict byte-for-byte equivalence with
-    # recorded runs that include lineage cols, enrich 'meta' below from batch_desc.)
     out_paths: List[Path] = []
     hasher = Hash()
 
@@ -828,7 +765,6 @@ def run_save_images_to_parquet_replay(
             meta = {"ordinal": ordinal}
             ordinal += 1
 
-        # Build table exactly like at runtime
         table = _build_parquet_table_from_images(
             data=batch,
             meta=meta,
@@ -841,7 +777,6 @@ def run_save_images_to_parquet_replay(
         shard_path = _write_parquet_table(
             table, shard_path, writer_cfg=writer_cfg, on_conflict="overwrite"
         )
-        # resolve conflict policy (overwrite/rename/fail) on per-file basis
         shard_path = resolve_conflict_path(
             shard_path,
             policy=on_conflict,
@@ -852,14 +787,12 @@ def run_save_images_to_parquet_replay(
             table,
             shard_path,
             writer_cfg=writer_cfg,
-            on_conflict="overwrite",  # we already resolved name conflicts above
+            on_conflict="overwrite",
         )
         h = hasher.hash_file(shard_path)
 
         if expected_out_hashes:
-            # If the step recorded N outputs (one per batch), this ensures exact bytes
             h = hasher.hash_file(shard_path)
-            # Guard against mismatched counts OR content drift
             if ordinal - 1 < len(expected_out_hashes):
                 exp = expected_out_hashes[ordinal - 1]
                 if exp and exp != h:
@@ -869,7 +802,6 @@ def run_save_images_to_parquet_replay(
                     )
 
         if record_materialization:
-            # index materialization so future restores can fast-path
             try:
                 store.record_materialization(
                     run_path, hasher.hash_file(shard_path), str(shard_path)

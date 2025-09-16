@@ -107,7 +107,6 @@ def _ensure_uint8_rgb(arr: Any) -> np.ndarray:
     if arr.ndim == 2:
         arr = arr[:, :, None]
 
-    # DType to unit8
     if arr.dtype != np.uint8:
         if arr.dtype.kind == "f":
             arr = np.clip(arr, 0.0, 1.0)
@@ -195,7 +194,7 @@ def _build_parquet_table_from_images(
     paths = list((meta or {}).get("items_rel_paths") or [])
 
     if include_paths and paths and len(paths) == len(enc_bytes):
-        cols["path"] = pa.array(paths, type=pa.string())  # ordered, POSIX
+        cols["path"] = pa.array(paths, type=pa.string())
     else:
         cols["path"] = pa.nulls(len(enc_bytes), type=pa.string())
 

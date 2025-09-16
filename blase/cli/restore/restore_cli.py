@@ -59,9 +59,8 @@ def _resolve_run_path(run_arg: Optional[str]) -> Path:
     rr = _runs_root()
     if run_arg:
         p = Path(run_arg)
-        if p.exists():  # treat as path
+        if p.exists():
             return p
-        # treat as run id under runs/
         rp = rr / run_arg
         if rp.exists():
             return rp
@@ -565,7 +564,7 @@ def _exec_plan_for_step(
             if manifest_hash:
                 realized["manifest"] = manifest_hash
             if batch_descs:
-                realized["batch_descs"] = batch_descs  # your reader should accept this
+                realized["batch_descs"] = batch_descs
 
             upstream = bindings.run_read_images_restore(
                 run_path=run_path,
@@ -643,7 +642,7 @@ def _exec_plan_for_step(
                         "source": ri_params.get("directory"),
                         "manifest": man_hash,
                         "batch": batch_descs,
-                    },  # your reader should normalize 'batch'/'batch_descs'
+                    },
                 )
                 upstream = bindings.run_apply_function_restore(
                     run_path=run_path,
@@ -658,7 +657,6 @@ def _exec_plan_for_step(
             outs = store.load_step_outputs(run_path, sh)
             expected_out_hash = outs[0]["data_hash"] if outs else None
 
-            # Skip if we've already produced this exact hash
             if expected_out_hash and expected_out_hash in produced_hashes:
                 continue
 
@@ -729,12 +727,10 @@ def _exec_plan_for_step(
 
             outs.sort(key=_ord)
 
-            # Collect expected hashes (one per shard) if they were recorded.
             expected_out_hashes = [
                 o["data_hash"] for o in outs if o["name"].startswith("parquet_shard")
             ]
 
-            # Destination: a directory
             if to_path:
                 target_dir_override = to_path
                 conflict_policy = "overwrite"
@@ -1100,7 +1096,7 @@ def _build_stream_for_step(run_path: Path, step_hash: str):
                 p = materialize.ensure_local(
                     run_path, src, kind=store.get_data_kind(run_path, src)
                 )
-            upstream_gen = p.as_posix()  # path-like; binding will read CSV
+            upstream_gen = p.as_posix()
         else:
             upstream_gen = _build_stream_for_step(run_path, upstream_node["step_hash"])
 
@@ -1348,8 +1344,8 @@ def cmd_run(args):
 
     step_hash = args.step
 
-    # Load step metadata up front (so we can decide sink vs non-sink)
-    st = store.load_step(run_path, step_hash)  # {'function_fqn','params','status'}
+    # Load step metadata up front (decide sink vs non-sink)
+    st = store.load_step(run_path, step_hash)
     fqn = st["function_fqn"]
 
     # Wrapper for "verify" and "replay"
@@ -1362,7 +1358,7 @@ def cmd_run(args):
             print("No outputs recorded for this step.")
             return 2
 
-        # Take the first output (extend to loop if you shard)
+        # Take the first output
         out_hash = outs[0]["data_hash"]
         kind = store.get_data_kind(run_path, out_hash) or "data"
 
@@ -1434,7 +1430,7 @@ def cmd_run(args):
                 run_path=run_path,
                 params=st["params"],
                 realized={},  # sinks don’t need extra realized inputs
-                upstream_gen=upstream_gen,  # (batch, is_last) generator
+                upstream_gen=upstream_gen,
                 target_override=getattr(args, "to", None),
                 backend_override=getattr(args, "backend", None),
             )

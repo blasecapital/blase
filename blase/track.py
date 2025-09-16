@@ -225,9 +225,7 @@ class Track:
             meta.update(metadata)
         run_meta_path.write_text(json.dumps(meta, indent=2))
         # keep pointer fresh
-        _write_active(
-            self.run_root, self.run_id, status="active"
-        )  # <-- use self.run_root
+        _write_active(self.run_root, self.run_id, status="active")
 
     def end_run(self, status: str = "completed") -> None:
         """

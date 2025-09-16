@@ -204,8 +204,8 @@ def ensure_dataset_for_manifest(
     }
     ds_meta_json = json.dumps(ds_meta, ensure_ascii=False)
 
-    # Helper: probe table columns so we can work with legacy or revised schemas
     def table_cols(conn: sqlite3.Connection, table: str) -> set:
+        """Probe table columns so we can work with legacy or revised schemas"""
         cur = conn.execute(f"PRAGMA table_info({table})")
         return {row[1] for row in cur.fetchall()}
 

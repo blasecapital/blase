@@ -95,18 +95,14 @@ def step(
             if p and p.exists():
                 realized[role] = p
             else:
-                # only as a fallback (e.g., explicit `materialize` CLI), not during `replay`:
                 realized[role] = materialize.ensure_local(
                     run_path, dh, kind=k, policy=policy, to_dir=materialize_to
                 )
         except FileNotFoundError:
-            # CAS miss then fall back to original source_path if present
             src = store.lookup_source_path(run_path, dh)
             if src and Path(src).exists():
-                # Use the original file in place (no copy). Good for read_csv restore.
                 realized[role] = Path(src)
             else:
-                # Nothing in CAS and no live source file then planner replay needed.
                 raise FileNotFoundError(
                     f"Input {dh} is not in CAS and no valid source_path is available; "
                     f"replay required."

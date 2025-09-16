@@ -50,7 +50,7 @@ def _valid_local_candidates(run_path: Path, data_hash: str) -> List[Path]:
         pp = Path(p)
         if pp.exists() and hasher.hash_file(pp) == data_hash:
             out.append(pp)
-        elif pp.exists():  # hash mismatch; prune stale record (optional)
+        elif pp.exists():
             try:
                 store.drop_materialization(run_path, data_hash, p)
             except Exception:
@@ -154,10 +154,9 @@ def ensure_local(
     # Data kinds: prefer local materializations/source-of-truth
     candidates = _valid_local_candidates(run_path, data_hash)
     if not candidates:
-        # Nothing local; caller should replay
         raise NeedReplay(f"no local materialization for data {data_hash}")
 
-    src = candidates[0]  # first valid path
+    src = candidates[0]
 
     if to_dir is None:
         to_dir = config.RESTORE_DEFAULT_DIR

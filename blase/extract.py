@@ -208,10 +208,8 @@ class Extract:
         ...     consume(batch)
         """
 
-        # dependency handling
         backend = resolve_backend_csv(backend)
 
-        # argument checks
         if mode not in ("auto", "manual"):
             raise ValueError("Unsupported mode: %r. Must be 'auto' or 'manual'." % mode)
         if mode == "manual" and not batch_size:
@@ -219,12 +217,12 @@ class Extract:
         if mode == "auto":
             batch_size = memory_aware_batcher(file_path, backend)
 
-        if isinstance(filter_by, dict):  # allow single dict
+        if isinstance(filter_by, dict):
             filter_by = [filter_by]
 
         tracker = Track.get(track)
 
-        # untracked path (no DAG/CAS)
+        # ----- untracked path -----
         if tracker is None:
             if backend == "polars":
                 yield from (
@@ -242,7 +240,7 @@ class Extract:
                 )
             return
 
-        # tracked path
+        # ----- tracked path -----
         params = {
             "file_path": str(file_path),
             "batch_size": batch_size,
@@ -252,7 +250,6 @@ class Extract:
 
         stream = tracker.stream("blase.Extract.read_csv", params, code_fn=impl)
 
-        # register the source file as data + input binding
         src_hash = stream.step.register_data(
             kind="csv", version="1", path_or_bytes=file_path, metadata={}
         )
@@ -369,9 +366,8 @@ class Extract:
         ValueError
             If `mode` is invalid or `mode="manual"` without `batch_size`.
         """
-        # ---------------- argument + dependency checks ----------------
         print("Resolving backend...")
-        backend = resolve_backend_images(backend)  # validates and lazy-import checks
+        backend = resolve_backend_images(backend)
 
         if mode not in ("auto", "manual"):
             raise ValueError(f"Unsupported mode: {mode!r}. Must be 'auto' or 'manual'.")
@@ -380,15 +376,13 @@ class Extract:
             raise ValueError("When mode='manual', batch_size must be specified.")
 
         if mode == "auto" and target_batch_bytes is None:
-            # Try to infer from system memory; fall back to a conservative default
             target_batch_bytes = auto_target_bytes_from_system(return_type) or (
                 256 * 1024 * 1024
             )
 
         if shuffle and seed is None:
-            seed = 42  # deterministic default
+            seed = 42
 
-        # ---------------- manifest scan (header-only; no pixels) ----------------
         print("Scanning manifest headers...")
         manifest = scan_manifest_headers(
             directory=directory,
@@ -399,12 +393,8 @@ class Extract:
         if shuffle:
             manifest = shuffle_manifest(manifest, seed)
 
-        # Compute per-item content hashes (or incremental updates) and manifest Merkle root.
-        # Helpers should fill/return item["hash_content"] (hex) and the ordered list used.
         print("Ensuring item content hashes...")
-        manifest = ensure_item_content_hashes(
-            manifest
-        )  # may reuse cached hashes when (mtime,size) unchanged
+        manifest = ensure_item_content_hashes(manifest)
         print("Computing manifest root hash...")
         root_hash = compute_manifest_root_hash(
             manifest=manifest,
@@ -412,11 +402,9 @@ class Extract:
             pattern=pattern,
             recursive=recursive,
             seed=seed,
-            hash_mode="content",  # recorded in descriptor
+            hash_mode="content",
         )
 
-        # ---------------- batching plan ----------------
-        # Pack by bytes in auto mode; allow batch_size to act as a hard ceiling when provided.
         print("Planning image extracting batches...")
         batch_plan = plan_image_batches(
             manifest=manifest,
@@ -425,7 +413,7 @@ class Extract:
             target_batch_bytes=target_batch_bytes,
             safety_margin=safety_margin,
             max_item_decoded_bytes=max_item_decoded_bytes,
-            max_side=max_side,  # for better decoded-size estimates if downscaling
+            max_side=max_side,
         )
 
         # ---------------- untracked path ----------------
@@ -433,9 +421,7 @@ class Extract:
         if tracker is None:
             impl_decode = decode_batch_pil if backend == "pil" else decode_batch_cv2
             for i, batch in enumerate(iter_batches_from_plan(batch_plan), 1):
-                batch_hash = compute_batch_hash(
-                    root_hash, batch["items"]
-                )  # uses ordered item content hashes
+                batch_hash = compute_batch_hash(root_hash, batch["items"])
                 decoded = impl_decode(batch["items"], return_type, color, max_side)
                 meta = {
                     "ordinal": i,
@@ -487,7 +473,6 @@ class Extract:
         stream = tracker.stream("blase.Extract.read_images", params, code_fn=impl)
 
         try:
-            # Register the manifest descriptor (CAS) and mark as input.
             manifest_desc = build_manifest_descriptor(
                 manifest=manifest,
                 directory=directory,
@@ -507,7 +492,6 @@ class Extract:
             )
             stream.step.add_output(manifest_hash, name="manifest")
 
-            # Record dataset + members for Inspect/CLI (ordered; cached fields optional).
             dataset_id = ensure_dataset_for_manifest(
                 manifest_hash=manifest_hash,
                 manifest=manifest,
@@ -516,11 +500,9 @@ class Extract:
                 root_hash=root_hash,
             )
 
-            # Emit batches
             for i, batch in enumerate(iter_batches_from_plan(batch_plan), 1):
                 batch_hash = compute_batch_hash(root_hash, batch["items"])
 
-                # Register tiny batch descriptor (CAS) so resume can key off it.
                 batch_meta_desc = {
                     "manifest_hash": manifest_hash,
                     "dataset_id": dataset_id,
@@ -556,7 +538,6 @@ class Extract:
                 # Decode (no CAS for pixels).
                 decoded = impl(batch["items"], return_type, color, max_side)
 
-                # Emit step event with lineage + policy.
                 meta = {
                     "upstream": [
                         {"id": manifest_hash, "role": "manifest"},

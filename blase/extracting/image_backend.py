@@ -189,7 +189,7 @@ def scan_manifest_headers(
         raise RuntimeError(
             "Pillow is required for header scans. Install with: pip install pillow"
         )
-    from PIL import Image, UnidentifiedImageError  # imported after check
+    from PIL import Image, UnidentifiedImageError
 
     # --- normalize inputs ---
     root = Path(directory).expanduser()
@@ -235,7 +235,6 @@ def scan_manifest_headers(
     }
 
     for p in paths:
-        # filename filter (post-glob)
         if filename_filter is not None and not filename_filter(str(p)):
             continue
 
@@ -333,7 +332,7 @@ def shuffle_manifest(
       (uses Mersenne Twister via `random.Random`).
     """
     if seed is None:
-        return manifest  # leave order intact
+        return manifest
 
     rng = random.Random(seed)
     shuffled = manifest.copy()
@@ -371,7 +370,6 @@ def ensure_item_content_hashes(manifest: List[Dict[str, Any]]) -> List[Dict[str,
       via the project helper `Hash().hash_file(path)`.
     """
     for rec in manifest:
-        # Skip if already present and non-empty
         if rec.get("hash_content"):
             continue
 
@@ -383,7 +381,6 @@ def ensure_item_content_hashes(manifest: List[Dict[str, Any]]) -> List[Dict[str,
         p = Path(abs_path)
         try:
             # Read whole file into memory and hash with the library helper
-            # (If you add a streaming hasher later, swap this out.)
             hasher = Hash()
             rec["hash_content"] = hasher.hash_file(p)
         except Exception:
@@ -638,8 +635,6 @@ def plan_image_batches(
     for idx, rec in enumerate(manifest, 1):
         est = _scaled_estimate(rec)
 
-        # If we already have items and adding this one would exceed cap,
-        # or we'd exceed the optional hard count ceiling, flush first.
         would_exceed_bytes = (cur_total + est) > cap if cap > 0 else False
         would_exceed_count = batch_size is not None and len(cur_items) >= batch_size
 
@@ -659,17 +654,14 @@ def plan_image_batches(
             )
             continue
 
-        # Add to current batch
         cur_items.append(rec)
         cur_total += est
 
-        # If hard ceiling reached by count exactly, flush immediately
         if batch_size is not None and len(cur_items) >= batch_size:
             _flush(is_last_flag=False)
 
     # Flush any remainder and mark the last batch
     if cur_items:
-        # mark last batch; we’ll correct previous "is_last" flags next
         plan.append(
             {
                 "items": cur_items,
@@ -722,7 +714,6 @@ def decode_batch_pil(
     - Uses `ImageOps.exif_transpose` to normalize orientation.
     - Only decodes pixels. No side effects or DB writes.
     """
-    # Lazy imports so the module doesn't hard-require heavy deps
     import importlib.util
 
     if importlib.util.find_spec("PIL") is None:
@@ -844,7 +835,6 @@ def decode_batch_cv2(
     - OpenCV ignores EXIF orientation. Use the PIL backend if EXIF normalization is required.
     - Only decodes pixels. No CAS/DB side effects.
     """
-    # Required deps (lazy)
     if importlib.util.find_spec("cv2") is None:
         raise RuntimeError(
             "OpenCV is required for decode_batch_cv2. Install with: pip install opencv-python"
@@ -901,7 +891,6 @@ def decode_batch_cv2(
                         img = cv2.resize(
                             img, (new_w, new_h), interpolation=cv2.INTER_AREA
                         )
-                # Convert to requested return_type
                 if to_pil:
                     out.append(Image.fromarray(img, mode="L"))
                 elif to_tensor:

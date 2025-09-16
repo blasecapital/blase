@@ -154,12 +154,10 @@ class Transform:
         """
         tracker = Track.get(track)
 
-        # Untracked path: just run the function and propagate meta.
         if tracker is None:
             out = transform_func(data)
             return out, last_batch, (meta or {})
 
-        # Identify the callable for stream grouping (one step per function per stream)
         fn_qual = getattr(
             transform_func,
             "__qualname__",
@@ -175,13 +173,11 @@ class Transform:
             if getattr(self, "_stream", None) is not None:
                 self._stream.close_ok()
 
-            # Pull replay hints from meta (provided by Extract.read_csv) — all optional
             m = meta or {}
             params = {
                 "fn_qualname": fn_qual,
             }
 
-            # batch size: support both key names
             bs = m.get("chunk_size")
             if bs is None:
                 bs = m.get("batch_size")
@@ -198,7 +194,7 @@ class Transform:
                 if m.get(k) is not None:
                     params[k] = m[k]
 
-            # optional image-ish hints (harmless)
+            # image-ish hints
             for k in ("return_type", "color", "max_side", "mode", "target_batch_bytes"):
                 if m.get(k) is not None:
                     params[k] = m[k]
@@ -206,7 +202,6 @@ class Transform:
             self._stream = tracker.stream(
                 "blase.Transform.apply_function", params, code_fn=transform_func
             )
-            # wire lineage as inputs once (safe to repeat; implementation can de-dup)
             m = meta or {}
             up = m.get("upstream") or []
             for u in up:
@@ -229,17 +224,14 @@ class Transform:
                     pass
             self._fn_tag = fn_qual
 
-        # Execute user code
         try:
             out = transform_func(data)
         except Exception as e:
-            # mark failed/aborted and reset stream state
             self._stream.close_error(type(e), e, e.__traceback__)
             self._stream = None
             self._fn_tag = None
             raise
 
-        # Record upstream lineage for this batch; seal on last
         self._stream.step.add_upstream_from_meta(meta)
         new_meta = self._stream.emit(last_batch=last_batch, meta=meta)
 

@@ -7,57 +7,41 @@ from blase.utils.hashing import Hash
 
 def auto_target_bytes_from_system(return_type: str) -> Optional[int]:
     """
-    Infer a safe default target batch size (in decoded bytes) based on
-    available system memory (GPU if tensor + CUDA/TF-GPU; otherwise CPU).
+    Estimate a safe per-batch decoded-bytes budget using available system memory.
 
     Parameters
     ----------
-    return_type : {"np", "pil", "tensor"}
-        Desired decoded output:
-        - "np" or "pil": plan against CPU memory.
-        - "tensor": try GPU first (PyTorch CUDA, then TensorFlow GPU); otherwise CPU.
+    return_type : {'np', 'pil', 'tensor'}
+        Decoded output type.
+        - 'np' or 'pil' → use CPU memory.
+        - 'tensor'     → prefer GPU (PyTorch CUDA, then TensorFlow GPU), else CPU.
 
     Returns
     -------
-    target_bytes : int or None
-        Suggested soft upper bound (decoded bytes) for each batch.
-        Returns None if memory cannot be probed (caller should fall back to a
-        conservative default, e.g., 256 MiB).
+    int or None
+        Suggested soft upper bound in bytes. Clamped to [128 MiB, 2 GiB].
+        Returns None if memory cannot be probed.
 
-    Heuristics
-    ----------
-    GPU (PyTorch):
-        - Uses torch.cuda.mem_get_info() → (free, total) bytes
-        - target = free * 0.70
-
-    GPU (TensorFlow), preference order:
-        1) pynvml (if installed): nvmlDeviceGetMemoryInfo(handle).free
-           - target = free * 0.70
-        2) TF virtual device memory limit (if configured) minus current allocation:
-           - total = tf.config.experimental.get_virtual_device_configuration(gpu)[0].memory_limit (MiB)
-           - current = tf.config.experimental.get_memory_info("GPU:0")["current"] (bytes)
-           - free ≈ max(0, total_bytes - current)
-           - target = free * 0.70
-
-        If neither is available, fall back to CPU path.
-
-    CPU:
-        - Requires psutil
-        - target = psutil.virtual_memory().available * 0.50
-
-    Clamps
-    ------
-    The returned value is clamped to [128 MiB, 2 GiB] to avoid degenerate plans.
+    Algorithm
+    ---------
+    tensor + PyTorch
+        free = torch.cuda.mem_get_info()[0]            # bytes
+        target = 0.70 * free
+    tensor + TensorFlow
+        Prefer NVML (pynvml): free = nvmlDeviceGetMemoryInfo(0).free
+        Else, if TF virtual device has a memory_limit:
+            total = memory_limit * 2**20                # MiB → bytes
+            current = tf.config.experimental.get_memory_info('GPU:0')['current']
+            free ≈ max(0, total - current)
+        target = 0.70 * free
+    CPU (np/pil or fallback)
+        avail = psutil.virtual_memory().available
+        target = 0.50 * avail
 
     Notes
     -----
-    - The value is intended as a *planning* budget. You should still apply a
-      safety margin when packing (e.g., 10–20%) and validate actual decoded
-      memory at runtime.
-    - TensorFlow's get_memory_info reports TF allocator usage, not raw device
-      free memory; using a TF virtual device memory limit makes the estimate
-      reasonable. For raw device memory without PyTorch, consider installing
-      `pynvml` (works for both TF and non-ML workloads).
+    The value is for planning. Apply an additional safety margin during packing,
+    and verify decoded memory at runtime.
     """
     min_cap = 128 * 1024 * 1024      # 128 MiB
     max_cap = 2 * 1024 * 1024 * 1024 # 2 GiB
@@ -140,77 +124,47 @@ def scan_manifest_headers(
     filename_filter: Optional[Callable[[str], bool]],
 ) -> List[Dict[str, Any]]:
     """
-    Scan a directory for images and collect **header-only** metadata for each file.
+    Scan a directory for images and collect header-only metadata per file.
 
-    This function builds the per-item records that power memory-aware batching,
-    integrity checks, and deterministic replay. It **does not** load pixel data.
+    This builds per-item records for batching, health checks, and deterministic
+    replay. It never decodes pixel data.
 
     Parameters
     ----------
     directory : str
-        Root directory to scan.
+        Root directory to scan. Must exist.
     pattern : str
-        Glob pattern for matching files (e.g., ``"**/*.jpg"``, ``"*.png"``).
-        If ``recursive`` is False and the pattern includes ``"**"``, the double-star
-        segments are stripped to avoid unintended recursion.
+        Glob pattern (e.g., "**/*.jpg", "*.png"). If `recursive` is False and
+        the pattern contains "**", those segments are stripped.
     recursive : bool
-        Whether to recurse into subdirectories. If False, only the top-level
-        directory is scanned.
-    filename_filter : callable, optional
-        Optional predicate ``f(path: str) -> bool`` applied **after** globbing.
-        If provided and it returns False, the file is skipped (useful to exclude
-        thumbnails, hidden files, etc.).
+        Recurse into subdirectories when True. Otherwise scan only `directory`.
+    filename_filter : callable or None
+        Optional predicate `f(path: str) -> bool` applied after globbing.
+        Files for which the predicate returns False are skipped.
 
     Returns
     -------
-    items : list of dict
-        One dict per discovered file, sorted deterministically by ``rel_path``.
-        Each dict contains:
-
-        - ``abs_path`` : str  
-          Absolute filesystem path.
-        - ``rel_path`` : str  
-          Path relative to ``directory`` for cross-machine stability.
-        - ``ext`` : str  
-          Lowercased extension without the dot (e.g., ``"jpg"``).
-        - ``bytes`` : int  
-          File size in bytes (from ``stat``), or ``None`` if unavailable.
-        - ``mtime`` : int  
-          Last modification time (seconds since epoch, int), or ``None`` if unavailable.
-        - ``width`` : int or None  
-          Image width from header; ``None`` if unreadable.
-        - ``height`` : int or None  
-          Image height from header; ``None`` if unreadable.
-        - ``mode`` : str or None  
-          Pillow mode (``"RGB"``, ``"L"``, ``"RGBA"``, etc.), or ``None``.
-        - ``channels`` : int or None  
-          Inferred from mode (``L→1``, ``RGB→3``, ``RGBA→4``), else ``None``.
-        - ``exif_orientation`` : int or None  
-          EXIF orientation (1..8) if present; ``1`` commonly means “upright”.
-        - ``is_corrupt`` : bool  
-          True if header open failed or file unreadable as an image.
-        - ``estimated_decoded_bytes`` : int  
-          Heuristic decoded footprint in bytes = ``width * height * channels``
-          (assuming ``uint8``); uses 0 for unknown fields.
-        - ``hash_path_mtime`` : str  
-          **Fast** change detector: SHA-256 of ``rel_path|mtime|bytes`` (hex).
+    list of dict
+        One record per discovered file, sorted by `rel_path`. Each record has:
+        - `abs_path` : str
+        - `rel_path` : str           # path relative to `directory`
+        - `ext`      : str           # lowercased extension without dot
+        - `bytes`    : int or None
+        - `mtime`    : int or None   # seconds since epoch
+        - `width`    : int or None
+        - `height`   : int or None
+        - `mode`     : str or None   # Pillow mode ("RGB", "L", ...)
+        - `channels` : int or None   # inferred from mode
+        - `exif_orientation` : int or None  # 1..8 when present
+        - `is_corrupt` : bool
+        - `estimated_decoded_bytes` : int   # width * height * channels
+        - `hash_path_mtime` : str    # fast SHA-256 over "rel|mtime|bytes"
 
     Notes
     -----
-    - Requires Pillow. Only headers are read: ``Image.open(...).size`` and ``mode``
-      do not trigger full pixel decoding.
-    - Files are **sorted by rel_path** for deterministic ordering across runs/machines.
-    - Corrupt/unreadable files are not dropped; they’re included with
-      ``is_corrupt=True`` and missing header fields, so downstream health checks
-      can report them deterministically.
-    - For **strong identity** later, compute ``hash_content`` (full-file SHA-256)
-      in a separate step and augment these records (or replace the fast hash).
-
-    Examples
-    --------
-    >>> items = scan_manifest_headers("data/radish", "**/*.jpg", recursive=True, filename_filter=None)
-    >>> items[0]["rel_path"], items[0]["width"], items[0]["is_corrupt"]
-    ('img/000001.jpg', 1024, False)
+    - Requires Pillow; only image headers are read.
+    - Corrupt/unreadable files are included with `is_corrupt=True`.
+    - For strong identity, compute full-content hashes separately and merge.
     """
     # --- dependency check (Pillow) ---
     if importlib.util.find_spec("PIL") is None:
@@ -218,9 +172,10 @@ def scan_manifest_headers(
     from PIL import Image, UnidentifiedImageError  # imported after check
 
     # --- normalize inputs ---
-    root = Path(directory).expanduser().resolve(strict=True)
-    if not root.is_dir():
+    root = Path(directory).expanduser()
+    if not root.exists() or not root.is_dir():
         raise NotADirectoryError(f"Not a directory: {directory!r}")
+    root = root.resolve()
 
     patt = pattern or "*"
     if not recursive and "**" in patt:
@@ -321,44 +276,30 @@ def scan_manifest_headers(
 
 def shuffle_manifest(manifest: List[Dict[str, Any]], seed: Optional[int]) -> List[Dict[str, Any]]:
     """
-    Shuffle a manifest deterministically if a seed is provided.
-
-    This function reorders the list of manifest records (as produced by
-    ``scan_manifest_headers``) in a reproducible way, based on the given
-    seed. If ``seed`` is None, the manifest is returned unchanged.
+    Deterministically shuffle a manifest when a seed is provided.
 
     Parameters
     ----------
     manifest : list of dict
-        List of item records (each a dict with at least a "rel_path" key).
-        Typically produced by ``scan_manifest_headers``.
+        Records as produced by `scan_manifest_headers` (must be indexable).
     seed : int or None
-        RNG seed. If provided, the manifest is shuffled deterministically
-        using the Python stdlib RNG seeded with this value. If None, the
-        manifest is left as-is.
+        If an int, use Python's `random.Random(seed).shuffle` for a stable order.
+        If None, return the input list unchanged (same object).
 
     Returns
     -------
-    shuffled : list of dict
-        New list of manifest records. Same contents as input, but possibly
-        reordered.
+    list of dict
+        A reordered shallow copy when `seed` is not None; otherwise the original
+        list object.
 
     Notes
     -----
-    - The input manifest is **not modified in place**; a shallow copy is made.
-    - Determinism: given the same manifest and seed, the output order is
-      identical across runs and machines (uses Python's ``random`` not NumPy).
-    - If you need stronger guarantees (e.g., cross-language reproducibility),
-      use ``hash_object`` on the manifest list and store the seed in the
-      manifest descriptor.
-    - For resume/replay, the chosen ``seed`` should be logged alongside the
-      manifest root hash in step metadata.
-
-    Examples
-    --------
-    >>> manifest = [{"rel_path": "a.jpg"}, {"rel_path": "b.jpg"}, {"rel_path": "c.jpg"}]
-    >>> shuffle_manifest(manifest, seed=42)
-    [{'rel_path': 'b.jpg'}, {'rel_path': 'c.jpg'}, {'rel_path': 'a.jpg'}]
+    - No in-place modification when `seed` is not None (shallow copy). Dict items
+      are not copied; only order changes.
+    - With `seed is None`, the function returns the *same* list object; callers
+      should not mutate it if they need the original preserved.
+    - Given the same `manifest` and `seed`, order is reproducible across machines
+      (uses Mersenne Twister via `random.Random`).
     """
     if seed is None:
         return manifest  # leave order intact
@@ -370,47 +311,32 @@ def shuffle_manifest(manifest: List[Dict[str, Any]], seed: Optional[int]) -> Lis
 
 def ensure_item_content_hashes(manifest: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     """
-    Ensure each manifest item has a strong content hash.
-
-    This function iterates over header-scanned manifest records (as produced by
-    ``scan_manifest_headers``) and fills the ``hash_content`` field by hashing the
-    **entire file bytes**. Existing non-empty ``hash_content`` values are left
-    unchanged to allow upstream caching.
+    Populate `hash_content` for each manifest item using a full-file hash.
 
     Parameters
     ----------
     manifest : list of dict
-        Each dict is expected to contain at least:
-        - ``abs_path`` : absolute path to the file (str)
-        - ``rel_path`` : path relative to the scanned root (str)
-        - ``is_corrupt`` : bool (from header scan; corrupt files can still be hashed)
-        - ``hash_path_mtime`` : fast change detector (str), optional
-
-        Other fields (width, height, mode, etc.) are ignored here.
+        Records from `scan_manifest_headers`. Each item should include:
+        - `abs_path` : str      # absolute file path
+        - `rel_path` : str      # relative path (unused here)
+        - `is_corrupt` : bool   # may be True; bytes can still be hashed
+        Optional:
+        - `hash_content` : str  # preserved if already non-empty
 
     Returns
     -------
-    updated : list of dict
-        The same list object (mutated in place) is also returned for convenience.
-        For each item:
-        - ``hash_content`` : str
-            Hex digest computed from the full file bytes, if hashing succeeds.
-            Left as-is if already present and non-empty.
-            Set to ``None`` if hashing fails due to I/O errors.
+    list of dict
+        The same list object, mutated in place. For each item:
+        - `hash_content` : str or None
+            Hex digest of file bytes when hashing succeeds.
+            Unchanged if already set and non-empty.
+            None on I/O or hashing errors, or if `abs_path` missing.
 
     Notes
     -----
-    - Corrupt images (unreadable by Pillow) can still be hashed at the byte level;
-      this helps you separate "corrupt for decoding" from "file bytes changed".
-    - If you maintain a cache keyed by ``hash_path_mtime``, you can pre-populate
-      ``hash_content`` before calling this function to avoid rehashing unchanged files.
-
-    Examples
-    --------
-    >>> items = scan_manifest_headers("data/imgs", "**/*.jpg", True, None)
-    >>> ensure_item_content_hashes(items)  # fills item["hash_content"]
-    >>> items[0]["hash_content"][:8]
-    '4f9c1a2b'
+    - Byte-level hashing is independent of image decodability.
+    - For large files, consider a streaming hasher; this implementation reads
+      via the project helper `Hash().hash_file(path)`.
     """
     for rec in manifest:
         # Skip if already present and non-empty
@@ -445,68 +371,48 @@ def compute_manifest_root_hash(
     """
     Compute a deterministic root hash for an image manifest.
 
-    The root hash acts as a single identifier for the *entire* dataset state.
-    It is computed from:
-      1) scan parameters (directory, pattern, recursive, seed, hash_mode), and
-      2) the ordered list of per-item identities:
-         - in ``hash_mode="content"``: (rel_path, hash_content)
-         - in ``hash_mode="path_mtime_size"``: (rel_path, hash_path_mtime)
+    The root hash identifies the dataset state from:
+      (1) scan parameters (directory, pattern, recursive, seed, hash_mode), and
+      (2) the ordered per-item identity:
+          - if `hash_mode == "content"`          → (rel_path, hash_content)
+          - if `hash_mode == "path_mtime_size"`  → (rel_path, hash_path_mtime)
 
-    Ordering is by ``rel_path`` to ensure stability across machines.
+    Items are sorted by `rel_path` for stability.
 
     Parameters
     ----------
     manifest : list of dict
-        Records produced by the header scan (and possibly augmented with
-        content hashes). Each item must contain:
-          - ``rel_path`` : str
-          - For ``hash_mode="content"``: ``hash_content`` : str (hex digest)
-          - For ``hash_mode="path_mtime_size"``: ``hash_path_mtime`` : str
-        Other fields are ignored here.
+        Records from header scan (optionally augmented). Each item must have:
+        - `rel_path` : str
+        - if `hash_mode=="content"`         : `hash_content` : str
+        - if `hash_mode=="path_mtime_size"` : `hash_path_mtime` : str
     directory : str
-        Root directory that was scanned (used for identity).
+        Scanned root directory. Included in identity.
     pattern : str
-        Glob pattern used during the scan (part of identity).
+        Glob pattern used for scanning. Included in identity.
     recursive : bool
-        Whether recursion was enabled (part of identity).
+        Whether recursion was enabled. Included in identity.
     seed : int or None
-        Shuffle seed applied to the manifest order before batching (logged
-        as part of identity; ``None`` is treated distinctly from any integer).
-    hash_mode : {"content", "path_mtime_size"}, default "content"
-        Identity mode for items. Use:
-          - "content" for strong identity (SHA-256 of file bytes).
-          - "path_mtime_size" for a fast, weaker identity.
+        Shuffle seed recorded for planning. `None` is distinct from any int.
+    hash_mode : {'content','path_mtime_size'}, default 'content'
+        Per-item identity mode.
 
     Returns
     -------
-    root_hash : str
-        Hex digest string representing the entire dataset state.
+    str
+        Hex digest representing the entire dataset state.
 
     Raises
     ------
     ValueError
-        If required fields are missing for the requested ``hash_mode`` or if
-        an unrecognized ``hash_mode`` is provided.
+        On unsupported `hash_mode` or missing required fields.
 
     Notes
     -----
-    - The manifest list is not modified. It is *read* and canonicalized into
-      a small, pickle-serializable structure which is then hashed via your
-      centralized ``hash_object`` helper, ensuring consistent hashing across
-      the codebase.
-    - Include **all** items, even corrupt ones. Corruption affects decoding,
-      not the byte identity; in strong mode you can still hash the bytes.
-    - Sorting by ``rel_path`` guarantees stability regardless of how the OS
-      yields files. If your upstream already sorted, this remains stable.
-
-    Examples
-    --------
-    >>> items = [
-    ...   {"rel_path": "a.jpg", "hash_content": "aa..."},
-    ...   {"rel_path": "b.jpg", "hash_content": "bb..."},
-    ... ]
-    >>> compute_manifest_root_hash(items, "data/imgs", "**/*.jpg", True, 42, "content")[:8]
-    '9c41f2d0'
+    - The function does not mutate `manifest`.
+    - Hashing is centralized via `Hash().hash_object(identity_obj)` to keep
+      consistency with the rest of the system.
+    - Include corrupt items; decodability is orthogonal to byte identity.
     """
     mode = (hash_mode or "content").strip().lower()
     if mode not in ("content", "path_mtime_size"):
@@ -575,70 +481,43 @@ def plan_image_batches(
     max_side: Optional[int],
 ) -> List[Dict[str, Any]]:
     """
-    Plan image batches from a manifest for memory-aware decoding.
+    Plan image batches for memory-aware decoding.
 
     Parameters
     ----------
     manifest : list of dict
-        Records from `scan_manifest_headers(...)` (optionally augmented) in the
-        *final* iteration order (already shuffled if applicable). Each record
-        should include at least:
-          - "width", "height" (ints or None)
-          - "channels" (int or None)
-          - "estimated_decoded_bytes" (int; optional, will be recomputed if missing)
-          - "abs_path" / "rel_path" (for reference; not used in sizing)
-        Corrupt items are not excluded here; they’ll have zero/unknown sizing and
-        should be handled downstream at decode time (skip or raise).
-
-    mode : {"auto","manual"}
-        - "auto": pack items until decoded-bytes budget is reached.
-        - "manual": fixed item count per batch.
-        In both modes, if `batch_size` is provided, it acts as a *hard ceiling*
-        on the number of items in a batch.
-
-    batch_size : int, optional
-        Maximum number of items per batch. Required when `mode="manual"`. In
-        `mode="auto"`, this is an optional hard ceiling.
-
-    target_batch_bytes : int, optional
-        Soft budget (decoded bytes) per batch. Required when `mode="auto"`
-        (the caller should have inferred a default if None). Ignored in pure
-        `mode="manual"` packing.
-
+        Final-ordered records from `scan_manifest_headers(...)`. Each item should
+        include `width`, `height`, `channels` (ints or None). If any are missing,
+        `estimated_decoded_bytes` is used when present, else 0.
+    mode : {'auto', 'manual'}
+        'auto' packs greedily by decoded-bytes budget. 'manual' uses fixed count.
+    batch_size : int or None
+        Hard ceiling on items per batch. Required when `mode='manual'`.
+    target_batch_bytes : int or None
+        Soft budget per batch in bytes. Required when `mode='auto'`.
     safety_margin : float
-        Fraction (e.g., 0.15) of the target budget to hold as headroom. The
-        effective planning cap is:
-            cap = int(target_batch_bytes * (1 - safety_margin))
-
-    max_item_decoded_bytes : int, optional
-        Guardrail for single-item size. If an item's estimated decoded bytes
-        exceeds this value:
-          - if `max_side` is provided and would downscale the item, that scaled
-            estimate is used instead;
-          - otherwise the item is planned as a single-item batch (so progress is
-            guaranteed). Decode-time logic can still decide to downscale/skip.
-
-    max_side : int, optional
-        If provided, the estimator accounts for downscaling the longer side to
-        `max_side` (aspect-preserving) when computing per-item decoded bytes.
+        Headroom fraction. Effective cap = `target_batch_bytes * (1 - safety_margin)`.
+        Must satisfy 0.0 ≤ safety_margin < 1.0.
+    max_item_decoded_bytes : int or None
+        Per-item guardrail. If an item's estimate exceeds this, cap the estimate
+        (decode-time can still downscale or isolate).
+    max_side : int or None
+        If set, estimate uses an aspect-preserving downscale so the longer side
+        equals `max_side` before computing bytes.
 
     Returns
     -------
-    plan : list of dict
-        Each element represents a batch:
-          - "items": list[dict]  (subset of `manifest` records, in order)
-          - "est_decoded_bytes": int  (sum of per-item estimates post-scaling)
-          - "is_last": bool  (True only for the final batch)
+    list of dict
+        One dict per batch:
+          - 'items' : list[dict]   # subset of input records, in order
+          - 'est_decoded_bytes' : int
+          - 'is_last' : bool       # True only on the final batch
 
     Notes
     -----
-    - Greedy first-fit packing in input order for determinism.
-    - Per-item estimate uses:
-         est = width * height * channels * 1  (uint8 bytes per pixel),
-      adjusted for `max_side` downscale when specified. If fields are missing,
-      falls back to `record.get("estimated_decoded_bytes", 0)` or 0.
-    - This function *plans* batches; decode-time verification should still
-      enforce caps and log any corrective actions (e.g., downscale, isolate).
+    - Deterministic greedy first-fit in input order.
+    - Oversized single items (> cap) form a single-item batch to guarantee progress.
+    - Only planning is done here; enforce caps again at decode time.
     """
     if mode not in ("auto", "manual"):
         raise ValueError(f"Unsupported mode: {mode!r}")
@@ -767,59 +646,47 @@ def decode_batch_pil(
     max_side: Optional[int] = None,
 ):
     """
-    Decode a batch of images using Pillow (header-then-decode), with optional
-    EXIF orientation fix, color conversion, and size capping.
+    Decode a batch of images with Pillow, with EXIF orientation, color conversion,
+    and optional size cap.
 
     Parameters
     ----------
     items : list of dict
-        Subset of manifest records for this batch. Each item must contain:
-        - "abs_path" : str (absolute path to the file)
-        Other keys (width/height/mode/is_corrupt, etc.) are ignored here.
-    return_type : {"np", "pil", "tensor"}, default="np"
-        Decoded output container:
-        - "np"     : list of numpy arrays (dtype=uint8), shape HxWxC (RGB) or HxW (gray)
-        - "pil"    : list of PIL.Image objects
-        - "tensor" : list of torch tensors (dtype=uint8), shape like numpy case
-                     (torch is imported lazily; if unavailable, raises RuntimeError)
-        Note: images in a batch may have different spatial sizes; a single stacked
-        array/tensor is not returned.
-    color : {"rgb", "gray"}, default="rgb"
-        Target color space. Converts via Pillow:
-        - "rgb"  → mode "RGB"
-        - "gray" → mode "L"
-    max_side : int, optional
-        If provided and the image's longer side exceeds this value, downscale
-        proportionally so that max(width, height) == max_side (aspect preserved).
-        Uses high-quality resampling.
+        Each item must include:
+        - 'abs_path' : str  Absolute file path.
+    return_type : {'np', 'pil', 'tensor'}, default 'np'
+        'np'     → list of numpy arrays (uint8), HxWxC (RGB) or HxW (gray).
+        'pil'    → list of PIL.Image objects.
+        'tensor' → list of torch tensors (uint8), HxWxC or HxW.
+    color : {'rgb', 'gray'}, default 'rgb'
+        Target color space ('RGB' or 'L').
+    max_side : int or None
+        If set and max(width,height) > max_side, downscale with LANCZOS to fit.
 
     Returns
     -------
-    decoded : list
-        List of decoded images in the requested representation. Decoding failures
-        (e.g., corrupt files) yield `None` at the corresponding position so the
-        caller can decide to skip or fail fast.
+    list
+        Decoded items in requested representation. Failures yield None in-place.
 
     Notes
     -----
-    - This function performs **pixel decoding** (unlike the header scan). It does
-      not perform any CAS/DB logging and is designed to be pure/deterministic.
-    - EXIF orientation is normalized via `ImageOps.exif_transpose`.
-    - Resampling uses LANCZOS where available for downscaling.
-    - For `"tensor"`, tensors are `uint8` to mirror the numpy path and conserve
-      memory; downstream transforms can convert to float/normalize as needed.
-
-    Examples
-    --------
-    >>> decoded = decode_batch_pil(batch_items, return_type="np", color="rgb", max_side=1024)
-    >>> type(decoded[0]).__name__
-    'ndarray'
+    - Lazy-imports dependencies (Pillow, NumPy, PyTorch).
+    - Uses `ImageOps.exif_transpose` to normalize orientation.
+    - Only decodes pixels. No side effects or DB writes.
     """
     # Lazy imports so the module doesn't hard-require heavy deps
     import importlib.util
     if importlib.util.find_spec("PIL") is None:
         raise RuntimeError("Pillow is required to decode images with backend 'pil'. Install with: pip install pillow")
     from PIL import Image, ImageOps
+    # ensure codecs are registered for both save and open
+    try:
+        import PIL.JpegImagePlugin  # noqa: F401
+        import PIL.PngImagePlugin   # noqa: F401
+        import PIL.BmpImagePlugin   # noqa: F401
+    except Exception:
+        pass
+    Image.init()
 
     to_numpy = (return_type == "np")
     to_pil    = (return_type == "pil")
@@ -894,51 +761,31 @@ def decode_batch_cv2(
     max_side: Optional[int] = None,
 ):
     """
-    Decode a batch of images using OpenCV (cv2) with optional color conversion
-    and size capping.
+    Decode a batch of images with OpenCV, with color conversion and optional size cap.
 
     Parameters
     ----------
     items : list of dict
-        Subset of manifest records for this batch. Each item must contain:
-        - "abs_path" : str (absolute path to the file)
-        Other keys (width/height/mode/is_corrupt, etc.) are ignored here.
-    return_type : {"np", "pil", "tensor"}, default="np"
-        Decoded output container:
-        - "np"     : list of numpy arrays (dtype=uint8), shape HxWxC (RGB) or HxW (gray)
-        - "pil"    : list of PIL.Image objects (requires Pillow)
-        - "tensor" : list of torch tensors (dtype=uint8), shape as above (requires PyTorch)
-        Note: images in a batch may have different spatial sizes; a single stacked
-        array/tensor is not returned.
-    color : {"rgb", "gray"}, default="rgb"
-        Target color space:
-        - "rgb"  → outputs 3-channel RGB arrays
-        - "gray" → outputs single-channel grayscale arrays
-    max_side : int, optional
-        If provided and the image's longer side exceeds this value, downscale
-        proportionally so that max(width, height) == max_side (aspect preserved).
-        Uses `INTER_AREA` resampling for downscale.
+        Each item must include:
+        - 'abs_path' : str  Absolute file path.
+    return_type : {'np', 'pil', 'tensor'}, default 'np'
+        'np'     → list of numpy arrays (uint8), HxWxC (RGB) or HxW (gray).
+        'pil'    → list of PIL.Image objects (requires Pillow).
+        'tensor' → list of torch tensors (uint8), HxWxC or HxW (requires PyTorch).
+    color : {'rgb', 'gray'}, default 'rgb'
+        Target output color. BGR→RGB conversion is applied for 'rgb'.
+    max_side : int or None
+        If set and max(width,height) > max_side, downscale with INTER_AREA to fit.
 
     Returns
     -------
-    decoded : list
-        List of decoded images in the requested representation. Decoding failures
-        (e.g., unreadable/corrupt files) yield `None` at the corresponding position.
+    list
+        Decoded items in requested representation. Failures yield None in-place.
 
     Notes
     -----
-    - OpenCV loads images as **BGR** by default and does **not** honor EXIF
-      orientation. If you require EXIF normalization, prefer the PIL backend.
-    - Downscaling uses `cv2.INTER_AREA`, generally best for shrinking.
-    - For `"tensor"`, tensors are `uint8` to match the numpy path; downstream
-      transforms can convert to float/normalize as needed.
-    - This function performs pixel decoding only; no CAS/DB side effects.
-
-    Examples
-    --------
-    >>> decoded = decode_batch_cv2(batch_items, return_type="np", color="rgb", max_side=1024)
-    >>> decoded[0].dtype, decoded[0].shape
-    (dtype('uint8'), (720, 1280, 3))
+    - OpenCV ignores EXIF orientation. Use the PIL backend if EXIF normalization is required.
+    - Only decodes pixels. No CAS/DB side effects.
     """
     # Required deps (lazy)
     if importlib.util.find_spec("cv2") is None:
@@ -1027,45 +874,36 @@ def decode_batch_cv2(
 
 def iter_batches_from_plan(batch_plan: List[Dict[str, Any]]) -> Iterator[Dict[str, Any]]:
     """
-    Iterate over a batch plan produced by `plan_image_batches`.
+    Iterate over a batch plan from `plan_image_batches` and normalize flags.
 
-    This generator yields each batch dict in order and enforces a clean contract:
-    - Each yielded element has the keys: {"items", "est_decoded_bytes", "is_last"}.
-    - Exactly one batch (the final one) has `is_last=True`. If the incoming plan
-      marks multiple batches as last (or none), this function corrects it.
+    Ensures every yielded batch dict has keys:
+    {"items", "est_decoded_bytes", "is_last"}.
+    Exactly one batch (the final entry) has `is_last=True`. If the incoming
+    plan marks multiple batches as last (or none), this function normalizes it
+    so only the final entry is True.
 
     Parameters
     ----------
     batch_plan : list of dict
-        Output from `plan_image_batches(...)`. Each element should be a dict with:
-          - "items" : list[dict]     (subset of manifest records)
-          - "est_decoded_bytes" : int
-          - "is_last" : bool
+        Each element should be:
+        - "items" : list[dict]
+        - "est_decoded_bytes" : int
+        - "is_last" : bool
 
     Yields
     ------
-    batch : dict
-        The (possibly normalized) batch dict.
+    dict
+        Shallow-copied batch dict with normalized `is_last`.
 
     Raises
     ------
     ValueError
-        If a batch is missing required keys or has invalid types.
+        If an entry is not a dict, is missing required keys, or has wrong types.
 
     Notes
     -----
-    - This function does not mutate `batch_plan` in place; it yields shallow copies.
-    - If `batch_plan` is empty, nothing is yielded.
-    - Normalization ensures downstream consumers can rely on a single terminal `is_last=True`.
-
-    Examples
-    --------
-    >>> plan = [
-    ...   {"items": [1,2], "est_decoded_bytes": 123, "is_last": False},
-    ...   {"items": [3],   "est_decoded_bytes": 45,  "is_last": True},
-    ... ]
-    >>> list(iter_batches_from_plan(plan))[-1]["is_last"]
-    True
+    - Empty input yields nothing.
+    - Shallow copy: the returned dict is a new object, but its "items" list is the same object.
     """
     if not batch_plan:
         return

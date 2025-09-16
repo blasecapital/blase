@@ -107,6 +107,35 @@ def _pick_replay_target(params: Dict[str, Any],
 def _load_cas_json(run_path: Path, sha256_hex: str, *, kind: Optional[str]) -> Dict[str, Any]:
     """
     Load a CAS JSON blob by hash and kind, tolerant of legacy layouts.
+
+        Parameters
+    ----------
+    run_path : Path
+        Root directory of the run containing the `cas/sha256` hierarchy.
+    sha256_hex : str
+        SHA-256 hex digest of the desired CAS object.
+    kind : str
+        Logical CAS kind (e.g., "image.manifest"). Required.
+
+    Returns
+    -------
+    dict
+        Parsed JSON content of the CAS blob.
+
+    Raises
+    ------
+    ValueError
+        If `kind` is None or empty.
+    FileNotFoundError
+        If no candidate path contains the requested blob.
+
+    Notes
+    -----
+    Search order:
+      1. Canonical path: `cas/sha256/<kind>/<aa>/<bb>/<hash>`
+      2. Legacy flat path: `cas/sha256/<aa>/<bb>/<hash>`
+      3. Legacy typo for `*.meta`: drop final "a" in kind directory.
+      4. Reversed bucket order: `cas/sha256/<kind>/<bb>/<aa>/<hash>`
     """
     if not kind:
         raise ValueError("CAS kind is required to resolve namespaced layout.")
@@ -194,6 +223,7 @@ def run_read_csv_restore(
         yield batch, is_last
 
 def _lookup_data_row(run_path: Path, h: str):
+    """Return {'kind', 'metadata'} for a CAS data row or None if missing."""
     db = run_path / "nodes" / "nodes.db"
     import sqlite3, json as _json
     con = sqlite3.connect(db)
@@ -212,6 +242,7 @@ def _lookup_data_row(run_path: Path, h: str):
         con.close()
 
 def _try_load_batch_desc(run_path: Path, h: str) -> dict:
+    """Return a batch descriptor dict by trying CAS meta, data row, or batch blob in order."""
     # 1) First try the canonical batch-meta blob
     try:
         return _load_cas_json(run_path, h, kind="image.batch.meta")
@@ -235,20 +266,6 @@ def _try_load_batch_desc(run_path: Path, h: str) -> dict:
     except Exception:
         # give a benign empty descriptor so restore can continue
         return {}
-    
-def _normalize_recorded_batches(run_path: Path, realized: Dict[str, Any]) -> list[dict]:
-    vals = realized.get("batch") or realized.get("batch_desc") or []
-    if not isinstance(vals, list):
-        vals = [vals]
-    out = []
-    for v in vals:
-        if isinstance(v, str):
-            out.append(_try_load_batch_desc(run_path, v))
-        elif isinstance(v, dict):
-            out.append(v)
-        else:
-            out.append({})
-    return out
 
 def run_read_images_restore(
     *,
@@ -258,14 +275,52 @@ def run_read_images_restore(
     transform_fn=None,   # unused; signature kept for uniformity
 ) -> Iterator[Tuple[Any, Dict, bool]]:
     """
-    Replay an Extract.read_images step deterministically.
+    Restore a prior `Extract.read_images` step deterministically.
 
-    Strategy:
-      1) Resolve params and source directory.
-      2) If a manifest hash is present, load it and enforce the same root_hash.
-      3) Re-scan headers + content hashes; compute root_hash and compare.
-      4) Rebuild the batch plan; optionally validate against recorded batch descriptors.
-      5) Decode with the recorded backend and yield (batch, is_last).
+    This replays decoding and batching using recorded parameters and CAS
+    descriptors from a tracked run.
+
+    Parameters
+    ----------
+    run_path : Path
+        Root directory of the recorded run containing CAS blobs.
+    params : dict
+        Original step parameters captured at record time. Expected keys include
+        `backend`, `return_type`, `color`, `max_side`, `mode`, `safety_margin`,
+        `max_item_decoded_bytes`, `batch_size`, `target_batch_bytes`,
+        `pattern`, `recursive`, `shuffle`, `seed`, and `hash_mode`.
+    realized : dict
+        Realized outputs from the recorded step. Expected keys:
+        - "manifest": str CAS id for the manifest descriptor (optional).
+        - "batch_descs" or "batch": list[str] CAS ids for per-batch descriptors.
+        - "source": str path to the image directory (preferred).
+        If "source" is missing, `params["directory"]` is used.
+    transform_fn : callable, optional
+        Unused. Present for signature uniformity across restore bindings.
+
+    Yields
+    ------
+    tuple
+        `(images, meta, is_last)` where:
+        - `images`: decoded images (type per `params["return_type"]`).
+        - `meta`: dict containing `ordinal`, `manifest_root_hash`, `batch_hash`,
+          `manifest` (CAS id if available), and `upstream` lineage entries.
+        - `is_last`: bool indicating final batch.
+
+    Notes
+    -----
+    - If a manifest CAS id is provided, the function loads its descriptor and
+      enforces that the recomputed root hash matches. Mismatches raise
+      `RuntimeError`.
+    - If recorded batch descriptors are available, batch count and batch hash
+      are validated per batch. Mismatches raise `RuntimeError`.
+
+    Raises
+    ------
+    RuntimeError
+        If neither `realized["source"]` nor `params["directory"]` is provided,
+        or if `shuffle=True` without a recorded `seed`, or if manifest or batch
+        validation fails.
     """
 
     # ---------- helpers ----------
@@ -381,9 +436,6 @@ def run_read_images_restore(
         max_item_decoded_bytes=max_item_decoded_bytes,
         max_side=max_side,
     )
-
-    # Optional validation against recorded batch descriptors (accept batch_desc or batch)
-    #recorded_batch_descs = _normalize_recorded_batches(run_path, realized)
 
     impl = decode_batch_pil if backend == "pil" else decode_batch_cv2
 
@@ -656,10 +708,49 @@ def run_save_images_to_parquet_replay(
     record_materialization: bool = True,
 ) -> List[Path]:
     """
-    Replay a Load.save_images_to_parquet step by consuming an upstream (batch,last) generator
-    and writing one deterministic Parquet shard per batch.
+    Re-run a recorded `Load.save_images_to_parquet` step.
 
-    Returns list of *actual* output paths in the order they were written.
+    This consumes an upstream generator of image batches and writes one
+    deterministic Parquet shard per batch, verifying optional recorded hashes.
+
+    Parameters
+    ----------
+    run_path : Path
+        Base path of the recorded run.
+    params : dict
+        Original step parameters captured at record time. Relevant keys include
+        `target_dir`, `shard_prefix`, `encode`, `jpeg_quality`, `compression`,
+        `include_paths`, and optional `writer_cfg`.
+    realized : dict
+        Not currently used. Present for API parity with other replay bindings.
+    backend_override : str, optional
+        Reserved for future backend selection; currently ignored.
+    upstream_gen : iterator of tuple
+        Upstream generator yielding either:
+        - (batch, meta, is_last) or
+        - (batch, is_last)
+        where `batch` is image data and `meta` is optional batch metadata.
+    target_override : str, optional
+        Directory to write shards. Overrides both `params["target_dir"]`
+        and default restore directory if provided.
+    on_conflict : {"overwrite", "rename", "fail"}, default="overwrite"
+        File conflict policy applied when writing each shard.
+    expected_out_hashes : list of str, optional
+        SHA-256 digests of expected shards. If provided, each written shard is
+        re-hashed and compared for exact byte equality.
+    record_materialization : bool, default=True
+        If True, record each written shard in CAS so later restores can skip
+        re-materializing identical outputs.
+
+    Returns
+    -------
+    list of Path
+        Absolute paths of all written Parquet shard files, in order.
+
+    Raises
+    ------
+    IOError
+        If a shard's computed hash differs from its recorded expected hash.
     """
     # --------- 1) Resolve sink parameters ----------
     target_dir = (
@@ -700,23 +791,6 @@ def run_save_images_to_parquet_replay(
             ordinal += 1
             meta = {"ordinal": ordinal}
             ordinal += 1
-
-        def _batch_bytes(batch) -> bytes:
-            import struct, numpy as np
-            # Deterministic framing: [count][item...], each item = [dtype][ndim][shape][data]
-            buf = bytearray()
-            buf += b"B0" + struct.pack("<Q", len(batch))
-            for x in batch:
-                a = np.ascontiguousarray(x)
-                dt = str(a.dtype).encode()
-                buf += b"T" + struct.pack("<I", len(dt)) + dt
-                buf += b"N" + struct.pack("<I", a.ndim)
-                buf += b"S" + struct.pack("<" + "Q"*a.ndim, *a.shape)
-                buf += b"D" + struct.pack("<Q", a.nbytes) + a.tobytes()
-            return bytes(buf)
-
-        def _batch_fp(batch, hasher) -> str:
-            return hasher.hash_bytes(_batch_bytes(batch))
 
         # Build table exactly like at runtime
         table = _build_parquet_table_from_images(

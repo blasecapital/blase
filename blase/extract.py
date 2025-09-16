@@ -273,64 +273,76 @@ class Extract:
         track: bool = True
     ) -> Iterator:
         """
-        Yield memory-aware batches of images from a directory.
+        Yield memory-aware batches of decoded images from a directory.
 
         Parameters
         ----------
         directory : str
             Root directory containing image files.
         pattern : str, default="**/*.jpg"
-            Glob pattern to match files (respects `recursive`).
+            Glob pattern to match files. Honors `recursive`.
         backend : {"pil", "cv2"}, default="pil"
-            Image decoding library.
+            Image decoding library selector.
         return_type : {"np", "pil", "tensor"}, default="np"
-            Format of returned images.
+            Type of decoded images.
         mode : {"auto", "manual"}, default="auto"
-            Batching policy:
-            - "auto": choose batch boundaries by decoded-bytes target (see `target_batch_bytes`).
+            Batching policy.
+            - "auto": target approx decoded bytes per batch (see `target_batch_bytes`).
             - "manual": fixed item count per batch (see `batch_size`).
-            In both modes `batch_size` can act as a hard ceiling if provided.
+            In both modes, `batch_size` acts as a hard ceiling when provided.
         safety_margin : float, default=0.15
-            Fractional headroom reserved when packing by bytes to avoid OOM (e.g., 0.15 = 15%).
+            Fractional headroom reserved when packing by bytes to reduce OOM risk.
         max_item_decoded_bytes : int, optional
-            Hard per-item upper bound on decoded size. Items exceeding this will be downscaled
-            (if `max_side` allows) or isolated into a single-item batch; if neither is possible
-            and `strict` is desired in the future, raise.
+            Per-item decoded-size cap. Oversized items are downscaled if `max_side`
+            allows, otherwise isolated into 1-item batches.
         batch_size : int, optional
-            Max number of images per batch (required when `mode="manual"`).
+            Max images per batch. Required when `mode="manual"`.
         target_batch_bytes : int, optional
-            Approximate decoded-bytes budget per batch (required when `mode="auto"` unless
-            determinable via system memory; recorded in step metadata).
+            Approx decoded-bytes budget per batch. If `mode="auto"` and omitted,
+            a default is inferred from system memory or 256 MiB fallback.
         filename_filter : callable, optional
-            Predicate `f(path:str) -> bool` to include/exclude files after globbing.
+            Predicate `f(path: str) -> bool` applied after globbing.
         shuffle : bool, default=False
             Shuffle file order before batching.
         seed : int, optional
-            RNG seed for reproducible shuffling. If `shuffle=True` and `seed is None`, a default is chosen.
+            RNG seed for reproducible shuffling. If `shuffle=True` and `seed is None`,
+            a deterministic default is chosen.
         recursive : bool, default=True
             Recurse into subdirectories for the glob.
         color : {"rgb", "gray"}, default="rgb"
-            Output color space; conversion happens in the backend adapter.
+            Output color space.
         max_side : int, optional
-            Downscale longer side to this length at decode time (preserves aspect ratio).
+            Downscale longer side to this length at decode time (keeps aspect ratio).
         track : bool, default=True
-            If True, record DAG/CAS events; if False (or no active Track), run untracked.
+            If True and an active tracker exists, emit DAG/CAS events. Otherwise run untracked.
 
         Yields
         ------
-        dict
-            A dictionary per batch with:
-            - "paths": list[str]
-            - "images": list/array/tensor of decoded images (per `return_type`)
-            - "meta": dict with lineage and batch planning details (or None if untracked)
+        dict or tuple
+            **Untracked mode** (`Track.get(track)` is None):
+                `dict` with keys:
+                - "paths": list[str]
+                - "images": decoded images (list/array/tensor per `return_type`)
+                - "meta": dict with batch planning details
+            **Tracked mode** (active tracker):
+                `tuple`:
+                - paths: list[str]
+                - is_last: bool
+                - images: decoded images (per `return_type`)
+                - meta: dict including upstream lineage, batch and manifest hashes
 
         Notes
         -----
         Dataset identity and replay:
-        - Computes a strong **manifest root hash** (Merkle over `(rel_path, content_hash)` in
-        deterministic order) and stores it in the manifest descriptor.
-        - Computes a **batch hash** per emitted batch from the manifest root + ordered item hashes.
-        - Both hashes are logged in tracked mode to support idempotent resume/replay.
+        - Computes a manifest **Merkle root** over `(rel_path, content_hash)` in
+        deterministic order and records it.
+        - Computes a **batch hash** from the manifest root and ordered item hashes.
+        - In tracked mode, both are logged to enable idempotent resume/replay.
+
+        Raises
+        ------
+        ValueError
+            If `mode` is invalid or `mode="manual"` without `batch_size`.
         """
         # ---------------- argument + dependency checks ----------------
         print("Resolving backend...")

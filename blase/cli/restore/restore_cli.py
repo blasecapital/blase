@@ -394,9 +394,61 @@ def _exec_plan_for_step(
     ephemeral_only: bool = False,
 ) -> Dict[str, Path]:
     """
-    Execute a forward plan ending at tip_step_hash.
-    Returns { produced_data_hash: Path(actual_output_file) } for sinks replayed.
-    If ephemeral_only=True, outputs are written without recording materializations.
+    Replay a DAG of recorded steps forward from any upstream roots to `tip_step_hash`.
+
+    This is the core engine used by `blase restore run --data <hash>` and similar
+    commands. It walks the stored execution graph, resolves upstream inputs,
+    and replays each step’s recorded function in dependency order, producing
+    exactly the same materialized files.
+
+    Parameters
+    ----------
+    run_path : Path
+        Root directory of the recorded run (contains `nodes/` and `cas/` stores).
+    tip_step_hash : str
+        Hash of the final step to replay. The function backtracks from this hash
+        to discover and execute all required upstream steps.
+    to_path : str or None
+        Optional override path for the final sink’s output. If supplied,
+        the final output (CSV file or Parquet directory) is written there
+        instead of the recorded default.
+    backend_override : str or None
+        Optional override for downstream I/O backends (e.g., a different
+        Parquet writer). Passed to sink replay functions if supported.
+    seen_steps : set of str, optional
+        Set of step hashes already executed. Steps in this set are skipped,
+        allowing incremental or multi-branch replays without duplication.
+    created_paths : list of Path, optional
+        Collects every on-disk path created during replay for caller inspection
+        or later cleanup.
+    ephemeral_only : bool, default=False
+        If True, write outputs but do not record them back into the CAS
+        materialization index. Useful for temporary previews or dry runs.
+
+    Returns
+    -------
+    dict
+        Mapping of `{produced_data_hash: Path(actual_output_file)}` for every
+        sink materialized during replay (e.g., CSV files, Parquet shards).
+
+    Notes
+    -----
+    - The replay algorithm performs a topological walk from each required
+      upstream step to the requested tip. Each known function type is handled
+      specifically:
+        * `blase.Extract.read_csv` and `blase.Extract.read_images` recreate
+          upstream batch generators.
+        * `blase.Transform.apply_function` re-applies stored user functions.
+        * `blase.Load.save_to_csv` and `blase.Load.save_images_to_parquet`
+          write final sink files and validate their hashes.
+    - Steps that have already been replayed (present in `seen_steps`) are
+      skipped. Outputs already present with matching CAS hashes are not
+      duplicated.
+    - If `ephemeral_only` is True, on-disk artifacts are created but not
+      registered as permanent CAS data, so subsequent runs will not treat
+      them as cached outputs.
+    - Raises `SystemExit` if required upstream anchors (e.g., manifest or
+      source data) are missing or inconsistent with recorded metadata.
     """
     plan = planner.plan_for_step(run_path, tip_step_hash) or []
     upstream = None
@@ -738,7 +790,58 @@ def _is_stream_fqn(fqn: str) -> bool:
     return any(fqn.endswith(s) for s in STREAM_FQNS)
 
 def _build_stream_for_step(run_path: Path, step_hash: str):
-    """Return a (batch, is_last) generator for any streaming step."""
+    """
+    Construct a streaming generator for a recorded step.
+
+    Given a `step_hash`, this inspects the recorded function type and returns
+    an upstream generator compatible with replay bindings:
+    - `Extract.read_csv` → `bindings.run_read_csv_restore(...)`
+    - `Extract.read_images` → `bindings.run_read_images_restore(...)`
+    - `Transform.apply_function` → chains to the nearest upstream stream
+      (from the plan or via lineage), then returns
+      `bindings.run_apply_function_restore(...)` seeded by that stream.
+    Non-stream steps delegate to `blase.restore.step(..., kind="data")`.
+
+    Parameters
+    ----------
+    run_path : Path
+        Root directory of the recorded run.
+    step_hash : str
+        Hash of the step to materialize as a stream.
+
+    Returns
+    -------
+    iterator
+        A generator yielding `(batch, is_last)` tuples, or a binding-specific
+        generator that internally yields `(batch, meta, is_last)` for image
+        pipelines and is consumed by downstream replay code. For non-stream
+        steps, the return value of `blase.restore.step(..., kind="data")` is
+        forwarded.
+
+    Notes
+    -----
+    - For `Extract.read_csv`, the realized inputs include
+      `__expected_source_hash__` when a recorded source hash exists.
+    - For `Extract.read_images`, realized inputs may include `manifest`
+      and a list of `batch` hashes when present in recorded inputs.
+    - For `Transform.apply_function`, the function:
+        1) Attempts to find the nearest upstream streaming node from the
+           topological plan. If none is found, it falls back to lineage:
+           manifest → batch_desc → batch producer step.
+        2) Loads the exact recorded callable via `code.load_callable_from_blob`
+           using the recorded code hash.
+        3) Returns the binding `run_apply_function_restore` wired to the
+           upstream stream (or a materialized path for older CSV runs).
+    - If no suitable upstream can be located for a transform, a
+      `SystemExit` is raised by the caller block that invokes this helper.
+
+    See Also
+    --------
+    run_read_csv_restore
+    run_read_images_restore
+    run_apply_function_restore
+    blase.restore.step
+    """
     st  = store.load_step(run_path, step_hash)
     fqn = st["function_fqn"]
 
@@ -833,111 +936,81 @@ def _build_stream_for_step(run_path: Path, step_hash: str):
 
 def cmd_run(args):
     """
-    Execute the ``blase restore run`` command for either a data hash or a step hash.
+    Run the `blase restore run` CLI for a data hash or a step hash.
 
-    This is the CLI backend for the ``restore run`` subcommand. It supports two
-    mutually exclusive targets:
-
-    * **Data-centric** (``--data <DATA_HASH>``): Attempt a fast-path materialization
-      from CAS/materializations; if unavailable, replay the producer plan to
-      reproduce the exact bytes for the requested data hash.
-    * **Step-centric** (``--step <STEP_HASH>``): Perform one of the modes
-      (materialize, verify, replay) against a specific recorded step, wiring
-      an upstream generator when the step is a sink (``blase.Load.save_to_csv``).
+    This dispatches to materialize, verify, or replay workflows using the
+    recorded run metadata and CAS, wiring upstream generators for sink steps.
 
     Parameters
     ----------
     args : argparse.Namespace
-        Parsed CLI options. Expected attributes include:
+        Parsed options.
 
         General
             run : str or None
-                Run identifier or path. If omitted, the active run is resolved.
-            mode : {"verify", "materialize", "replay"}
-                Execution mode; defaults depend on path.
+                Run ID or path. If None, the active run is used.
+            mode : {"materialize", "verify", "replay"}
+                Execution mode.
             to : str or None
-                Destination path (file or directory) for outputs; parents are
-                created as needed.
+                Destination path (file or directory) for outputs.
             on_conflict : {"fail", "rename", "overwrite"} or None
-                Conflict behavior for writing outputs. If not provided, the
-                default configured policy is used.
+                Conflict policy for writing outputs. If None, defaults apply.
             keep_intermediates : bool
-                If ``True``, do not delete intermediate files produced during
-                replay; otherwise intermediates are cleaned up on success.
+                If True, do not delete intermediate files after replay.
             limit_batches : int or None
-                Optional maximum number of batches to consume in verify paths.
+                Max batches to consume when verifying streams.
             backend : {"pandas", "polars"} or None
-                Optional backend override for sink replay.
+                Optional backend override for sink replays.
 
-        Target selection (mutually exclusive)
-            step : str or None
-                Target step hash for step-centric operations.
+        Target (mutually exclusive)
             data : str or None
-                Target data hash for data-centric operations.
+                Target data hash for data-centric workflows.
+            step : str or None
+                Target step hash for step-centric workflows.
 
     Returns
     -------
     int
-        Conventional CLI exit code.
-
-        * ``0`` : success (materialized, verified, or replayed)
-        * ``2`` : no recorded outputs for the step in materialize mode
-        * ``3`` : materialization would require replay (instructional hint printed)
+        Exit code:
+        - 0 on success,
+        - 2 when a step has no recorded outputs in materialize mode,
+        - 3 when fast materialization is not possible and replay is required.
 
     Raises
     ------
     SystemExit
-        Raised for usage or state errors, including (non-exhaustive):
-
-        * No active run and no ``--run`` provided.
-        * Missing or unreadable ``nodes.db`` for the resolved run.
-        * Neither ``--step`` nor ``--data`` provided (or both provided).
-        * No producer step recorded for a data hash that requires replay.
-        * Final output does not exist after replay, or content hash mismatch.
-        * Unknown/unsupported ``--mode`` value.
+        On usage/state errors, including:
+        - No active run and no `--run` provided.
+        - Missing or unreadable `nodes.db`.
+        - Neither or both of `--data` and `--step`.
+        - No producer step for a data hash that requires replay.
+        - Final output missing or content-hash mismatch.
+        - Unknown `--mode`.
 
     Notes
     -----
-    **Data-centric path (``--data``)**
+    Data-centric (`--data`):
+      1. Try fast-path materialization via CAS; verify bytes.
+      2. If unavailable, replay the producer plan, verify final bytes,
+         and clean intermediates unless `--keep_intermediates`.
 
-    1. **Fast-path materialization**: Attempts to bring the artifact back from
-       CAS/materializations via :func:`blase.restoring.materialize.ensure_local`.
-       On success, verifies bytes against the requested data hash, prints
-       ``Materialized: <path>``, and returns ``0``.
-    2. **Replay**: If fast path is unavailable (``NeedReplay``), the producer
-       step is looked up and its forward plan executed via
-       :func:`_exec_plan_for_step`. The final artifact is verified against the
-       requested data hash. Intermediate files created during replay are deleted
-       unless ``--keep_intermediates`` is set.
-
-    **Step-centric path (``--step``)**
-
-    * ``materialize``: Bring back the recorded output for the step without
-      replay. Returns ``0`` on success, ``3`` if replay would be required.
-    * ``verify``: Stream the step’s output without writing it. For sink steps
-      (``blase.Load.save_to_csv``), a nearest upstream Transform/Extract
-      generator is constructed to feed the sink, printing per-batch progress.
-    * ``replay``: For sink steps, builds an upstream generator and writes the
-      sink output to ``--to`` (or a default path); for non-sink steps, streams
-      restored batches.
-
-    **Seeds and append semantics**
-
-    During sink replay, a viable seed (e.g., prior run’s output) may be used to
-    support append/overwrite semantics, resolved without unnecessary copying when
-    possible. Ephemeral seeds are cleaned up unless ``--keep_intermediates`` is set.
+    Step-centric (`--step`):
+      - materialize: bring back recorded outputs only (no replay).
+      - verify: stream results without writing; wires an upstream generator
+        for sink steps.
+      - replay: wire upstream and write sink outputs to `--to` or defaults.
 
     Examples
     --------
-    Materialize by data hash to a specific file::
+    Materialize a data hash to a file::
 
         blase restore run --data 0123abcd... --mode materialize --to out.csv
 
-    Replay a sink step to a path, overwriting if it exists::
+    Replay a sink step to a path::
 
-        blase restore run --step deadbeef... --mode replay --to restored.csv --on-conflict overwrite
+        blase restore run --step deadbeef... --mode replay --to restored.csv
 
-    Verify a transform step without writing (limit batches)::
+    Verify a transform step with a batch cap::
 
         blase restore run --step cafe... --mode verify --limit-batches 5
     """

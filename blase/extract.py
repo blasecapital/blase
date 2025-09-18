@@ -1,5 +1,18 @@
 from __future__ import annotations
-from typing import Callable, Iterable, Dict, Any, Optional, List, Literal, Iterator
+from typing import (
+    Callable,
+    Iterable,
+    Dict,
+    Any,
+    Optional,
+    List,
+    Literal,
+    Iterator,
+    Sequence,
+    Union,
+    Tuple,
+)
+from pathlib import Path
 import json
 
 import numpy as np
@@ -20,6 +33,18 @@ from blase.extracting.image_backend import (
     decode_batch_cv2,
     iter_batches_from_plan,
     compute_batch_hash,
+)
+from blase.extracting.parquet_backend import (
+    _normalize_source_list,
+    _scan_parquet_manifest_stub,
+    _ensure_parquet_content_hashes,
+    _compute_manifest_root_hash_stub,
+    _plan_parquet_batches_stub,
+    _read_parquet_table_stub,
+    _compute_batch_hash_stub,
+    _auto_detect_image_cols,
+    _validate_image_schema,
+    _iter_images_from_table,
 )
 from blase.extracting.manifest_utils import (
     build_manifest_descriptor,
@@ -583,6 +608,249 @@ class Extract:
             stream.close_error(type(e), e, e.__traceback__)
             raise
 
+    def read_parquet(
+        self,
+        source: Union[str, Path, Sequence[Union[str, Path]]],
+        *,
+        pattern: str = "**/*.parquet",
+        recursive: bool = True,
+        format: Literal["auto", "parquet", "dataset", "feather"] = "auto",
+        return_type: Literal["arrow", "pandas"] = "arrow",
+        columns: Optional[Sequence[str]] = None,
+        filters: Any = None,
+        batch_size: Optional[int] = None,
+        use_threads: bool = True,
+        memory_map: bool = True,
+        deterministic: bool = True,
+        max_rows: Optional[int] = None,
+        limit_files: Optional[int] = None,
+        schema: "pa.schema | None" = None,
+        to_pandas_kwargs: Optional[dict] = None,
+        # images mode additions
+        mode: Literal["table", "images"] = "table",
+        bytes_col: str = "img_bytes",
+        dims_cols: Tuple[str, str, str] = ("height", "width", "channels"),
+        label_col: Optional[str] = "label",
+        path_col: Optional[str] = "path",
+        decode: Optional[Literal["np", "pil", "cv2", "tensor"]] = None,
+        images_return: Literal["bytes", "np", "pil", "tensor"] = "bytes",
+        # tracking
+        track: bool = True,
+    ) -> Iterator:
+        if format not in ("auto", "parquet", "dataset", "feather"):
+            raise ValueError(
+                f"Unsupported format: {format!r}. Must be 'auto', 'parquet', 'dataset', 'feather'."
+            )
+
+        if return_type not in ("arrow", "pandas"):
+            raise ValueError(
+                f"Unsupported return_type: {return_type!r}. Must be 'arrow' or 'pandas'."
+            )
+
+        if mode not in ("table", "images"):
+            raise ValueError(
+                f"Unsupported mode: {mode!r}. Must be 'table' or 'images'."
+            )
+
+        if decode is not None and decode not in ("np", "pil", "cv2", "tensor"):
+            raise ValueError(
+                f"Unsupported decode: {decode!r}. Must be 'np', 'pil', 'cv2', 'tensor'."
+            )
+
+        if images_return not in ("bytes", "np", "pil", "tensor"):
+            raise ValueError(
+                f"Unsupported images_return: {images_return!r}. Must be 'bytes', 'np', 'pil', 'tensor'."
+            )
+
+        # ---------- 1) Resolve + normalize source(s) ----------
+        src_list = _normalize_source_list(
+            source, pattern, recursive, deterministic, limit_files
+        )
+
+        # ---------- 2) Build manifest + identity ----------
+        manifest = _scan_parquet_manifest_stub(
+            sources=src_list,
+            fmt=format,
+            columns=columns,
+            filters=filters,
+            schema=schema,
+        )
+
+        # ---------- 3) Plan batches (row-based) ----------
+        batch_plan = _plan_parquet_batches_stub(
+            manifest=manifest,
+            mode=mode,
+            batch_size=batch_size,
+            max_rows=max_rows,
+        )
+
+        # ---------- 4) Untracked path ----------
+        tracker = Track.get(track)
+        if tracker is None:
+            for i, plan in enumerate(batch_plan, 1):
+                table_like = _read_parquet_table_stub(
+                    manifest, plan, return_type, columns, use_threads, to_pandas_kwargs
+                )
+                meta = {
+                    "ordinal": i,
+                    "count": plan["count"],
+                    "batch_hash": "",
+                    "manifest_root_hash": "",
+                    "schema_fp": manifest.get("schema_fp"),
+                    "source_kind": manifest.get("kind"),
+                    "batch_policy": {"mode": "rows", "batch_size": batch_size},
+                }
+                yield {"data": table_like, "meta": meta}
+            return
+
+        # ---------- 5) Tracked path ----------
+        manifest = _ensure_parquet_content_hashes(manifest=manifest)
+        root_hash = _compute_manifest_root_hash_stub(manifest)
+        params = {
+            "sources": [str(p) for p in src_list],
+            "format": format,
+            "return_type": return_type,
+            "columns": list(columns) if columns else None,
+            "filters": bool(filters),
+            "batch_size": batch_size,
+            "use_threads": use_threads,
+            "memory_map": memory_map,
+            "deterministic": deterministic,
+            "max_rows": max_rows,
+            "limit_files": limit_files,
+            "schema": bool(schema),
+        }
+
+        stream = tracker.stream("blase.Extract.read_parquet", params, code_fn=None)  # type: ignore[attr-defined]
+
+        try:
+            manifest_desc = build_manifest_descriptor(
+                manifest=manifest,
+                deterministic=deterministic,
+                root_hash=root_hash,
+            )
+            manifest_hash = stream.step.register_data(  # type: ignore[attr-defined]
+                kind="table.manifest",
+                version="1",
+                path_or_bytes=json.dumps(manifest_desc, ensure_ascii=False).encode(
+                    "utf-8"
+                ),
+                metadata=manifest_desc,
+            )
+            stream.step.add_output(manifest_hash, name="manifest")  # type: ignore[attr-defined]
+            dataset_id = ensure_dataset_for_manifest(
+                manifest_hash=manifest_hash,
+                manifest=manifest,
+                tracker=stream.step,
+                cache_member_fields=True,
+                root_hash=root_hash,
+            )
+
+            for i, plan in enumerate(batch_plan, 1):
+                batch_hash = _compute_batch_hash_stub(root_hash, plan)
+
+                batch_meta_desc = {
+                    "manifest_hash": manifest_hash,
+                    "dataset_id": dataset_id,
+                    "ordinal": i,
+                    "fragment": plan.get("fragment"),
+                    "row_group": plan.get("row_group"),
+                    "offset": plan.get("offset", 0),
+                    "count": plan["count"],
+                    "batch_hash": batch_hash,
+                    "manifest_root_hash": root_hash,
+                    "schema_fp": manifest.get("schema_fp"),
+                }
+                bmeta_hash = stream.step.register_data(  # type: ignore[attr-defined]
+                    kind="table.batch.meta",
+                    version="1",
+                    path_or_bytes=json.dumps(
+                        batch_meta_desc, ensure_ascii=False
+                    ).encode("utf-8"),
+                    metadata=batch_meta_desc,
+                )
+                stream.step.add_output(bmeta_hash, name=f"batch_desc_{i}")  # type: ignore[attr-defined]
+                btoken_hash = stream.step.register_data(  # type: ignore[attr-defined]
+                    kind="table.batch",
+                    version="1",
+                    path_or_bytes=batch_hash.encode("utf-8"),
+                    metadata={
+                        "batch_hash": batch_hash,
+                        "manifest_hash": manifest_hash,
+                        "ordinal": i,
+                    },
+                )
+                stream.step.add_output(btoken_hash, name=f"batch_{i}")  # type: ignore[attr-defined]
+
+                table_like = _read_parquet_table_stub(
+                    manifest,
+                    plan,
+                    return_type,
+                    columns,
+                    mode=mode,
+                )
+
+                meta = {
+                    "upstream": [
+                        {"id": manifest_hash, "role": "manifest"},
+                        {"id": bmeta_hash, "role": "batch_desc"},
+                        {"id": btoken_hash, "role": "batch"},
+                    ],
+                    "producer_step": getattr(stream.step, "step_hash", None),  # type: ignore[attr-defined]
+                    "ordinal": i,
+                    "count": plan["count"],
+                    "batch_hash": batch_hash,
+                    "manifest_root_hash": root_hash,
+                    "schema_fp": manifest.get("schema_fp"),
+                    "batch_policy": {"mode": "rows", "batch_size": batch_size},
+                }
+                meta_no_up = dict(meta)
+                meta_no_up.pop("upstream", None)
+                new_meta = stream.emit(last_batch=plan["is_last"], meta=meta_no_up)  # type: ignore[attr-defined]
+                new_meta["upstream"] = meta["upstream"]
+
+                if mode == "images":
+                    # 1) resolve columns
+                    eff_bytes, eff_dims, eff_label, eff_path = _auto_detect_image_cols(
+                        table_like=table_like,
+                        bytes_col=bytes_col,
+                        dims_cols=dims_cols,
+                        label_col=label_col,
+                        path_col=path_col,
+                    )
+                    # 2) validate schema
+                    _validate_image_schema(
+                        table_like=table_like,
+                        bytes_col=eff_bytes,
+                        dims_cols=eff_dims,
+                        label_col=eff_label,
+                        path_col=eff_path,
+                    )
+                    # 3) iterate rows → per-image items
+                    count = 0
+                    for item in _iter_images_from_table(
+                        table_like=table_like,
+                        return_type=return_type,
+                        bytes_col=eff_bytes,
+                        dims_cols=eff_dims,
+                        label_col=eff_label,
+                        path_col=eff_path,
+                        decode=decode,
+                        images_return=images_return,
+                    ):
+                        count += len(item[0])
+                        yield (item, plan["is_last"], new_meta)
+                    new_meta["items"] = count
+                else:
+                    yield (table_like, plan["is_last"], new_meta)
+
+            stream.close_ok()  # type: ignore[attr-defined]
+
+        except Exception as e:
+            stream.close_error(type(e), e, e.__traceback__)  # type: ignore[attr-defined]
+            raise
+        pass
+
     def read_json(
         self,
         file_path: str,
@@ -638,9 +906,6 @@ class Extract:
         """
 
         backend = resolve_backend_csv(backend)
-
-    def read_parquet(self, file_path: str, batch_size: int = None) -> Iterable[Any]:
-        pass
 
     def read_hdf5(self, file_path: str, batch_size: int = None) -> Iterable[np.ndarray]:
         pass

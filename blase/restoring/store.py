@@ -200,3 +200,66 @@ def read_images_params_for_manifest(
     params.setdefault("safety_margin", 0.15)
     params.setdefault("hash_mode", "content")
     return params
+
+
+def read_parquet_params_for_manifest(
+    run_path: Path, manifest_hash: str, ts_before: Optional[str] = None
+) -> Optional[Dict[str, Any]]:
+    """
+    Return the params_json dict from the Extract.read_parquet step that produced `manifest_hash`.
+    If ts_before is given, pick the latest at-or-before that timestamp.
+    """
+    db = run_path / "nodes" / "nodes.db"
+    sql = """
+      SELECT s.params_json
+      FROM steps s
+      JOIN step_outputs o ON o.step_hash = s.step_hash
+      WHERE s.function_fqn = 'blase.Extract.read_parquet'
+        AND o.data_hash = ?
+    """
+    args = [manifest_hash]
+    if ts_before:
+        sql += " AND s.ts_start <= ?"
+        args.append(ts_before)
+    sql += " ORDER BY s.ts_start DESC LIMIT 1"
+
+    with _conn(db) as c:
+        row = c.execute(sql, tuple(args)).fetchone()
+    if not row:
+        return None
+
+    try:
+        params: Dict[str, Any] = json.loads(row[0]) or {}
+    except Exception:
+        return None
+
+    # Sane defaults for restore
+    params.setdefault("pattern", "**/*.parquet")
+    params.setdefault("recursive", True)
+    params.setdefault("format", "auto")
+    params.setdefault("return_type", "arrow")
+    params.setdefault("columns", None)
+    params.setdefault("filters", None)
+    params.setdefault("batch_size", None)
+    params.setdefault("use_threads", True)
+    params.setdefault("memory_map", True)
+    params.setdefault("deterministic", True)
+    params.setdefault("max_rows", None)
+    params.setdefault("limit_files", None)
+    params.setdefault("schema", None)
+    params.setdefault("to_pandas_kwargs", {})
+
+    # Images mode extensions
+    params.setdefault("mode", "images")
+    params.setdefault("bytes_col", "img_bytes")
+    dc = params.get("dims_cols")
+    if not (isinstance(dc, (list, tuple)) and len(dc) == 3):
+        params["dims_cols"] = ("height", "width", "channels")
+    else:
+        params["dims_cols"] = tuple(dc)
+    params.setdefault("label_col", "label")
+    params.setdefault("path_col", "path")
+    params.setdefault("decode", None)
+    params.setdefault("images_return", "bytes")
+
+    return params

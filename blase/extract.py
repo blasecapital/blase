@@ -699,6 +699,13 @@ class Extract:
                     "schema_fp": manifest.get("schema_fp"),
                     "source_kind": manifest.get("kind"),
                     "batch_policy": {"mode": "rows", "batch_size": batch_size},
+                    "mode": mode,
+                    "bytes_col": bytes_col,
+                    "dims_cols": list(dims_cols) if dims_cols else None,
+                    "label_col": label_col,
+                    "path_col": path_col,
+                    "decode": decode,
+                    "images_return": images_return,
                 }
                 yield {"data": table_like, "meta": meta}
             return
@@ -719,6 +726,13 @@ class Extract:
             "max_rows": max_rows,
             "limit_files": limit_files,
             "schema": bool(schema),
+            "mode": mode,
+            "bytes_col": bytes_col,
+            "dims_cols": list(dims_cols) if dims_cols else None,
+            "label_col": label_col,
+            "path_col": path_col,
+            "decode": decode,
+            "images_return": images_return,
         }
 
         stream = tracker.stream("blase.Extract.read_parquet", params, code_fn=None)  # type: ignore[attr-defined]
@@ -810,6 +824,16 @@ class Extract:
                 new_meta["upstream"] = meta["upstream"]
 
                 if mode == "images":
+                    try:
+                        col = (bytes_col if mode == "images" else (columns or [None])[0])
+                        if col:
+                            if return_type == "arrow":
+                                arr = table_like.column(col)
+                                print(f"[RPQ.TABLE] rows={arr.length()} nulls({col})={arr.null_count}")
+                            else:
+                                print(f"[RPQ.TABLE] rows={len(table_like)} nulls({col})={int(table_like[col].isna().sum())}")
+                    except Exception as e:
+                        print(f"[RPQ.TABLE] inspect failed: {e!r}")
                     # 1) resolve columns
                     eff_bytes, eff_dims, eff_label, eff_path = _auto_detect_image_cols(
                         table_like=table_like,
@@ -827,8 +851,22 @@ class Extract:
                         path_col=eff_path,
                     )
                     # 3) iterate rows → per-image items
-                    count = 0
-                    for item in _iter_images_from_table(
+                    imgs: List[Any] = []
+                    lbls: Optional[List[Any]] = [] if eff_label else None
+                    pths: List[Optional[str]] = []
+
+                    try:
+                        bcol = (columns and columns[0]) or bytes_col  # fallback
+                        if return_type == "arrow":
+                            arr = table_like.column(bcol)
+                            print(f"[RPQ.TABLE] rows={arr.length()} nulls(img_bytes)={arr.null_count}")
+                        else:  # pandas
+                            nulls = int(table_like[bcol].isna().sum())
+                            print(f"[RPQ.TABLE] rows={len(table_like)} nulls(img_bytes)={nulls}")
+                    except Exception as e:
+                        print(f"[RPQ.TABLE] inspect failed: {e!r}")
+
+                    for (one_imgs, one_labels, one_paths) in _iter_images_from_table(
                         table_like=table_like,
                         return_type=return_type,
                         bytes_col=eff_bytes,
@@ -838,11 +876,13 @@ class Extract:
                         decode=decode,
                         images_return=images_return,
                     ):
-                        count += len(item[0])
-                        yield (item, plan["is_last"], new_meta)
-                    new_meta["items"] = count
-                else:
-                    yield (table_like, plan["is_last"], new_meta)
+                        imgs.extend(one_imgs)
+                        if lbls is not None:
+                            lbls.extend(one_labels or [None] * len(one_imgs))
+                        pths.extend(one_paths or [None] * len(one_imgs))
+
+                    new_meta["items"] = len(imgs)
+                    yield ((imgs, lbls if lbls is not None else None, pths), plan["is_last"], new_meta)
 
             stream.close_ok()  # type: ignore[attr-defined]
 

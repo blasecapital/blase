@@ -1031,8 +1031,14 @@ def _iter_images_from_table(
         paths = to_list(path_col)
 
     # -------- iterate rows --------
+    def _is_bytes(x): return isinstance(x, (bytes, bytearray))
     for i in range(n):
         b = bytes_list[i]
+        p = paths[i] if paths is not None and i < len(paths) else None
+        if b is None:
+            print(f"[RPQ.ROW] i={i} img_bytes=None path={p}")
+        elif not _is_bytes(b):
+            print(f"[RPQ.ROW] i={i} img_bytes_type={type(b).__name__} path={p}")
         h = int(heights[i]) if heights[i] is not None else None
         w = int(widths[i]) if widths[i] is not None else None
         c = int(chans[i]) if chans[i] is not None else None
@@ -1045,7 +1051,7 @@ def _iter_images_from_table(
                 raise ValueError(f"Row {i}: {bytes_col} is not bytes-like.")
 
         if h is None or w is None or c is None:
-            # dimensions are required for validation; proceed but do not trust shape
+            print("WARNING h, w, or c is None")
             pass
 
         img_obj = _maybe_decode(b, h or 0, w or 0, c or 3)

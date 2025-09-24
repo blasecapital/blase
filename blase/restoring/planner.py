@@ -165,18 +165,31 @@ def plan_for_step(run_path: Path, tip_step_hash: str) -> List[str]:
                 db, "%blase.Transform.apply_function%", src, ts
             )
             if tr:
-                # prefer image lineage if transform had a manifest
+                # prefer parquet lineage if transform had a manifest
                 man = _input_hash_for_role(db, tr, "manifest")
+                tr_ts = _step_row(db, tr)["ts_start"]
                 if man:
-                    ex_img = _latest_with_input_before(
+                    # try parquet first
+                    ex_tbl = _latest_with_input_before(
                         db,
-                        "%blase.Extract.read_images%",
+                        "%blase.Extract.read_parquet%",
                         role="manifest",
                         data_hash=man,
-                        ts_before=_step_row(db, tr)["ts_start"],
+                        ts_before=tr_ts,
                     )
-                    if ex_img:
-                        plan.append(ex_img)
+                    if ex_tbl:
+                        plan.append(ex_tbl)
+                    else:
+                        ex_img = _latest_with_input_before(
+                            db,
+                            "%blase.Extract.read_images%",
+                            role="manifest",
+                            data_hash=man,
+                            ts_before=_step_row(db, tr)["ts_start"],
+                        )
+                        if ex_img:
+                            plan.append(ex_img)
+                # TODO Make a better fallback or update read_csv
                 else:
                     ex_csv = _latest_with_source_before(
                         db,
@@ -215,17 +228,38 @@ def plan_for_step(run_path: Path, tip_step_hash: str) -> List[str]:
 
             ex_img = None
             if man_tr:
-                ex_img = _latest_producer_of_output_before(
-                    db, "%blase.Extract.read_images%", data_hash=man_tr, ts_before=tr_ts
+                # prefer parquet, then images
+                ex_tbl = _latest_producer_of_output_before(
+                    db,
+                    "%blase.Extract.read_parquet%",
+                    data_hash=man_tr,
+                    ts_before=tr_ts,
                 )
-                if ex_img is None:
-                    ex_img = _latest_with_input_before(
+                if ex_tbl is None:
+                    ex_tbl = _latest_with_input_before(
                         db,
-                        "%blase.Extract.read_images%",
+                        "%blase.Extract.read_parquet%",
                         role="manifest",
                         data_hash=man_tr,
                         ts_before=tr_ts,
                     )
+                if ex_tbl:
+                    plan.append(ex_tbl)
+                else:
+                    ex_img = _latest_producer_of_output_before(
+                        db,
+                        "%blase.Extract.read_images%",
+                        data_hash=man_tr,
+                        ts_before=tr_ts,
+                    )
+                    if ex_img is None:
+                        ex_img = _latest_with_input_before(
+                            db,
+                            "%blase.Extract.read_images%",
+                            role="manifest",
+                            data_hash=man_tr,
+                            ts_before=tr_ts,
+                        )
 
             if ex_img:
                 plan.append(ex_img)
@@ -259,11 +293,23 @@ def plan_for_step(run_path: Path, tip_step_hash: str) -> List[str]:
     elif fqn.endswith("Transform.apply_function"):
         man = _input_hash_for_role(db, tip_step_hash, "manifest")
         if man:
-            ex_img = _latest_producer_of_output_before(
-                db, "%blase.Extract.read_images%", data_hash=man, ts_before=ts
+            ex_tbl = _latest_producer_of_output_before(
+                db, "%blase.Extract.read_parquet%", data_hash=man, ts_before=ts
+            ) or _latest_with_input_before(
+                db,
+                "%blase.Extract.read_parquet%",
+                role="manifest",
+                data_hash=man,
+                ts_before=ts,
             )
-            if ex_img:
-                plan.append(ex_img)
+            if ex_tbl:
+                plan.append(ex_tbl)
+            else:
+                ex_img = _latest_producer_of_output_before(
+                    db, "%blase.Extract.read_images%", data_hash=man, ts_before=ts
+                )
+                if ex_img:
+                    plan.append(ex_img)
         elif src:
             ex_csv = _latest_with_source_before(db, "%blase.Extract.read_csv%", src, ts)
             if ex_csv:
@@ -278,6 +324,9 @@ def plan_for_step(run_path: Path, tip_step_hash: str) -> List[str]:
         return [tip_step_hash]
 
     elif fqn.endswith("Extract.read_images"):
+        return [tip_step_hash]
+
+    elif fqn.endswith("Extract.read_parquet"):
         return [tip_step_hash]
 
     # ---------------------------

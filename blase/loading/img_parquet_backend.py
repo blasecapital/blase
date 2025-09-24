@@ -156,6 +156,17 @@ def _build_parquet_table_from_images(
     """Create a Arrow table with encoded bytes + dims + optional labels/paths + lineage."""
     images, labels, paths = _normalize_images_batch(data, meta)
 
+    # drop/align invalid rows here to avoid NoneType in encoder
+    bad_ix = [i for i, x in enumerate(images) if x is None]
+    if bad_ix:
+        # keep indices
+        keep = [i for i in range(len(images)) if i not in bad_ix]
+        images = [images[i] for i in keep]
+        if labels is not None:
+            labels = [labels[i] if i < len(labels) else None for i in keep]
+        if paths is not None:
+            paths = [paths[i] if i < len(paths) else None for i in keep]
+
     enc_bytes, heights, widths, chans = [], [], [], []
     for img in images:
         u8 = _ensure_uint8_rgb(img)

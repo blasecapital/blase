@@ -5,6 +5,8 @@ from datetime import datetime
 import os
 import json
 
+import numpy as np
+
 from blase.extracting.csv_backend import read_batches_pandas, read_batches_polars
 from blase.extracting.image_backend import (
     scan_manifest_headers,
@@ -16,6 +18,18 @@ from blase.extracting.image_backend import (
     decode_batch_cv2,
     iter_batches_from_plan,
     compute_batch_hash,
+)
+from blase.extracting.parquet_backend import (
+    _normalize_source_list,
+    _scan_parquet_manifest_stub,
+    _ensure_parquet_content_hashes,
+    _compute_manifest_root_hash_stub,
+    _plan_parquet_batches_stub,
+    _read_parquet_table_stub,
+    _compute_batch_hash_stub,
+    _auto_detect_image_cols,
+    _validate_image_schema,
+    _iter_images_from_table,
 )
 from blase.load import Load
 from blase.restoring import store, cas
@@ -34,6 +48,12 @@ REGISTRY = {
         "source": "directory",
         "manifest": "_manifest_hash",
         "batch": "_batch_desc",
+    },
+    "blase.Extract.read_parquet": {
+        "source": "source",
+        "manifest": "_manifest_hash",
+        "batch": "_batch_desc",
+        "batch_desc": "_batch_desc",
     },
 }
 
@@ -474,6 +494,215 @@ def run_read_images_restore(
         yield decoded, meta, is_last
 
 
+def run_read_parquet_restore(
+    *,
+    run_path: Path,
+    params: Dict[str, Any],
+    realized: Dict[str, Any],
+    transform_fn=None,  # unused; kept for uniformity
+) -> Iterator[Tuple[Any, Dict, bool]]:
+    """
+    Restore a prior `Extract.read_parquet` step deterministically.
+    Yields `(data, meta, is_last)` where `data` is either a table (arrow/pandas)
+    or, in images mode, a tuple `(images, labels|None, paths)`.
+    """
+
+    # ---------- CAS loaders ----------
+    def _load_manifest_desc(run_path: Path, h: str) -> Dict[str, Any]:
+        # expects kind 'table.manifest'
+        return _load_cas_json(run_path, h, kind="table.manifest") or {}
+
+    def _try_load_batch_desc(run_path: Path, h: str) -> Dict[str, Any]:
+        # accept either 'table.batch.meta' (preferred) or 'table.batch'
+        try:
+            return _load_cas_json(run_path, h, kind="table.batch.meta")
+        except FileNotFoundError:
+            pass
+        b = _load_cas_json(run_path, h, kind="table.batch")  # may raise
+        return {
+            "manifest_hash": b.get("manifest_hash"),
+            "ordinal": b.get("ordinal"),
+            "count": b.get("count"),
+            "batch_hash": b.get("batch_hash"),
+        }
+
+    # ---------- resolve recorded params ----------
+    pattern = params.get("pattern", "**/*.parquet")
+    recursive = bool(params.get("recursive", True))
+    fmt = params.get("format", "auto")
+    return_type = params.get("return_type", "arrow")
+    columns = params.get("columns")
+    filters = params.get("filters")
+    batch_size = params.get("batch_size")
+    use_threads = bool(params.get("use_threads", True))
+    memory_map = bool(params.get("memory_map", True))
+    deterministic = bool(params.get("deterministic", True))
+    max_rows = params.get("max_rows")
+    limit_files = params.get("limit_files")
+    schema = params.get("schema")
+    mode = params.get("mode", "table")
+    bytes_col = params.get("bytes_col", "img_bytes")
+    dims_cols = tuple(params.get("dims_cols", ("height", "width", "channels")))
+    label_col = params.get("label_col", "label")
+    path_col = params.get("path_col", "path")
+    decode = params.get("decode")
+    images_return = params.get("images_return", "bytes")
+    to_pandas_kwargs = params.get("to_pandas_kwargs") or {}
+
+    # recorded manifest/batches
+    manifest_hash = realized.get("manifest")
+    rec_ids = realized.get("batch_descs") or realized.get("batch") or []
+    recorded_batch_descs = []
+    for h in rec_ids:
+        try:
+            recorded_batch_descs.append(_try_load_batch_desc(run_path, h))
+        except FileNotFoundError:
+            pass
+    if not recorded_batch_descs:
+        recorded_batch_descs = None
+
+    # sources: prefer recorded explicit sources; else derive from 'source' path
+    recorded_sources = realized.get("sources") or params.get("sources")
+    src_input = recorded_sources or realized.get("source") or params.get("source")
+    if not src_input:
+        raise RuntimeError(
+            "read_parquet restore requires recorded 'sources' or 'source'."
+        )
+
+    # ---------- rebuild manifest ----------
+    if isinstance(src_input, (list, tuple)):
+        src_list = [Path(s) for s in src_input]
+    else:
+        src_list = _normalize_source_list(
+            source=src_input,
+            pattern=pattern,
+            recursive=recursive,
+            deterministic=deterministic,
+            limit_files=limit_files,
+        )
+
+    manifest = _scan_parquet_manifest_stub(
+        sources=src_list, fmt=fmt, columns=columns, filters=filters, schema=schema
+    )
+
+    manifest = _ensure_parquet_content_hashes(manifest=manifest)  # per-file identity
+    root_hash_now = _compute_manifest_root_hash_stub(manifest)
+
+    if manifest_hash:
+        desc = _load_manifest_desc(run_path, manifest_hash)
+        expected_root = (desc.get("identity") or {}).get("root_hash") or desc.get(
+            "root_hash"
+        )
+        if expected_root and expected_root != root_hash_now:
+            raise RuntimeError(
+                f"Restore aborted: root_hash mismatch. current={root_hash_now[:12]} "
+                f"recorded={expected_root[:12]}"
+            )
+
+    # ---------- rebuild batch plan ----------
+    batch_plan = _plan_parquet_batches_stub(
+        manifest=manifest,
+        mode=mode,
+        batch_size=batch_size,
+        max_rows=max_rows,
+    )
+
+    # ---------- replay and validate ----------
+    for i, plan in enumerate(batch_plan, 1):
+        batch_hash = _compute_batch_hash_stub(root_hash_now, plan)
+
+        rec = None
+        if recorded_batch_descs:
+            if i - 1 >= len(recorded_batch_descs):
+                raise RuntimeError("Recorded batch metas shorter than planned batches.")
+            rec = recorded_batch_descs[i - 1]
+            rec_count = rec.get("count")
+            if isinstance(rec_count, int) and rec_count != int(plan.get("count", 0)):
+                raise RuntimeError(
+                    f"Batch #{i} size mismatch: recorded={rec_count}, planned={plan.get('count', 0)}."
+                )
+            rec_hash = rec.get("batch_hash")
+            if rec_hash and rec_hash != batch_hash:
+                raise RuntimeError(
+                    f"Batch #{i} hash mismatch: recorded={rec_hash[:12]}, planned={batch_hash[:12]}."
+                )
+
+        table_like = _read_parquet_table_stub(
+            manifest=manifest,
+            plan=plan,
+            return_type=return_type,
+            columns=columns,
+            mode=mode,
+            bytes_col=bytes_col,
+            dims_cols=dims_cols,  # type: ignore[arg-type]
+            label_col=label_col,
+            path_col=path_col,
+            use_threads=use_threads,
+            memory_map=memory_map,
+            to_pandas_kwargs=to_pandas_kwargs,
+        )
+
+        is_last = bool(plan.get("is_last", False))
+        meta = {
+            "ordinal": i,
+            "manifest": manifest_hash,
+            "manifest_root_hash": root_hash_now,
+            "batch_hash": batch_hash,
+            "recorded": rec,
+            "plan": {
+                "fragment": plan.get("fragment"),
+                "row_group": plan.get("row_group"),
+                "offset": plan.get("offset", 0),
+                "count": plan.get("count", 0),
+            },
+            "upstream": (
+                [{"id": manifest_hash, "role": "manifest"}] if manifest_hash else []
+            )
+            + [{"id": batch_hash, "role": "batch"}],
+        }
+
+        if mode == "table":
+            yield table_like, meta, is_last
+            continue
+
+        # mode == "images": collapse rows in this plan into one images batch
+        eff_bytes, eff_dims, eff_label, eff_path = _auto_detect_image_cols(
+            table_like=table_like,
+            bytes_col=bytes_col,
+            dims_cols=dims_cols,  # type: ignore[arg-type]
+            label_col=label_col,
+            path_col=path_col,
+        )
+        _validate_image_schema(
+            table_like=table_like,
+            bytes_col=eff_bytes,
+            dims_cols=eff_dims,
+            label_col=eff_label,
+            path_col=eff_path,
+        )
+
+        imgs: List[Any] = []
+        lbls: Optional[List[Any]] = [] if eff_label else None
+        pths: List[Optional[str]] = []
+
+        for one_img_list, one_lbl_list, one_path_list in _iter_images_from_table(
+            table_like=table_like,
+            return_type=return_type,
+            bytes_col=eff_bytes,
+            dims_cols=eff_dims,
+            label_col=eff_label,
+            path_col=eff_path,
+            decode=decode,
+            images_return=images_return,
+        ):
+            imgs.extend(one_img_list)
+            if lbls is not None:
+                lbls.extend(one_lbl_list or [None])
+            pths.extend(one_path_list or [None])
+
+        yield (imgs, (lbls if lbls is not None else None), pths), meta, is_last
+
+
 def run_apply_function_restore(
     *,
     run_path: Path,
@@ -515,8 +744,8 @@ def run_apply_function_restore(
             "restore: missing realized 'source' or 'source_gen' for Transform.apply_function"
         )
 
+    # If upstream is a path, build CSV reader; else use given generator.
     if isinstance(upstream, (str, os.PathLike)):
-        # legacy CSV path → build a 2-tuple generator
         source_path = str(upstream)
         backend = params.get("backend", "polars")
         batch_size = params.get("batch_size")
@@ -530,19 +759,150 @@ def run_apply_function_restore(
     else:
         gen = upstream
 
+    # Treat as CSV/tabular if the pipeline says so, regardless of generator vs path.
+    csv_mode = params.get("backend") in ("pandas", "polars")
+
+    # ---- image helpers ----
+    def _looks_like_img(b: bytes) -> bool:
+        if not isinstance(b, (bytes, bytearray, memoryview)):
+            return False
+        b = bytes(b)
+        return (
+            (b[:2] == b"\xff\xd8")
+            or (b[:8] == b"\x89PNG\r\n\x1a\n")
+            or (b[:6] in (b"GIF89a", "GIF87a"))
+        )
+
+    def _decode_bytes_list(seq):
+        from io import BytesIO
+
+        try:
+            from PIL import Image
+        except Exception:
+            return seq
+        out = []
+        for x in seq:
+            if _looks_like_img(x):
+                im = Image.open(BytesIO(x)).convert("RGB")
+                out.append(np.asarray(im))
+            else:
+                out.append(x)
+        return out
+
+    def _normalize_images_batch(batch, meta):
+        # Unwrap (imgs, labels, paths)
+        if isinstance(batch, (tuple, list)) and len(batch) == 3:
+            imgs, labels, paths = batch
+            if isinstance(meta, dict):
+                meta.setdefault("labels", labels)
+                meta.setdefault("paths", paths)
+            batch = imgs
+
+        # Ensure list of items
+        if isinstance(batch, np.ndarray):
+            if batch.dtype == object:
+                items = list(batch)
+            elif batch.ndim in (2, 3):
+                items = [batch]
+            else:
+                items = list(batch)
+        elif isinstance(batch, (list, tuple)):
+            items = list(batch)
+        else:
+            items = [batch]
+
+        # Decode bytes → arrays if needed
+        if items and _looks_like_img(items[0]):
+            items = _decode_bytes_list(items)
+
+        # Drop None and keep labels/paths aligned if present
+        if isinstance(meta, dict) and ("labels" in meta or "paths" in meta):
+            labels = meta.get("labels")
+            paths = meta.get("paths")
+            keep_imgs, keep_labels, keep_paths = (
+                [],
+                ([] if labels is not None else None),
+                ([] if paths is not None else None),
+            )
+            for i, im in enumerate(items):
+                if im is None:
+                    continue
+                keep_imgs.append(im)
+                if keep_labels is not None:
+                    keep_labels.append(
+                        labels[i] if labels is not None and i < len(labels) else None
+                    )
+                if keep_paths is not None:
+                    keep_paths.append(
+                        paths[i] if paths is not None and i < len(paths) else None
+                    )
+            if keep_labels is not None:
+                meta["labels"] = keep_labels
+            if keep_paths is not None:
+                meta["paths"] = keep_paths
+            items = keep_imgs
+        else:
+            items = [im for im in items if im is not None]
+
+        return items, meta
+
+    def _normalize_imgs(imgs):
+        import numpy as np
+
+        # unwrap singleton container like [object-ndarray]
+        if (
+            isinstance(imgs, (list, tuple))
+            and len(imgs) == 1
+            and isinstance(imgs[0], np.ndarray)
+            and imgs[0].dtype == object
+        ):
+            imgs = imgs[0]
+        # flatten object arrays into a Python list (preserve None entries — sink will handle)
+        if isinstance(imgs, np.ndarray) and imgs.dtype == object:
+            return [x for x in imgs.ravel()]
+        return imgs
+
+    def _normalize_out(z):
+        # (imgs, labels, paths) triple → normalize imgs then rewrap
+        if isinstance(z, (list, tuple)) and len(z) == 3:
+            imgs, labels, paths = z
+            return (_normalize_imgs(imgs), labels, paths)
+        return _normalize_imgs(z)
+
     for item in gen:
+        batch, meta, is_last = item, {}, False
+
         if isinstance(item, tuple):
             if len(item) == 3:
-                batch, meta, is_last = item
-                yield transform_fn(batch), meta, is_last
+                a, b, c = item
+                if isinstance(b, dict):  # (batch, meta, is_last)
+                    batch, meta, is_last = a, b, bool(c)
+                elif isinstance(c, dict):  # (batch, is_last, meta)
+                    batch, is_last, meta = a, bool(b), c
+                else:  # (batch, is_last, _)
+                    batch, is_last, meta = a, bool(b), {}
             elif len(item) == 2:
-                batch, is_last = item
-                yield transform_fn(batch), is_last
+                a, b = item
+                if isinstance(b, dict):  # (batch, meta)
+                    batch, meta = a, b
+                else:  # (batch, is_last)
+                    batch, is_last = a, bool(b)
             else:
                 batch = item[0]
-                yield transform_fn(batch), False
-        else:
-            yield transform_fn(item), False
+
+        if csv_mode:
+            out = transform_fn(batch)
+            yield out, is_last
+            continue
+
+        # Non-CSV: images/parquet-images or other non-tabular data
+        batch, meta = _normalize_images_batch(batch, meta)  # pre
+        out = transform_fn(batch)
+        out, meta = _normalize_images_batch(out, meta)  # post
+
+        out = transform_fn(batch)
+        out = _normalize_out(out)
+        yield out, meta, is_last
 
 
 def run_save_to_csv_replay(
@@ -763,10 +1123,12 @@ def run_save_images_to_parquet_replay(
             batch, is_last = item
             ordinal += 1
             meta = {"ordinal": ordinal}
-            ordinal += 1
+
+        labels = (meta or {}).get("labels")
+        paths = (meta or {}).get("items_rel_paths") or (meta or {}).get("paths")
 
         table = _build_parquet_table_from_images(
-            data=batch,
+            data=(batch, labels, paths),
             meta=meta,
             encode=encode,
             jpeg_quality=jpeg_quality,
@@ -818,6 +1180,7 @@ def run_save_images_to_parquet_replay(
 RESTORE_HANDLERS: Dict[str, Any] = {
     "blase.Extract.read_csv": run_read_csv_restore,
     "blase.Extract.read_images": run_read_images_restore,
+    "blase.Extract.read_parquet": run_read_parquet_restore,
     "blase.Transform.apply_function": run_apply_function_restore,
     "blase.Load.save_to_csv": run_save_to_csv_replay,
     "blase.Load.save_images_to_parquet": run_save_images_to_parquet_replay,

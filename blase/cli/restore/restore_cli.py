@@ -11,6 +11,7 @@ from blase.restoring.materialize import NeedReplay
 from blase.utils.config import RESTORE_CONFLICT as DEFAULT_CONFLICT, RESTORE_DEFAULT_DIR
 from blase.utils.hashing import Hash
 
+
 # --------- run discovery helpers ---------
 
 
@@ -191,6 +192,9 @@ def _upstream_gen_for_sink(run_path: Path, target_step_hash: str):
     def _is_extract_csv(fqn: str) -> bool:
         return fqn.endswith("Extract.read_csv")
 
+    def _is_extract_parquet(fqn: str) -> bool:
+        return fqn.endswith("Extract.read_parquet")
+
     def _is_transform(fqn: str) -> bool:
         return fqn.endswith("Transform.apply_function")
 
@@ -217,6 +221,9 @@ def _upstream_gen_for_sink(run_path: Path, target_step_hash: str):
         if tip_fqn.endswith("Load.save_images_to_parquet"):
             for j in range(idx - 1, -1, -1):
                 if _is_extract_images(nodes[j]["function_fqn"]):
+                    upstream_node = nodes[j]
+                    break
+                elif _is_extract_parquet(nodes[j]["function_fqn"]):
                     upstream_node = nodes[j]
                     break
         else:
@@ -438,6 +445,95 @@ def cmd_plan(args):
 # --------- run (verify/materialize/replay) ---------
 
 
+def _restore_gen_for_manifest(run_path, manifest_hash, step_hash, store, bindings):
+    """
+    Build and run a restore generator for a recorded manifest.
+
+    The function inspects the upstream step to collect batch-identifiers, then
+    prefers a Parquet restore path if available, falling back to the images
+    restore path. It returns the generator produced by the selected bindings
+    call.
+
+    Parameters
+    ----------
+    run_path : pathlib.Path or str
+        Path to the run directory containing `nodes/nodes.db` and `cas/`.
+    manifest_hash : str
+        Data hash of the recorded table/images manifest to restore.
+    step_hash : str
+        Upstream step hash whose inputs encode batch descriptors.
+    store : object
+        Store API with `load_step_inputs(...)` and optionally
+        `read_parquet_params_for_manifest(...)` / `read_images_params_for_manifest(...)`.
+    bindings : object
+        Bindings API exposing `run_read_parquet_restore(...)` and
+        `run_read_images_restore(...)`.
+
+    Returns
+    -------
+    Iterator
+        Generator yielding 3-tuples ``(data, meta, is_last)`` where:
+        * `data` : backend-specific payload (e.g., tables or image batches)
+        * `meta` : dict with provenance (e.g., ordinal, batch descriptors)
+        * `is_last` : bool flagging the final batch
+
+    Raises
+    ------
+    SystemExit
+        If neither Parquet nor images restore parameters can be resolved
+        for the given `manifest_hash`.
+
+    Notes
+    -----
+    Parquet restore is attempted first. If the Parquet bindings raise an
+    exception, the function silently falls back to the images path.
+    """
+    ts_before = planner._step_row(planner._db(run_path), step_hash)["ts_start"]
+    ins = store.load_step_inputs(run_path, step_hash)
+
+    def _collect_batch_ids(ins):
+        roles = {"batch_desc", "table.batch.meta", "batch", "table.batch", "batchmeta"}
+        return [i["data_hash"] for i in ins if i.get("role") in roles]
+
+    batch_ids = _collect_batch_ids(ins)
+
+    # parquet path
+    rp_fn = getattr(store, "read_parquet_params_for_manifest", None)
+    if callable(rp_fn):
+        rp = rp_fn(run_path, manifest_hash, ts_before=ts_before)
+        if rp:
+            realized = {
+                "sources": rp.get("sources"),
+                "source": rp.get("source") or rp.get("directory"),
+                "manifest": manifest_hash,
+                "batch_descs": batch_ids,
+            }
+            try:
+                return bindings.run_read_parquet_restore(
+                    run_path=run_path, params=rp, realized=realized, transform_fn=None
+                )
+            except Exception:
+                pass  # fall back to images
+
+    # images path
+    ri_fn = getattr(store, "read_images_params_for_manifest", None)
+    if callable(ri_fn):
+        ri = ri_fn(run_path, manifest_hash, ts_before=ts_before)
+        if ri:
+            realized = {
+                "source": ri.get("directory"),
+                "manifest": manifest_hash,
+                "batch_descs": batch_ids,
+            }
+            return bindings.run_read_images_restore(
+                run_path=run_path, params=ri, realized=realized, transform_fn=None
+            )
+
+    raise SystemExit(
+        "replay: cannot find read_parquet or read_images params for manifest"
+    )
+
+
 def _exec_plan_for_step(
     run_path: Path,
     tip_step_hash: str,
@@ -449,61 +545,58 @@ def _exec_plan_for_step(
     ephemeral_only: bool = False,
 ) -> Dict[str, Path]:
     """
-    Replay a DAG of recorded steps forward from any upstream roots to `tip_step_hash`.
+    Replay recorded steps up to ``tip_step_hash`` and materialize sinks.
 
-    This is the core engine used by `blase restore run --data <hash>` and similar
-    commands. It walks the stored execution graph, resolves upstream inputs,
-    and replays each step’s recorded function in dependency order, producing
-    exactly the same materialized files.
+    Walks the stored plan in dependency order, reconstructs upstream generators
+    for extract steps, re-applies recorded transforms, and replays load steps to
+    produce the same on-disk artifacts (CSV files or Parquet shards). Supports
+    both images and table/parquet flows. For ``Transform.apply_function``,
+    prefers a Parquet-backed upstream when a manifest anchor is present, and
+    falls back to images if needed. When an upstream generator already exists,
+    it is piped directly into the next transform without re-anchoring.
 
     Parameters
     ----------
     run_path : Path
-        Root directory of the recorded run (contains `nodes/` and `cas/` stores).
+        Run root containing ``nodes/`` and ``cas/``.
     tip_step_hash : str
-        Hash of the final step to replay. The function backtracks from this hash
-        to discover and execute all required upstream steps.
+        Step hash to reach; all required upstream steps are replayed.
     to_path : str or None
-        Optional override path for the final sink’s output. If supplied,
-        the final output (CSV file or Parquet directory) is written there
-        instead of the recorded default.
+        Optional final target override for the sink. When set, the last sink
+        writes here regardless of the recorded location.
     backend_override : str or None
-        Optional override for downstream I/O backends (e.g., a different
-        Parquet writer). Passed to sink replay functions if supported.
+        Optional sink backend override passed to replay handlers.
     seen_steps : set of str, optional
-        Set of step hashes already executed. Steps in this set are skipped,
-        allowing incremental or multi-branch replays without duplication.
+        Steps already executed in this process; they are skipped.
     created_paths : list of Path, optional
-        Collects every on-disk path created during replay for caller inspection
-        or later cleanup.
-    ephemeral_only : bool, default=False
-        If True, write outputs but do not record them back into the CAS
-        materialization index. Useful for temporary previews or dry runs.
+        Collector for all paths created during this replay.
+    ephemeral_only : bool, default False
+        If True, do not record materializations back to CAS.
 
     Returns
     -------
     dict
-        Mapping of `{produced_data_hash: Path(actual_output_file)}` for every
-        sink materialized during replay (e.g., CSV files, Parquet shards).
+        Mapping ``{produced_data_hash: Path(output_file)}`` for each sink.
+
+    Raises
+    ------
+    SystemExit
+        If required anchors (e.g., manifest/source) are missing or if neither
+        Parquet nor images params can be resolved for a manifest-anchored
+        transform.
 
     Notes
     -----
-    - The replay algorithm performs a topological walk from each required
-      upstream step to the requested tip. Each known function type is handled
-      specifically:
-        * `blase.Extract.read_csv` and `blase.Extract.read_images` recreate
-          upstream batch generators.
-        * `blase.Transform.apply_function` re-applies stored user functions.
-        * `blase.Load.save_to_csv` and `blase.Load.save_images_to_parquet`
-          write final sink files and validate their hashes.
-    - Steps that have already been replayed (present in `seen_steps`) are
-      skipped. Outputs already present with matching CAS hashes are not
-      duplicated.
-    - If `ephemeral_only` is True, on-disk artifacts are created but not
-      registered as permanent CAS data, so subsequent runs will not treat
-      them as cached outputs.
-    - Raises `SystemExit` if required upstream anchors (e.g., manifest or
-      source data) are missing or inconsistent with recorded metadata.
+    Handles:
+      * ``Extract.read_csv`` → CSV stream restore.
+      * ``Extract.read_images`` → image batches via recorded manifest + descs.
+      * ``Extract.read_parquet`` → table/image-compatible batches with recorded
+        ``manifest`` and ``batch_desc_*``.
+      * ``Transform.apply_function`` → uses an existing upstream generator when
+        available; otherwise anchors by ``source`` or ``manifest``. Tries
+        ``read_parquet`` params first, then images.
+      * ``Load.save_to_csv`` and ``Load.save_images_to_parquet`` → write outputs,
+        validate expected hashes, and optionally record materializations.
     """
     plan = planner.plan_for_step(run_path, tip_step_hash) or []
     upstream = None
@@ -574,6 +667,47 @@ def _exec_plan_for_step(
             )
             continue
 
+        if fqn == "blase.Extract.read_parquet":
+            ins = store.load_step_inputs(run_path, sh)  # code/env only (unused here)
+            outs = store.load_step_outputs(run_path, sh)  # manifest + batch_desc_*
+
+            manifest_hash = next(
+                (o["data_hash"] for o in outs if o["name"] == "manifest"), None
+            )
+
+            def _ord(o):
+                n = o.get("name", "")
+                try:
+                    return int(n.rsplit("_", 1)[-1])
+                except Exception:
+                    return 0
+
+            batch_descs = [
+                o["data_hash"]
+                for o in sorted(outs, key=_ord)
+                if o.get("name", "").startswith("batch_desc_")
+            ]
+
+            realized = {}
+            # Prefer recorded sources list; fall back to single source if present.
+            if "sources" in st["params"]:
+                realized["sources"] = st["params"]["sources"]
+            elif "source" in st["params"]:
+                realized["source"] = st["params"]["source"]
+
+            if manifest_hash:
+                realized["manifest"] = manifest_hash
+            if batch_descs:
+                realized["batch_descs"] = batch_descs
+
+            upstream = bindings.run_read_parquet_restore(
+                run_path=run_path,
+                params=st["params"],
+                realized=realized,
+                transform_fn=None,
+            )
+            continue
+
         if fqn == "blase.Transform.apply_function":
             ins = store.load_step_inputs(run_path, sh)
             fn = code.load_callable_from_blob(
@@ -617,32 +751,40 @@ def _exec_plan_for_step(
                     realized={"source": src_path},
                     transform_fn=fn,
                 )
-            else:
-                # treat anchor as the manifest
-                man_hash = anchor_hash
-                ts_before = planner._step_row(planner._db(run_path), sh)["ts_start"]
-                ri_params = store.read_images_params_for_manifest(
-                    run_path, man_hash, ts_before=ts_before
-                )
-                if not ri_params:
-                    raise SystemExit(
-                        "replay: cannot find read_images params for manifest"
-                    )
+                continue
 
+            # treat anchor as a manifest; prefer parquet if present, else images
+            man_hash = anchor_hash
+            ts_before = planner._step_row(planner._db(run_path), sh)["ts_start"]
+
+            # Try parquet first
+            rp_params = getattr(
+                store, "read_parquet_params_for_manifest", lambda *a, **k: None
+            )(run_path, man_hash, ts_before=ts_before)
+            if rp_params:
                 ins_tr = store.load_step_inputs(run_path, sh)
                 batch_descs = [
                     i["data_hash"]
                     for i in ins_tr
-                    if i["role"] in ("batch_desc", "batch")
+                    if i["role"]
+                    in (
+                        "batch_desc",
+                        "table.batch.meta",
+                        "batchmeta",
+                        "batch",
+                        "table.batch",
+                    )
                 ]
-                gen = bindings.run_read_images_restore(
-                    run_path=run_path,
-                    params=ri_params,
-                    realized={
-                        "source": ri_params.get("directory"),
-                        "manifest": man_hash,
-                        "batch": batch_descs,
-                    },
+                ins2 = store.load_step_inputs(run_path, sh)
+                manifest_hash = next(
+                    (i["data_hash"] for i in ins2 if i.get("role") == "manifest"), None
+                )
+                if not manifest_hash:
+                    raise SystemExit(
+                        "restore: cannot resolve manifest for upstream stream"
+                    )
+                gen = _restore_gen_for_manifest(
+                    run_path, manifest_hash, sh, store, bindings
                 )
                 upstream = bindings.run_apply_function_restore(
                     run_path=run_path,
@@ -650,6 +792,39 @@ def _exec_plan_for_step(
                     realized={"source_gen": gen},
                     transform_fn=fn,
                 )
+                continue
+
+            # Fallback to images
+            ri_params = store.read_images_params_for_manifest(
+                run_path, man_hash, ts_before=ts_before
+            )
+            if not ri_params:
+                raise SystemExit(
+                    "replay: cannot find read_parquet or read_images params for manifest"
+                )
+
+            ins_tr = store.load_step_inputs(run_path, sh)
+            batch_descs = [
+                i["data_hash"]
+                for i in ins_tr
+                if i["role"]
+                in ("batch_desc", "table.batch.meta", "batch", "table.batch")
+            ]
+            gen = bindings.run_read_images_restore(
+                run_path=run_path,
+                params=ri_params,
+                realized={
+                    "source": ri_params.get("directory"),
+                    "manifest": man_hash,
+                    "batch": batch_descs,
+                },
+            )
+            upstream = bindings.run_apply_function_restore(
+                run_path=run_path,
+                params=st["params"],
+                realized={"source_gen": gen},
+                transform_fn=fn,
+            )
             continue
 
         if fqn == "blase.Load.save_to_csv":
@@ -918,6 +1093,7 @@ def _normalize_plan_nodes(run_path: Path, plan):
 STREAM_FQNS = (
     "blase.Extract.read_csv",
     "blase.Extract.read_images",
+    "blase.Extract.read_parquet",
     "blase.Transform.apply_function",
 )
 
@@ -1009,6 +1185,32 @@ def _build_stream_for_step(run_path: Path, step_hash: str):
             run_path=run_path, params=st["params"], realized=realized, transform_fn=None
         )
 
+    # ---- Extract.read_parquet ----
+    if fqn.endswith("Extract.read_parquet"):
+        ins = store.load_step_inputs(run_path, step_hash)
+        manifest_hash = next(
+            (i["data_hash"] for i in ins if i["role"] == "manifest"), None
+        )
+        batch_hashes = [i["data_hash"] for i in ins if i["role"] == "batch"]
+
+        realized = {}
+        if "sources" in st["params"]:
+            realized["sources"] = st["params"]["sources"]
+        elif "source" in st["params"]:
+            realized["source"] = st["params"]["source"]
+
+        if manifest_hash:
+            realized["manifest"] = manifest_hash
+        if batch_hashes:
+            realized["batch"] = batch_hashes
+
+        return bindings.run_read_parquet_restore(
+            run_path=run_path,
+            params=st["params"],
+            realized=realized,
+            transform_fn=None,
+        )
+
     # ---- Transform.apply_function (chain to its immediate upstream) ----
     if fqn.endswith("Transform.apply_function"):
         raw_plan = planner.plan_for_step(run_path, step_hash) or []
@@ -1049,6 +1251,7 @@ def _build_stream_for_step(run_path: Path, step_hash: str):
                             "batchmeta",
                             "batch_desc_1",
                             "batch_desc_2",
+                            "table.batch.meta",
                         )
                     ),
                     None,
@@ -1068,7 +1271,7 @@ def _build_stream_for_step(run_path: Path, step_hash: str):
                     (
                         i["data_hash"]
                         for i in ins
-                        if i["role"] in ("batch", "image.batch")
+                        if i["role"] in ("batch", "image.batch", "table.batch")
                     ),
                     None,
                 )

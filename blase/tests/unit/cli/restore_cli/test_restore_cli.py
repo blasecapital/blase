@@ -53,10 +53,15 @@ def _mk_db(run_path: Path, ddl):
 def _mk_planner_single(sh):
     # planner.plan_for_step -> [sh]
     # planner._db / _step_row used by manifest path
+    if sh:
+        return SimpleNamespace(
+            plan_for_step=lambda run_path, tip: [sh],
+            _db=lambda run_path: "DB",
+            _step_row=lambda _db, sh2: {"ts_start": "2025-01-01T00:00:00"},
+        )
     return SimpleNamespace(
-        plan_for_step=lambda run_path, tip: [sh],
         _db=lambda run_path: "DB",
-        _step_row=lambda _db, sh2: {"ts_start": "2025-01-01T00:00:00"},
+        _step_row=lambda _db, sh: {"ts_start": "2025-01-01T00:00:00"},
     )
 
 
@@ -475,6 +480,116 @@ def test__exec_plan_for_step_runs_all_kinds(run_dir, monkeypatch, tmp_path):
     assert "OUT" in produced and produced["OUT"] == out_file
 
 
+def test_exec_plan_read_parquet_uses_sources_list_and_sorts_batch_descs(
+    monkeypatch, run_path, tmp_path
+):
+    sh = "step_read_parquet"
+
+    # One-step plan
+    monkeypatch.setattr(
+        rc, "planner", SimpleNamespace(plan_for_step=lambda rp, tip: [sh])
+    )
+
+    # Store with params['sources'], manifest, and unordered batch_descs
+    params = {"sources": ["/p/a", "/p/b"], "mode": "images"}
+    st_row = {"function_fqn": "blase.Extract.read_parquet", "params": params}
+    ins = [
+        {"data_hash": "CODE123", "role": "code"},
+        {"data_hash": "ENV999", "role": "env"},
+    ]
+    outs = [
+        {"name": "batch_desc_10", "data_hash": "BD10"},
+        {"name": "manifest", "data_hash": "MANI"},
+        {"name": "batch_desc_2", "data_hash": "BD2"},
+        {"name": "weird", "data_hash": "IGN"},
+    ]
+    store_fake = SimpleNamespace(
+        load_step=lambda rp, s: st_row,
+        load_step_inputs=lambda rp, s: ins,
+        load_step_outputs=lambda rp, s: outs,
+        pick_code_hash=lambda ins_list: next(
+            i["data_hash"] for i in ins_list if i["role"] == "code"
+        ),
+    )
+    monkeypatch.setattr(rc, "store", store_fake)
+
+    calls = {}
+
+    def _restore(**kw):
+        calls["kw"] = kw
+
+        def _gen():
+            yield (["dummy"], {"ordinal": 1}, False)
+
+        return _gen()
+
+    monkeypatch.setattr(
+        rc, "bindings", SimpleNamespace(run_read_parquet_restore=_restore)
+    )
+
+    out = rc._exec_plan_for_step(run_path, sh, None, None)
+    assert out == {}
+
+    kw = calls["kw"]
+    assert kw["run_path"] == run_path
+    assert kw["params"] is params
+    realized = kw["realized"]
+    assert "sources" in realized and realized["sources"] == ["/p/a", "/p/b"]
+    assert "source" not in realized
+    assert realized["manifest"] == "MANI"
+    assert realized["batch_descs"] == ["BD2", "BD10"]  # numeric sort
+
+
+def test_exec_plan_read_parquet_falls_back_to_single_source(
+    monkeypatch, run_path, tmp_path
+):
+    sh = "step_read_parquet_single"
+
+    monkeypatch.setattr(
+        rc, "planner", SimpleNamespace(plan_for_step=lambda rp, tip: [sh])
+    )
+
+    params = {"source": "/only/one"}
+    st_row = {"function_fqn": "blase.Extract.read_parquet", "params": params}
+    ins = []
+    outs = [
+        {"name": "batch_desc_1", "data_hash": "BD1"},
+        # manifest intentionally absent
+    ]
+    store_fake = SimpleNamespace(
+        load_step=lambda rp, s: st_row,
+        load_step_inputs=lambda rp, s: ins,
+        load_step_outputs=lambda rp, s: outs,
+        pick_code_hash=lambda *_: None,
+    )
+    monkeypatch.setattr(rc, "store", store_fake)
+
+    calls = {}
+
+    def _restore(**kw):
+        calls["kw"] = kw
+
+        def _gen():
+            yield (["dummy"], {"ordinal": 1}, False)
+
+        return _gen()
+
+    monkeypatch.setattr(
+        rc, "bindings", SimpleNamespace(run_read_parquet_restore=_restore)
+    )
+
+    out = rc._exec_plan_for_step(run_path, sh, None, None)
+    assert out == {}
+
+    kw = calls["kw"]
+    assert kw["params"] is params
+    realized = kw["realized"]
+    assert realized.get("source") == "/only/one"
+    assert "sources" not in realized
+    assert "manifest" not in realized  # none recorded
+    assert realized["batch_descs"] == ["BD1"]
+
+
 def test_exec_plan_read_images_builds_realized_and_calls_restore(
     monkeypatch, run_path, tmp_path
 ):
@@ -533,6 +648,143 @@ def test_exec_plan_read_images_builds_realized_and_calls_restore(
     assert realized["source"] == "/data/images"
     assert realized["manifest"] == "MANI"
     assert realized["batch_descs"] == ["BD2", "BD10"]
+
+
+def test_apply_function_manifest_uses_parquet_and_calls_apply_restore(
+    monkeypatch, run_path, tmp_path
+):
+    sh = "step_apply_fn"
+    monkeypatch.setattr(rc, "planner", _mk_planner_single(sh))
+
+    params = {"module": "m", "function": "f"}
+    ins = [
+        {"data_hash": "B2", "role": "batch"},
+        {"data_hash": "B1", "role": "batchmeta"},
+        {"data_hash": "MANI", "role": "manifest"},
+    ]
+    code_hash = "CODEHASH"
+
+    store_fake = SimpleNamespace(
+        load_step=lambda rp, s: {
+            "function_fqn": "blase.Transform.apply_function",
+            "params": params,
+        },
+        load_step_inputs=lambda rp, s: ins,
+        load_step_outputs=lambda *a, **k: [],
+        read_parquet_params_for_manifest=lambda run_path, man_hash, ts_before=None: {
+            "ok": True
+        },
+        pick_code_hash=lambda *_: code_hash,
+    )
+    monkeypatch.setattr(rc, "store", store_fake)
+    monkeypatch.setattr(
+        rc, "_load_user_function", lambda *a, **k: _dummy_fn, raising=False
+    )
+
+    # create CAS blob for code hash using run_path fixture
+    code_blob = run_path / "cas" / "sha256" / "code" / code_hash[:2] / code_hash[2:]
+    code_blob.parent.mkdir(parents=True, exist_ok=True)
+    code_blob.write_text(
+        json.dumps(
+            {
+                "entry": {"qualname": "f", "module": "m"},
+                "module_source": "",
+                "function_source": "def f(*args, **kwargs):\n    return None\n",
+            },
+            ensure_ascii=False,
+        )
+    )
+
+    calls = {"gen_called": 0, "apply_called": 0, "apply_kw": None}
+
+    def _rgfm(run_path_, manifest_hash_, step_hash_, store_, bindings_):
+        calls["gen_called"] += 1
+        assert manifest_hash_ == "MANI"
+        assert step_hash_ == sh
+
+        def _gen():
+            yield (["img"], {"ordinal": 1}, False)
+
+        return _gen()
+
+    def _apply_restore(*, run_path, params: dict, realized: dict, transform_fn):
+        calls["apply_called"] += 1
+        calls["apply_kw"] = dict(
+            run_path=run_path,
+            params=params,
+            realized=realized,
+            transform_fn=transform_fn,
+        )
+
+        def _up():
+            yield (["out"], {"ordinal": 1}, False)
+
+        return _up()
+
+    monkeypatch.setattr(rc, "_restore_gen_for_manifest", _rgfm)
+    monkeypatch.setattr(
+        rc, "bindings", SimpleNamespace(run_apply_function_restore=_apply_restore)
+    )
+
+    out = rc._exec_plan_for_step(run_path, sh, None, None)
+    assert out == {}
+    assert calls["gen_called"] == 1
+    assert calls["apply_called"] == 1
+    assert "source_gen" in calls["apply_kw"]["realized"]
+
+
+def test_apply_function_manifest_missing_manifest_raises(
+    monkeypatch, run_path, tmp_path
+):
+    sh = "step_apply_fn_nomani"
+    monkeypatch.setattr(rc, "planner", _mk_planner_single(sh))
+
+    params = {"module": "m", "function": "f"}
+    ins_no_manifest = [
+        {"data_hash": "B2", "role": "batch"},
+        {"data_hash": "B1", "role": "batchmeta"},
+    ]
+    code_hash = "CODEHASH"
+
+    store_fake = SimpleNamespace(
+        load_step=lambda rp, s: {
+            "function_fqn": "blase.Transform.apply_function",
+            "params": params,
+        },
+        load_step_inputs=lambda rp, s: ins_no_manifest,
+        load_step_outputs=lambda *a, **k: [],
+        read_parquet_params_for_manifest=lambda run_path, man_hash, ts_before=None: {
+            "ok": True
+        },
+        pick_code_hash=lambda *_: code_hash,
+    )
+    monkeypatch.setattr(rc, "store", store_fake)
+    monkeypatch.setattr(
+        rc, "_load_user_function", lambda *a, **k: _dummy_fn, raising=False
+    )
+
+    # create CAS blob for code hash using run_path fixture
+    code_blob = run_path / "cas" / "sha256" / "code" / code_hash[:2] / code_hash[2:]
+    code_blob.parent.mkdir(parents=True, exist_ok=True)
+    code_blob.write_text(
+        json.dumps(
+            {
+                "entry": {"qualname": "f", "module": "m"},
+                "module_source": "",
+                "function_source": "def f(*args, **kwargs):\n    return None\n",
+            },
+            ensure_ascii=False,
+        )
+    )
+
+    with pytest.raises(SystemExit) as ei:
+        rc._exec_plan_for_step(run_path, sh, None, None)
+
+    msg = str(ei.value)
+    assert (
+        "restore: cannot resolve manifest for upstream stream" in msg
+        or "Transform.apply_function missing anchor" in msg
+    )
 
 
 def test_exec_plan_read_images_without_manifest_or_batch_descs(monkeypatch, run_path):
@@ -1301,6 +1553,122 @@ def test_cmd_plan_marks_states(run_dir, capsys, monkeypatch, tmp_path):
     out = capsys.readouterr().out
     # Now we should see the replay hint and outputs section
     assert "need replay" in out and "outputs:" in out
+
+
+def test_restore_gen_prefers_parquet_and_returns_binding(monkeypatch):
+    monkeypatch.setattr(rc, "planner", _mk_planner_single(None))
+
+    # inputs include only roles the helper collects
+    ins = [
+        {"data_hash": "X0", "role": "ignore_me"},
+        {"data_hash": "B1", "role": "batch"},
+        {"data_hash": "B2", "role": "batchmeta"},
+        {"data_hash": "B3", "role": "table.batch"},
+    ]
+
+    class Store:
+        def load_step_inputs(self, run_path, step_hash):
+            return ins
+
+        def read_parquet_params_for_manifest(self, run_path, manifest_hash, ts_before):
+            # assert ts_before propagated
+            assert ts_before == "2025-01-01T00:00:00"
+            return {"sources": ["/a", "/b"], "source": "/a"}
+
+        def read_images_params_for_manifest(self, *a, **k):
+            pytest.fail("images path should not be used when parquet succeeds")
+
+    SENTINEL = object()
+
+    class Bindings:
+        def run_read_parquet_restore(self, *, run_path, params, realized, transform_fn):
+            assert params == {"sources": ["/a", "/b"], "source": "/a"}
+            assert realized["sources"] == ["/a", "/b"]
+            assert realized["source"] == "/a"
+            assert realized["manifest"] == "MH"
+            assert realized["batch_descs"] == ["B1", "B2", "B3"]
+            assert transform_fn is None
+            return SENTINEL
+
+    out = rc._restore_gen_for_manifest(
+        run_path=Path("/tmp/whatever"),
+        manifest_hash="MH",
+        step_hash="SH",
+        store=Store(),
+        bindings=Bindings(),
+    )
+    assert out is SENTINEL
+
+
+def test_restore_gen_falls_back_to_images_on_parquet_error(monkeypatch):
+    monkeypatch.setattr(rc, "planner", _mk_planner_single(None))
+
+    class Store:
+        def load_step_inputs(self, run_path, step_hash):
+            return [{"data_hash": "B9", "role": "batch_desc"}]
+
+        def read_parquet_params_for_manifest(self, run_path, manifest_hash, ts_before):
+            return {"directory": "/parq_src"}  # valid, but binding will raise
+
+        def read_images_params_for_manifest(self, run_path, manifest_hash, ts_before):
+            assert ts_before == "2025-01-01T00:00:00"
+            return {"directory": "/img_src"}
+
+    SENTINEL = object()
+
+    class Bindings:
+        def run_read_parquet_restore(self, **kw):
+            raise RuntimeError("simulated parquet path failure")
+
+        def run_read_images_restore(self, *, run_path, params, realized, transform_fn):
+            assert params == {"directory": "/img_src"}
+            assert realized["source"] == "/img_src"
+            assert realized["manifest"] == "MH"
+            assert realized["batch_descs"] == ["B9"]
+            assert transform_fn is None
+            return SENTINEL
+
+    out = rc._restore_gen_for_manifest(
+        run_path=Path("/any"),
+        manifest_hash="MH",
+        step_hash="SH",
+        store=Store(),
+        bindings=Bindings(),
+    )
+    assert out is SENTINEL
+
+
+def test_restore_gen_raises_when_no_params_available(monkeypatch):
+    monkeypatch.setattr(rc, "planner", _mk_planner_single(None))
+
+    class Store:
+        def load_step_inputs(self, run_path, step_hash):
+            return []  # empty is fine; focus is on missing params
+
+        def read_parquet_params_for_manifest(self, *a, **k):
+            return None
+
+        def read_images_params_for_manifest(self, *a, **k):
+            return None
+
+    class Bindings:
+        def run_read_parquet_restore(self, **kw):  # pragma: no cover
+            raise AssertionError("should not be called")
+
+        def run_read_images_restore(self, **kw):  # pragma: no cover
+            raise AssertionError("should not be called")
+
+    with pytest.raises(SystemExit) as ei:
+        rc._restore_gen_for_manifest(
+            run_path=Path("/any"),
+            manifest_hash="MH",
+            step_hash="SH",
+            store=Store(),
+            bindings=Bindings(),
+        )
+    assert "cannot find read_parquet or read_images params for manifest" in str(
+        ei.value
+    )
 
 
 def test_cmd_run_data_fast_materialize(run_dir, monkeypatch, tmp_path, capsys):

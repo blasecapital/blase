@@ -548,12 +548,6 @@ def run_read_parquet_restore(
     decode = params.get("decode")
     images_return = params.get("images_return", "bytes")
     to_pandas_kwargs = params.get("to_pandas_kwargs") or {}
-    print("[RPQ.MODE]",
-        dict(mode=mode, images_return=images_return, decode=decode,
-            return_type=return_type, bytes_col=bytes_col,
-            dims_cols=dims_cols, path_col=path_col))
-    def _t0(seq): 
-        return type(seq[0]).__name__ if isinstance(seq,(list,tuple)) and seq else "-"   
 
     # recorded manifest/batches
     manifest_hash = realized.get("manifest")
@@ -691,13 +685,6 @@ def run_read_parquet_restore(
         lbls: Optional[List[Any]] = [] if eff_label else None
         pths: List[Optional[str]] = []
 
-        # Debug
-        print(f"[RPQ.MODE] mode={mode} return_type={return_type} images_return={images_return} decode={decode}")
-        print(f"[RPQ.COLS] eff bytes={eff_bytes} dims={eff_dims} label={eff_label} path={eff_path}")
-        def _typseq(s, k=3):
-            try: return [type(x).__name__ for x in (s[:k] if hasattr(s,"__len__") else [s])]
-            except: return ["<err>"]
-
         for one_img_list, one_lbl_list, one_path_list in _iter_images_from_table(
             table_like=table_like,
             return_type=return_type,
@@ -708,34 +695,11 @@ def run_read_parquet_restore(
             decode=decode,
             images_return=images_return,
         ):
-            print(f"[RPQ.ITER] one_imgs_n={len(one_img_list)} t0={_t0(one_img_list)} "
-                f"labels_t0={_t0(one_lbl_list)} paths_t0={_t0(one_path_list)}") # Debug
             imgs.extend(one_img_list)
             if lbls is not None:
                 lbls.extend(one_lbl_list or [None])
             pths.extend(one_path_list or [None])
 
-        def _none_like(x):
-            import numpy as np
-            if x is None: return True
-            if isinstance(x, np.ndarray) and x.dtype == object and x.ndim == 0:
-                return x.item() is None
-            return False
-
-        # Debug
-        def _nonec(seq):
-            import numpy as np
-            def _none_like(x):
-                if x is None: return True
-                if isinstance(x, np.ndarray) and x.dtype==object and x.ndim==0:
-                    try: return x.item() is None
-                    except: return True
-                return False
-            return sum(_none_like(x) for x in seq)
-        print(f"[RPQ.BATCH.OUT] imgs_n={len(imgs)} none={_nonec(imgs)} "
-            f"img_types0={[type(imgs[0]).__name__] if imgs else []} "
-            f"labels={'None' if lbls is None else len(lbls)} paths_n={len(pths)} "
-            f"is_last={is_last}")
         yield (imgs, (lbls if lbls is not None else None), pths), meta, is_last
 
 
@@ -776,7 +740,9 @@ def run_apply_function_restore(
     """
     upstream = realized.get("source_gen") or realized.get("source")
     if upstream is None:
-        raise RuntimeError("restore: missing realized 'source' or 'source_gen' for Transform.apply_function")
+        raise RuntimeError(
+            "restore: missing realized 'source' or 'source_gen' for Transform.apply_function"
+        )
 
     # If upstream is a path, build CSV reader; else use given generator.
     if isinstance(upstream, (str, os.PathLike)):
@@ -787,8 +753,8 @@ def run_apply_function_restore(
         filter_by = params.get("filter_by")
         gen = (
             read_batches_polars(source_path, batch_size, use_cols, filter_by)
-            if backend == "polars" else
-            read_batches_pandas(source_path, batch_size, use_cols, filter_by)
+            if backend == "polars"
+            else read_batches_pandas(source_path, batch_size, use_cols, filter_by)
         )
     else:
         gen = upstream
@@ -801,10 +767,15 @@ def run_apply_function_restore(
         if not isinstance(b, (bytes, bytearray, memoryview)):
             return False
         b = bytes(b)
-        return (b[:2] == b"\xFF\xD8") or (b[:8] == b"\x89PNG\r\n\x1a\n") or (b[:6] in (b"GIF89a","GIF87a"))
+        return (
+            (b[:2] == b"\xff\xd8")
+            or (b[:8] == b"\x89PNG\r\n\x1a\n")
+            or (b[:6] in (b"GIF89a", "GIF87a"))
+        )
 
     def _decode_bytes_list(seq):
         from io import BytesIO
+
         try:
             from PIL import Image
         except Exception:
@@ -848,15 +819,23 @@ def run_apply_function_restore(
         if isinstance(meta, dict) and ("labels" in meta or "paths" in meta):
             labels = meta.get("labels")
             paths = meta.get("paths")
-            keep_imgs, keep_labels, keep_paths = [], ([] if labels is not None else None), ([] if paths is not None else None)
+            keep_imgs, keep_labels, keep_paths = (
+                [],
+                ([] if labels is not None else None),
+                ([] if paths is not None else None),
+            )
             for i, im in enumerate(items):
                 if im is None:
                     continue
                 keep_imgs.append(im)
                 if keep_labels is not None:
-                    keep_labels.append(labels[i] if labels is not None and i < len(labels) else None)
+                    keep_labels.append(
+                        labels[i] if labels is not None and i < len(labels) else None
+                    )
                 if keep_paths is not None:
-                    keep_paths.append(paths[i] if paths is not None and i < len(paths) else None)
+                    keep_paths.append(
+                        paths[i] if paths is not None and i < len(paths) else None
+                    )
             if keep_labels is not None:
                 meta["labels"] = keep_labels
             if keep_paths is not None:
@@ -866,11 +845,17 @@ def run_apply_function_restore(
             items = [im for im in items if im is not None]
 
         return items, meta
-    
+
     def _normalize_imgs(imgs):
         import numpy as np
+
         # unwrap singleton container like [object-ndarray]
-        if isinstance(imgs, (list, tuple)) and len(imgs) == 1 and isinstance(imgs[0], np.ndarray) and imgs[0].dtype == object:
+        if (
+            isinstance(imgs, (list, tuple))
+            and len(imgs) == 1
+            and isinstance(imgs[0], np.ndarray)
+            and imgs[0].dtype == object
+        ):
             imgs = imgs[0]
         # flatten object arrays into a Python list (preserve None entries — sink will handle)
         if isinstance(imgs, np.ndarray) and imgs.dtype == object:
@@ -885,43 +870,22 @@ def run_apply_function_restore(
         return _normalize_imgs(z)
 
     for item in gen:
-        # Debug
-        raw = item
-        print(f"[XFORM.RAW] type={type(raw).__name__} "
-            f"len={len(raw) if isinstance(raw,tuple) else '-'} "
-            f"shape_hint={(getattr(raw,'shape',None))}")
-        if isinstance(raw, tuple):
-            for idx, part in enumerate(raw):
-                print(f"[XFORM.RAW.part{idx}] type={type(part).__name__} "
-                    f"keys={(list(part.keys())[:5]) if isinstance(part,dict) else '-'}")
-        # End debug
-
         batch, meta, is_last = item, {}, False
-
-        # Debug
-        def _peek_batch(b):
-            try:
-                if isinstance(b,(list,tuple)): return len(b), [type(b[0]).__name__ if b else "<empty>"]
-                return 1, [type(b).__name__]
-            except: return "?", ["<err>"]
-        bn, bt = _peek_batch(batch)
-        print(f"[XFORM.BEFORE.NORM] n={bn} types0={bt} meta_keys={list((meta or {}).keys())[:6]} last={is_last}")
-        # End debug
 
         if isinstance(item, tuple):
             if len(item) == 3:
                 a, b, c = item
-                if isinstance(b, dict):      # (batch, meta, is_last)
+                if isinstance(b, dict):  # (batch, meta, is_last)
                     batch, meta, is_last = a, b, bool(c)
-                elif isinstance(c, dict):    # (batch, is_last, meta)
+                elif isinstance(c, dict):  # (batch, is_last, meta)
                     batch, is_last, meta = a, bool(b), c
-                else:                         # (batch, is_last, _)
+                else:  # (batch, is_last, _)
                     batch, is_last, meta = a, bool(b), {}
             elif len(item) == 2:
                 a, b = item
-                if isinstance(b, dict):      # (batch, meta)
+                if isinstance(b, dict):  # (batch, meta)
                     batch, meta = a, b
-                else:                         # (batch, is_last)
+                else:  # (batch, is_last)
                     batch, is_last = a, bool(b)
             else:
                 batch = item[0]
@@ -932,43 +896,12 @@ def run_apply_function_restore(
             continue
 
         # Non-CSV: images/parquet-images or other non-tabular data
-        print(f"[XFORM.BEFORE.NORM] batch_type={type(batch).__name__}") # Debug
-        batch, meta = _normalize_images_batch(batch, meta)     # pre
-        bn, bt = _peek_batch(batch)
-        print(f"[XFORM.NORM.IN] n={bn} types0={bt} meta_labels={'labels' in (meta or {})} meta_paths={'paths' in (meta or {})}") # Debug
-        def _kind(v):
-            if isinstance(v,(list,tuple)) and v:
-                return type(v[0]).__name__
-            return type(v).__name__
-        print(f"[XFORM.NORM.IN] kind0={_kind(batch)} meta_keys={list((meta or {}).keys())[:6]}")
-        
+        batch, meta = _normalize_images_batch(batch, meta)  # pre
         out = transform_fn(batch)
-        # Debug
-        on, ot = _peek_batch(out)
-        print(f"[XFORM.USER.OUT] n={on} types0={ot}")
-        print(f"[XFORM.USER.OUT] kind0={_kind(out)}")
-        
-        out, meta = _normalize_images_batch(out, meta)         # post
-        # Debug
-        on, ot = _peek_batch(out)
-        print(f"[XFORM.NORM.OUT] n={on} types0={ot}")
-        
-        seq = batch[0] if (isinstance(batch, (tuple, list)) and len(batch) == 3) else batch
-        try:
-            n = len(seq)
-        except Exception:
-            n = "?"
-        none_count = sum(1 for x in (seq or []) if x is None)
-        print(f"[XFORM.IN] ord={(meta or {}).get('ordinal')} n={n} none={none_count}")
+        out, meta = _normalize_images_batch(out, meta)  # post
+
         out = transform_fn(batch)
         out = _normalize_out(out)
-        try:
-            out_seq = out[0] if (isinstance(out, (tuple, list)) and len(out) == 3) else out
-            out_n = len(out_seq)
-            out_none = sum(1 for x in (out_seq or []) if x is None)
-        except Exception:
-            out_n, out_none = "?", "?"
-        print(f"[XFORM.OUT] ord={(meta or {}).get('ordinal')} n={out_n} none={out_none}")
         yield out, meta, is_last
 
 
@@ -1182,13 +1115,6 @@ def run_save_images_to_parquet_replay(
     # --------- 2) Stream batches and write shards ----------
     writer_cfg = params.get("writer_cfg") or RECORDED_WRITER_CFG
 
-    # Debug
-    def _typ0(seq):
-        try: return type(seq[0]).__name__ if isinstance(seq,(list,tuple)) and seq else type(seq).__name__
-        except: return "<err>"
-    def _mix(seq):
-        return sorted({type(x).__name__ for x in (seq if isinstance(seq,(list,tuple)) else [seq])})[:5]
-
     for item in upstream_gen:
         if len(item) == 3:
             batch, meta, is_last = item
@@ -1197,62 +1123,9 @@ def run_save_images_to_parquet_replay(
             batch, is_last = item
             ordinal += 1
             meta = {"ordinal": ordinal}
-        print(f"[SINK.RAW] last={is_last} "
-            f"b_type={type(batch).__name__} b_typ0={_typ0(batch)} "
-            f"meta_keys={list((meta or {}).keys())[:6]}")
-        print(f"[SINK.RAW] last={is_last} n={(len(batch) if isinstance(batch,(list,tuple)) else 1)} mix={_mix(batch)}")
-        if isinstance(batch,(list,tuple)):
-            print(f"[SINK.RAW.seq] n={len(batch)} types0={[type(batch[0]).__name__ if batch else '<empty>']}")
 
         labels = (meta or {}).get("labels")
-        paths  = (meta or {}).get("items_rel_paths") or (meta or {}).get("paths")
-
-        # --- debug + guard on the incoming batch ---
-        def _none_like(x):
-            import numpy as np
-            if x is None:
-                return True
-            if isinstance(x, np.ndarray) and x.dtype == object and x.ndim == 0:
-                # 0-D object array (scalar) like np.array(None, dtype=object)
-                try:
-                    return x.item() is None
-                except Exception:
-                    return True
-            return False
-
-        def _count_none_like(seq):
-            import numpy as np
-            # sequences
-            if isinstance(seq, (list, tuple)):
-                return sum(_none_like(x) for x in seq)
-            # numpy arrays
-            if isinstance(seq, np.ndarray):
-                if seq.dtype == object:
-                    # iterate elements (handles 0-D, 1-D, etc.)
-                    return sum(_none_like(x) for x in seq.ravel())
-                return 0
-            # scalars
-            return int(_none_like(seq))
-        seq = batch[0] if (isinstance(batch, (list, tuple)) and len(batch) == 3) else batch
-        try:
-            n = len(seq)
-        except Exception:
-            n = "?"
-        nn = _count_none_like(seq)
-        def _elem_desc(x):
-            import numpy as np
-            if isinstance(x, np.ndarray): return f"ndarray shape={x.shape} dtype={x.dtype} ndim={x.ndim}"
-            return type(x).__name__
-        peek = []
-        try:
-            if isinstance(seq, (list, tuple)) and seq:
-                peek = [_elem_desc(seq[0])]
-            elif hasattr(seq, "ravel"):
-                r = seq.ravel()
-                if r.size: peek = [_elem_desc(r[0])]
-        except Exception:
-            pass
-        print(f"[SINK.INPUT] ord={ordinal} n={n} none_like={nn} peek={peek}")
+        paths = (meta or {}).get("items_rel_paths") or (meta or {}).get("paths")
 
         table = _build_parquet_table_from_images(
             data=(batch, labels, paths),

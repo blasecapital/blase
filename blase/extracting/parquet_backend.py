@@ -1,4 +1,4 @@
-from typing import Union, Sequence, Optional, List, Any, Dict, Tuple, Literal
+from typing import Union, Sequence, Optional, List, Any, Dict, Tuple, Literal, Generator
 from pathlib import Path
 
 from blase.utils.hashing import Hash
@@ -758,9 +758,6 @@ def _auto_detect_image_cols(
     return eff_bytes, (eff_h, eff_w, eff_c), eff_label, eff_path
 
 
-from typing import Any, Optional, Sequence, Tuple
-
-
 def _validate_image_schema(
     table_like: Any,
     bytes_col: str,
@@ -781,16 +778,28 @@ def _validate_image_schema(
     # --- discover available columns ---
     if hasattr(table_like, "column_names"):  # pyarrow.Table
         available: Sequence[str] = list(table_like.column_names)
-        get_type = lambda col: table_like.schema.field(col).type
+
+        def get_type(col):
+            return table_like.schema.field(col).type
+
         kind = "arrow"
+
     elif hasattr(table_like, "columns"):  # pandas.DataFrame
         available = [str(c) for c in list(table_like.columns)]
-        get_type = lambda col: table_like.dtypes[col]  # pandas dtype
+
+        def get_type(col):
+            return table_like.dtypes[col]  # pandas dtype
+
         kind = "pandas"
+
     elif isinstance(table_like, dict) and "columns" in table_like:
         available = list(table_like["columns"])
-        get_type = lambda col: None
+
+        def get_type(col):
+            return None
+
         kind = "stub"
+
     else:
         raise ValueError(
             "Unsupported table_like; expected pyarrow.Table, pandas.DataFrame, or stub dict."
@@ -875,9 +884,6 @@ def _validate_image_schema(
 
     # passed
     return
-
-
-from typing import Any, Generator, Iterable, List, Optional, Sequence, Tuple
 
 
 def _iter_images_from_table(
@@ -982,11 +988,19 @@ def _iter_images_from_table(
 
     # -------- materialize columns to Python lists --------
     if return_type == "arrow" and hasattr(table_like, "column_names"):
-        to_list = lambda col: _to_lists_arrow(table_like, col)
+
+        def to_list(col):
+            return _to_lists_arrow(table_like, col)
+
         n = table_like.num_rows
+
     elif return_type == "pandas" and hasattr(table_like, "columns"):
-        to_list = lambda col: _to_lists_pandas(table_like, col)
+
+        def to_list(col):
+            return _to_lists_pandas(table_like, col)
+
         n = len(table_like)
+
     elif isinstance(table_like, dict) and "columns" in table_like:
         # stub mode; synthesize empty lists of correct length if available
         n = int(table_like.get("rows", 0))
@@ -1031,14 +1045,8 @@ def _iter_images_from_table(
         paths = to_list(path_col)
 
     # -------- iterate rows --------
-    def _is_bytes(x): return isinstance(x, (bytes, bytearray))
     for i in range(n):
         b = bytes_list[i]
-        p = paths[i] if paths is not None and i < len(paths) else None
-        if b is None:
-            print(f"[RPQ.ROW] i={i} img_bytes=None path={p}")
-        elif not _is_bytes(b):
-            print(f"[RPQ.ROW] i={i} img_bytes_type={type(b).__name__} path={p}")
         h = int(heights[i]) if heights[i] is not None else None
         w = int(widths[i]) if widths[i] is not None else None
         c = int(chans[i]) if chans[i] is not None else None

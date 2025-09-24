@@ -11,11 +11,15 @@ from typing import (
     Sequence,
     Union,
     Tuple,
+    TYPE_CHECKING,
 )
 from pathlib import Path
 import json
 
 import numpy as np
+
+if TYPE_CHECKING:
+    import pyarrow as pa
 
 from blase.extracting.csv_backend import (
     memory_aware_batcher,
@@ -637,6 +641,100 @@ class Extract:
         # tracking
         track: bool = True,
     ) -> Iterator:
+        """
+        Stream Parquet/Feather data as batched tables or decoded images.
+
+        The reader builds a manifest from one or more sources, plans row-based
+        batches, and yields results either untracked (simple iterator) or tracked
+        (with CAS bookkeeping). In ``mode='images'`` it decodes image bytes into
+        arrays, PIL images, or tensors.
+
+        Parameters
+        ----------
+        source : str or Path or sequence of (str | Path)
+            File(s) or directory(ies). Directories are globbed using *pattern*.
+        pattern : str, default="**/*.parquet"
+            Glob used when a directory is provided.
+        recursive : bool, default=True
+            Use recursive globbing for directories.
+        format : {"auto","parquet","dataset","feather"}, default="auto"
+            Parsing mode hint. ``"dataset"`` treats directories as a dataset.
+        return_type : {"arrow","pandas"}, default="arrow"
+            Table representation for non-image batches and internal reads.
+        columns : sequence of str, optional
+            Projected columns. ``None`` reads all columns.
+        filters : Any, optional
+            Predicate pushdown (shape depends on backend).
+        batch_size : int, optional
+            Target rows per batch. If ``None``, a bytes-aware packer is used.
+        use_threads : bool, default=True
+            Enable multi-threaded Parquet reads when supported.
+        memory_map : bool, default=True
+            Use memory-mapped IO when supported.
+        deterministic : bool, default=True
+            Stabilize file ordering for reproducible manifests.
+        max_rows : int, optional
+            Upper bound on total rows to read.
+        limit_files : int, optional
+            Read at most this many files after sorting deterministically.
+        schema : pyarrow.Schema, optional
+            Optional schema hint.
+        to_pandas_kwargs : dict, optional
+            Passed to ``Table.to_pandas`` when ``return_type='pandas'``.
+        mode : {"table","images"}, default="table"
+            Table mode yields tables. Images mode yields decoded image items.
+        bytes_col : str, default="img_bytes"
+            Column containing encoded image bytes (images mode).
+        dims_cols : tuple(str, str, str), default=("height","width","channels")
+            Column names for image dimensions (images mode).
+        label_col : str or None, default="label"
+            Optional label column name (images mode).
+        path_col : str or None, default="path"
+            Optional path column name (images mode).
+        decode : {"np","pil","cv2","tensor"} or None, default=None
+            Force a decode target. If ``None``, controlled by *images_return*.
+        images_return : {"bytes","np","pil","tensor"}, default="bytes"
+            Output type for images mode.
+        track : bool, default=True
+            If True, record manifest and batch metadata to CAS and emit tracked
+            batches. If False, yield simple untracked batches.
+
+        Yields
+        ------
+        dict
+            When ``track=False`` (untracked): objects of the form
+            ``{"data": table_like, "meta": {...}}`` where *data* is a
+            ``pyarrow.Table`` or ``pandas.DataFrame`` per *return_type*.
+        tuple
+            When ``track=True`` and ``mode='images'``: tuples
+            ``((images, labels|None, paths), is_last, meta)`` where *images*
+            are ``bytes``/``np``/``PIL.Image``/tensor per *images_return*.
+
+        Raises
+        ------
+        ValueError
+            On unsupported ``format``, ``return_type``, ``mode``, ``decode``,
+            or ``images_return`` selections.
+
+        Notes
+        -----
+        - In tracked table mode (``track=True`` and ``mode='table'``), this
+        function records batches and metadata but does not yield table batches.
+        - Images mode automatically resolves and validates schema for required
+        columns, then iterates one image per row.
+
+        Examples
+        --------
+        Untracked tables:
+
+        >>> it = ex.read_parquet("data/", return_type="arrow", track=False)
+        >>> first = next(it); table, meta = first["data"], first["meta"]
+
+        Tracked images as NumPy arrays:
+
+        >>> it = ex.read_parquet("imgs/", mode="images", decode="np", images_return="np")
+        >>> (imgs, labels, paths), is_last, meta = next(it)
+        """
         if format not in ("auto", "parquet", "dataset", "feather"):
             raise ValueError(
                 f"Unsupported format: {format!r}. Must be 'auto', 'parquet', 'dataset', 'feather'."
@@ -824,16 +922,6 @@ class Extract:
                 new_meta["upstream"] = meta["upstream"]
 
                 if mode == "images":
-                    try:
-                        col = (bytes_col if mode == "images" else (columns or [None])[0])
-                        if col:
-                            if return_type == "arrow":
-                                arr = table_like.column(col)
-                                print(f"[RPQ.TABLE] rows={arr.length()} nulls({col})={arr.null_count}")
-                            else:
-                                print(f"[RPQ.TABLE] rows={len(table_like)} nulls({col})={int(table_like[col].isna().sum())}")
-                    except Exception as e:
-                        print(f"[RPQ.TABLE] inspect failed: {e!r}")
                     # 1) resolve columns
                     eff_bytes, eff_dims, eff_label, eff_path = _auto_detect_image_cols(
                         table_like=table_like,
@@ -855,18 +943,7 @@ class Extract:
                     lbls: Optional[List[Any]] = [] if eff_label else None
                     pths: List[Optional[str]] = []
 
-                    try:
-                        bcol = (columns and columns[0]) or bytes_col  # fallback
-                        if return_type == "arrow":
-                            arr = table_like.column(bcol)
-                            print(f"[RPQ.TABLE] rows={arr.length()} nulls(img_bytes)={arr.null_count}")
-                        else:  # pandas
-                            nulls = int(table_like[bcol].isna().sum())
-                            print(f"[RPQ.TABLE] rows={len(table_like)} nulls(img_bytes)={nulls}")
-                    except Exception as e:
-                        print(f"[RPQ.TABLE] inspect failed: {e!r}")
-
-                    for (one_imgs, one_labels, one_paths) in _iter_images_from_table(
+                    for one_imgs, one_labels, one_paths in _iter_images_from_table(
                         table_like=table_like,
                         return_type=return_type,
                         bytes_col=eff_bytes,
@@ -882,7 +959,11 @@ class Extract:
                         pths.extend(one_paths or [None] * len(one_imgs))
 
                     new_meta["items"] = len(imgs)
-                    yield ((imgs, lbls if lbls is not None else None, pths), plan["is_last"], new_meta)
+                    yield (
+                        (imgs, lbls if lbls is not None else None, pths),
+                        plan["is_last"],
+                        new_meta,
+                    )
 
             stream.close_ok()  # type: ignore[attr-defined]
 

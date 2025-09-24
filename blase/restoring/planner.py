@@ -171,8 +171,11 @@ def plan_for_step(run_path: Path, tip_step_hash: str) -> List[str]:
                 if man:
                     # try parquet first
                     ex_tbl = _latest_with_input_before(
-                        db, "%blase.Extract.read_parquet%",
-                        role="manifest", data_hash=man_tr, ts_before=tr_ts
+                        db,
+                        "%blase.Extract.read_parquet%",
+                        role="manifest",
+                        data_hash=man,
+                        ts_before=tr_ts,
                     )
                     if ex_tbl:
                         plan.append(ex_tbl)
@@ -227,18 +230,27 @@ def plan_for_step(run_path: Path, tip_step_hash: str) -> List[str]:
             if man_tr:
                 # prefer parquet, then images
                 ex_tbl = _latest_producer_of_output_before(
-                    db, "%blase.Extract.read_parquet%", data_hash=man_tr, ts_before=tr_ts
+                    db,
+                    "%blase.Extract.read_parquet%",
+                    data_hash=man_tr,
+                    ts_before=tr_ts,
                 )
                 if ex_tbl is None:
                     ex_tbl = _latest_with_input_before(
-                        db, "%blase.Extract.read_parquet%",
-                        role="manifest", data_hash=man_tr, ts_before=tr_ts
+                        db,
+                        "%blase.Extract.read_parquet%",
+                        role="manifest",
+                        data_hash=man_tr,
+                        ts_before=tr_ts,
                     )
                 if ex_tbl:
                     plan.append(ex_tbl)
                 else:
                     ex_img = _latest_producer_of_output_before(
-                        db, "%blase.Extract.read_images%", data_hash=man_tr, ts_before=tr_ts
+                        db,
+                        "%blase.Extract.read_images%",
+                        data_hash=man_tr,
+                        ts_before=tr_ts,
                     )
                     if ex_img is None:
                         ex_img = _latest_with_input_before(
@@ -284,8 +296,11 @@ def plan_for_step(run_path: Path, tip_step_hash: str) -> List[str]:
             ex_tbl = _latest_producer_of_output_before(
                 db, "%blase.Extract.read_parquet%", data_hash=man, ts_before=ts
             ) or _latest_with_input_before(
-                db, "%blase.Extract.read_parquet%",
-                role="manifest", data_hash=man, ts_before=ts
+                db,
+                "%blase.Extract.read_parquet%",
+                role="manifest",
+                data_hash=man,
+                ts_before=ts,
             )
             if ex_tbl:
                 plan.append(ex_tbl)
@@ -310,7 +325,7 @@ def plan_for_step(run_path: Path, tip_step_hash: str) -> List[str]:
 
     elif fqn.endswith("Extract.read_images"):
         return [tip_step_hash]
-    
+
     elif fqn.endswith("Extract.read_parquet"):
         return [tip_step_hash]
 

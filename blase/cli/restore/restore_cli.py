@@ -11,71 +11,6 @@ from blase.restoring.materialize import NeedReplay
 from blase.utils.config import RESTORE_CONFLICT as DEFAULT_CONFLICT, RESTORE_DEFAULT_DIR
 from blase.utils.hashing import Hash
 
-# ----- Debug helpers -----
-
-def _none_like(x):
-    import numpy as np
-    if x is None: return True
-    if isinstance(x, np.ndarray) and x.dtype == object and x.ndim == 0:
-        try: return x.item() is None
-        except Exception: return True
-    return False
-
-def _dbg_batch_summary(tag, batch, meta=None, is_last=None, max_items=3):
-    import numpy as np
-    def _typ(v):
-        try: return type(v).__name__
-        except: return str(type(v))
-    # cases: (imgs,labels,paths), table-like, or plain list
-    if isinstance(batch, (tuple, list)) and len(batch) == 3:
-        imgs, labels, paths = batch
-        kinds = [ _typ(x) for x in (imgs if isinstance(imgs, (list, tuple)) else [imgs]) ]
-        nonec = sum(_none_like(x) for x in (imgs if isinstance(imgs, (list, tuple)) else [imgs]))
-        print(f"[{tag}] triple imgs_n={len(imgs) if hasattr(imgs,'__len__') else 1} "
-              f"none={nonec} kinds0={kinds[:max_items]}")
-        if labels is not None:
-            print(f"[{tag}] labels_n={len(labels) if hasattr(labels,'__len__') else 1}")
-        if paths is not None:
-            print(f"[{tag}] paths_n={len(paths) if hasattr(paths,'__len__') else 1} "
-                  f"paths0={(paths[:max_items] if isinstance(paths,(list,tuple)) else paths)}")
-    elif hasattr(batch, "schema"):  # Arrow table
-        try:
-            cols = list(getattr(batch, "schema").names)
-        except Exception:
-            cols = "<unknown>"
-        print(f"[{tag}] table-like type={type(batch).__name__} cols={cols}")
-        if "img_bytes" in getattr(batch, "schema").names:
-            try:
-                arr = batch.column("img_bytes")
-                print(f"[{tag}] img_bytes nulls={arr.null_count} len={arr.length()}")
-            except Exception as e:
-                print(f"[{tag}] table inspect err: {e!r}")
-    else:
-        seq = batch if isinstance(batch, (list, tuple)) else [batch]
-        kinds = [ _typ(x) for x in seq[:max_items] ]
-        nones = sum(_none_like(x) for x in seq)
-        print(f"[{tag}] seq_n={len(seq)} none={nones} kinds0={kinds}")
-    if isinstance(meta, dict):
-        ord_ = meta.get("ordinal")
-        bhash = meta.get("batch_hash")
-        mrh = meta.get("manifest_root_hash")
-        print(f"[{tag}] meta ordinal={ord_} batch_hash={bhash} root={mrh} last={is_last}")
-
-def _dbg_stream(tag, gen, peek=0):
-    """Wrap a generator to print a summary for each item, then yield it unchanged."""
-    def _wrap():
-        for k, item in enumerate(gen, 1):
-            if isinstance(item, tuple) and len(item) == 3 and isinstance(item[1], dict):
-                batch, meta, is_last = item
-            elif isinstance(item, tuple) and len(item) == 2:
-                batch, is_last = item; meta = {}
-            else:
-                batch = item; meta = {}; is_last = False
-            if peek == 0 or k <= peek:
-                _dbg_batch_summary(tag, batch, meta, is_last)
-            yield item
-    return _wrap()
-
 
 # --------- run discovery helpers ---------
 
@@ -510,17 +445,54 @@ def cmd_plan(args):
 # --------- run (verify/materialize/replay) ---------
 
 
-def _collect_batch_ids(ins):
-    roles = {"batch_desc","table.batch.meta","batch","table.batch"}
-    return [i["data_hash"] for i in ins if i.get("role") in roles]
-
-
 def _restore_gen_for_manifest(run_path, manifest_hash, step_hash, store, bindings):
+    """
+    Build and run a restore generator for a recorded manifest.
+
+    The function inspects the upstream step to collect batch-identifiers, then
+    prefers a Parquet restore path if available, falling back to the images
+    restore path. It returns the generator produced by the selected bindings
+    call.
+
+    Parameters
+    ----------
+    run_path : pathlib.Path or str
+        Path to the run directory containing `nodes/nodes.db` and `cas/`.
+    manifest_hash : str
+        Data hash of the recorded table/images manifest to restore.
+    step_hash : str
+        Upstream step hash whose inputs encode batch descriptors.
+    store : object
+        Store API with `load_step_inputs(...)` and optionally
+        `read_parquet_params_for_manifest(...)` / `read_images_params_for_manifest(...)`.
+    bindings : object
+        Bindings API exposing `run_read_parquet_restore(...)` and
+        `run_read_images_restore(...)`.
+
+    Returns
+    -------
+    Iterator
+        Generator yielding 3-tuples ``(data, meta, is_last)`` where:
+        * `data` : backend-specific payload (e.g., tables or image batches)
+        * `meta` : dict with provenance (e.g., ordinal, batch descriptors)
+        * `is_last` : bool flagging the final batch
+
+    Raises
+    ------
+    SystemExit
+        If neither Parquet nor images restore parameters can be resolved
+        for the given `manifest_hash`.
+
+    Notes
+    -----
+    Parquet restore is attempted first. If the Parquet bindings raise an
+    exception, the function silently falls back to the images path.
+    """
     ts_before = planner._step_row(planner._db(run_path), step_hash)["ts_start"]
     ins = store.load_step_inputs(run_path, step_hash)
 
     def _collect_batch_ids(ins):
-        roles = {"batch_desc","table.batch.meta","batch","table.batch","batchmeta"}
+        roles = {"batch_desc", "table.batch.meta", "batch", "table.batch", "batchmeta"}
         return [i["data_hash"] for i in ins if i.get("role") in roles]
 
     batch_ids = _collect_batch_ids(ins)
@@ -557,7 +529,9 @@ def _restore_gen_for_manifest(run_path, manifest_hash, step_hash, store, binding
                 run_path=run_path, params=ri, realized=realized, transform_fn=None
             )
 
-    raise SystemExit("replay: cannot find read_parquet or read_images params for manifest")
+    raise SystemExit(
+        "replay: cannot find read_parquet or read_images params for manifest"
+    )
 
 
 def _exec_plan_for_step(
@@ -571,61 +545,58 @@ def _exec_plan_for_step(
     ephemeral_only: bool = False,
 ) -> Dict[str, Path]:
     """
-    Replay a DAG of recorded steps forward from any upstream roots to `tip_step_hash`.
+    Replay recorded steps up to ``tip_step_hash`` and materialize sinks.
 
-    This is the core engine used by `blase restore run --data <hash>` and similar
-    commands. It walks the stored execution graph, resolves upstream inputs,
-    and replays each step’s recorded function in dependency order, producing
-    exactly the same materialized files.
+    Walks the stored plan in dependency order, reconstructs upstream generators
+    for extract steps, re-applies recorded transforms, and replays load steps to
+    produce the same on-disk artifacts (CSV files or Parquet shards). Supports
+    both images and table/parquet flows. For ``Transform.apply_function``,
+    prefers a Parquet-backed upstream when a manifest anchor is present, and
+    falls back to images if needed. When an upstream generator already exists,
+    it is piped directly into the next transform without re-anchoring.
 
     Parameters
     ----------
     run_path : Path
-        Root directory of the recorded run (contains `nodes/` and `cas/` stores).
+        Run root containing ``nodes/`` and ``cas/``.
     tip_step_hash : str
-        Hash of the final step to replay. The function backtracks from this hash
-        to discover and execute all required upstream steps.
+        Step hash to reach; all required upstream steps are replayed.
     to_path : str or None
-        Optional override path for the final sink’s output. If supplied,
-        the final output (CSV file or Parquet directory) is written there
-        instead of the recorded default.
+        Optional final target override for the sink. When set, the last sink
+        writes here regardless of the recorded location.
     backend_override : str or None
-        Optional override for downstream I/O backends (e.g., a different
-        Parquet writer). Passed to sink replay functions if supported.
+        Optional sink backend override passed to replay handlers.
     seen_steps : set of str, optional
-        Set of step hashes already executed. Steps in this set are skipped,
-        allowing incremental or multi-branch replays without duplication.
+        Steps already executed in this process; they are skipped.
     created_paths : list of Path, optional
-        Collects every on-disk path created during replay for caller inspection
-        or later cleanup.
-    ephemeral_only : bool, default=False
-        If True, write outputs but do not record them back into the CAS
-        materialization index. Useful for temporary previews or dry runs.
+        Collector for all paths created during this replay.
+    ephemeral_only : bool, default False
+        If True, do not record materializations back to CAS.
 
     Returns
     -------
     dict
-        Mapping of `{produced_data_hash: Path(actual_output_file)}` for every
-        sink materialized during replay (e.g., CSV files, Parquet shards).
+        Mapping ``{produced_data_hash: Path(output_file)}`` for each sink.
+
+    Raises
+    ------
+    SystemExit
+        If required anchors (e.g., manifest/source) are missing or if neither
+        Parquet nor images params can be resolved for a manifest-anchored
+        transform.
 
     Notes
     -----
-    - The replay algorithm performs a topological walk from each required
-      upstream step to the requested tip. Each known function type is handled
-      specifically:
-        * `blase.Extract.read_csv` and `blase.Extract.read_images` recreate
-          upstream batch generators.
-        * `blase.Transform.apply_function` re-applies stored user functions.
-        * `blase.Load.save_to_csv` and `blase.Load.save_images_to_parquet`
-          write final sink files and validate their hashes.
-    - Steps that have already been replayed (present in `seen_steps`) are
-      skipped. Outputs already present with matching CAS hashes are not
-      duplicated.
-    - If `ephemeral_only` is True, on-disk artifacts are created but not
-      registered as permanent CAS data, so subsequent runs will not treat
-      them as cached outputs.
-    - Raises `SystemExit` if required upstream anchors (e.g., manifest or
-      source data) are missing or inconsistent with recorded metadata.
+    Handles:
+      * ``Extract.read_csv`` → CSV stream restore.
+      * ``Extract.read_images`` → image batches via recorded manifest + descs.
+      * ``Extract.read_parquet`` → table/image-compatible batches with recorded
+        ``manifest`` and ``batch_desc_*``.
+      * ``Transform.apply_function`` → uses an existing upstream generator when
+        available; otherwise anchors by ``source`` or ``manifest``. Tries
+        ``read_parquet`` params first, then images.
+      * ``Load.save_to_csv`` and ``Load.save_images_to_parquet`` → write outputs,
+        validate expected hashes, and optionally record materializations.
     """
     plan = planner.plan_for_step(run_path, tip_step_hash) or []
     upstream = None
@@ -641,7 +612,6 @@ def _exec_plan_for_step(
 
         st = store.load_step(run_path, sh)
         fqn = st["function_fqn"]
-        print("FQN", fqn)
 
         if fqn == "blase.Extract.read_csv":
             ins = store.load_step_inputs(run_path, sh)
@@ -698,8 +668,8 @@ def _exec_plan_for_step(
             continue
 
         if fqn == "blase.Extract.read_parquet":
-            ins = store.load_step_inputs(run_path, sh)   # code/env only (unused here)
-            outs = store.load_step_outputs(run_path, sh) # manifest + batch_desc_*
+            ins = store.load_step_inputs(run_path, sh)  # code/env only (unused here)
+            outs = store.load_step_outputs(run_path, sh)  # manifest + batch_desc_*
 
             manifest_hash = next(
                 (o["data_hash"] for o in outs if o["name"] == "manifest"), None
@@ -730,16 +700,12 @@ def _exec_plan_for_step(
             if batch_descs:
                 realized["batch_descs"] = batch_descs
 
-            print("[DBG.EXTRACT.RPQ] params", st["params"])
-            print("[DBG.EXTRACT.RPQ] realized", realized)
             upstream = bindings.run_read_parquet_restore(
                 run_path=run_path,
                 params=st["params"],
                 realized=realized,
                 transform_fn=None,
             )
-            # FOR DEBUG
-            _dbg_stream("EXTRACT.RPQ", upstream, peek=1)
             continue
 
         if fqn == "blase.Transform.apply_function":
@@ -774,7 +740,10 @@ def _exec_plan_for_step(
 
             if role == "source":
                 src_path, _ = _resolve_source_no_copy(
-                    run_path, anchor_hash, seen_steps=seen_steps, created_paths=created_paths
+                    run_path,
+                    anchor_hash,
+                    seen_steps=seen_steps,
+                    created_paths=created_paths,
                 )
                 upstream = bindings.run_apply_function_restore(
                     run_path=run_path,
@@ -789,18 +758,34 @@ def _exec_plan_for_step(
             ts_before = planner._step_row(planner._db(run_path), sh)["ts_start"]
 
             # Try parquet first
-            rp_params = getattr(store, "read_parquet_params_for_manifest", lambda *a, **k: None)(
-                run_path, man_hash, ts_before=ts_before
-            )
+            rp_params = getattr(
+                store, "read_parquet_params_for_manifest", lambda *a, **k: None
+            )(run_path, man_hash, ts_before=ts_before)
             if rp_params:
                 ins_tr = store.load_step_inputs(run_path, sh)
-                batch_descs = [i["data_hash"] for i in ins_tr if i["role"] in ("batch_desc","table.batch.meta","batchmeta","batch","table.batch")]
+                batch_descs = [
+                    i["data_hash"]
+                    for i in ins_tr
+                    if i["role"]
+                    in (
+                        "batch_desc",
+                        "table.batch.meta",
+                        "batchmeta",
+                        "batch",
+                        "table.batch",
+                    )
+                ]
                 ins2 = store.load_step_inputs(run_path, sh)
-                manifest_hash = next((i["data_hash"] for i in ins2 if i.get("role") == "manifest"), None)
+                manifest_hash = next(
+                    (i["data_hash"] for i in ins2 if i.get("role") == "manifest"), None
+                )
                 if not manifest_hash:
-                    raise SystemExit("restore: cannot resolve manifest for upstream stream")
-                gen = _restore_gen_for_manifest(run_path, manifest_hash, sh, store, bindings)
-                gen = _dbg_stream("XFORM.IN", gen, peek=1) # DEBUG
+                    raise SystemExit(
+                        "restore: cannot resolve manifest for upstream stream"
+                    )
+                gen = _restore_gen_for_manifest(
+                    run_path, manifest_hash, sh, store, bindings
+                )
                 upstream = bindings.run_apply_function_restore(
                     run_path=run_path,
                     params=st["params"],
@@ -810,12 +795,21 @@ def _exec_plan_for_step(
                 continue
 
             # Fallback to images
-            ri_params = store.read_images_params_for_manifest(run_path, man_hash, ts_before=ts_before)
+            ri_params = store.read_images_params_for_manifest(
+                run_path, man_hash, ts_before=ts_before
+            )
             if not ri_params:
-                raise SystemExit("replay: cannot find read_parquet or read_images params for manifest")
+                raise SystemExit(
+                    "replay: cannot find read_parquet or read_images params for manifest"
+                )
 
             ins_tr = store.load_step_inputs(run_path, sh)
-            batch_descs = [i["data_hash"] for i in ins_tr if i["role"] in ("batch_desc", "table.batch.meta", "batch", "table.batch")]
+            batch_descs = [
+                i["data_hash"]
+                for i in ins_tr
+                if i["role"]
+                in ("batch_desc", "table.batch.meta", "batch", "table.batch")
+            ]
             gen = bindings.run_read_images_restore(
                 run_path=run_path,
                 params=ri_params,
@@ -923,7 +917,6 @@ def _exec_plan_for_step(
                 conflict_policy = "overwrite"
 
             upstream_gen = upstream or _upstream_gen_for_sink(run_path, sh)
-            #upstream_gen = _dbg_stream("SINK.IN", upstream_gen, peek=1) # DEBUG
             handler = bindings.RESTORE_HANDLERS[fqn]
             out_paths = handler(
                 run_path=run_path,
@@ -1191,11 +1184,13 @@ def _build_stream_for_step(run_path: Path, step_hash: str):
         return bindings.run_read_images_restore(
             run_path=run_path, params=st["params"], realized=realized, transform_fn=None
         )
-    
+
     # ---- Extract.read_parquet ----
     if fqn.endswith("Extract.read_parquet"):
         ins = store.load_step_inputs(run_path, step_hash)
-        manifest_hash = next((i["data_hash"] for i in ins if i["role"] == "manifest"), None)
+        manifest_hash = next(
+            (i["data_hash"] for i in ins if i["role"] == "manifest"), None
+        )
         batch_hashes = [i["data_hash"] for i in ins if i["role"] == "batch"]
 
         realized = {}
@@ -1208,14 +1203,6 @@ def _build_stream_for_step(run_path: Path, step_hash: str):
             realized["manifest"] = manifest_hash
         if batch_hashes:
             realized["batch"] = batch_hashes
-
-        # Debug
-        print("[RESTORE.RPQ.CALL] params=",
-            {k: st["params"].get(k) for k in ("mode","images_return","decode",
-                                                "bytes_col","dims_cols","path_col",
-                                                "return_type")})
-        print("[RESTORE.RPQ.CALL] realized=",
-            {k: realized.get(k) for k in ("sources","source","manifest","batch","batch_descs")})
 
         return bindings.run_read_parquet_restore(
             run_path=run_path,
@@ -1264,7 +1251,7 @@ def _build_stream_for_step(run_path: Path, step_hash: str):
                             "batchmeta",
                             "batch_desc_1",
                             "batch_desc_2",
-                            "table.batch.meta"
+                            "table.batch.meta",
                         )
                     ),
                     None,

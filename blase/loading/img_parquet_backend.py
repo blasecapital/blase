@@ -155,66 +155,8 @@ def _build_parquet_table_from_images(
 ) -> pa.Table:
     """Create a Arrow table with encoded bytes + dims + optional labels/paths + lineage."""
     images, labels, paths = _normalize_images_batch(data, meta)
-    print(f"[SINK.NORM2] imgs_n={len(images) if hasattr(images,'__len__') else 1} "
-        f"types0={[type(images[0]).__name__] if isinstance(images,(list,tuple)) and images else []} "
-        f"labels={'None' if labels is None else len(labels)} paths_n={len(paths) if isinstance(paths,(list,tuple)) else 0}")
 
-    # ---- DEBUG: shapes/types of images, labels, paths ----
-    def _none_like(x):
-        try:
-            import numpy as _np
-            if x is None:
-                return True
-            if isinstance(x, _np.ndarray) and x.dtype == object and x.ndim == 0:
-                return x.item() is None
-            return False
-        except Exception:
-            return x is None
-
-    def _shape_of(x):
-        try:
-            import numpy as _np
-            if hasattr(x, "shape"):
-                return tuple(getattr(x, "shape", ()))
-            if isinstance(x, (bytes, bytearray)):
-                return f"bytes[{len(x)}]"
-            return "-"
-        except Exception:
-            return "-"
-
-    def _summ_seq(name, seq):
-        try:
-            import numpy as _np
-            if isinstance(seq, (list, tuple)):
-                n = len(seq)
-                t0 = type(seq[0]).__name__ if n else "-"
-                s0 = _shape_of(seq[0]) if n else "-"
-                nonec = sum(_none_like(x) for x in seq)
-                print(f"[DEBUG.{name}] list len={n} t0={t0} s0={s0} none_like={nonec}")
-                if n and isinstance(seq[0], (bytes, bytearray)):
-                    head = bytes(seq[0][:8])
-                    print(f"[DEBUG.{name}] first_bytes_head={head!r}")
-            elif isinstance(seq, _np.ndarray):
-                print(f"[DEBUG.{name}] ndarray shape={seq.shape} dtype={seq.dtype} ndim={seq.ndim}")
-            elif seq is None:
-                print(f"[DEBUG.{name}] None")
-            else:
-                print(f"[DEBUG.{name}] scalar type={type(seq).__name__} preview={str(seq)[:40]}")
-        except Exception as e:
-            print(f"[DEBUG.{name}] <error {e!r}>")
-
-    _summ_seq("IMAGES", images)
-    _summ_seq("LABELS", labels)
-    _summ_seq("PATHS",  paths)
-
-    # Unwrap object-ndarray containers into a list of items
-    # import numpy as np
-    # if isinstance(images, np.ndarray) and images.dtype == object:
-    #     images = [x for x in images.ravel()]
-    # elif isinstance(images, (list, tuple)) and len(images) == 1 and isinstance(images[0], np.ndarray) and images[0].dtype == object:
-    #     images = [x for x in images[0].ravel()]
-
-    # (optional but recommended) drop/align invalid rows here to avoid NoneType in encoder
+    # drop/align invalid rows here to avoid NoneType in encoder
     bad_ix = [i for i, x in enumerate(images) if x is None]
     if bad_ix:
         # keep indices
@@ -223,31 +165,7 @@ def _build_parquet_table_from_images(
         if labels is not None:
             labels = [labels[i] if i < len(labels) else None for i in keep]
         if paths is not None:
-            paths  = [paths[i]  if i < len(paths)  else None for i in keep]
-
-    def _count_none_like(seq):
-        import numpy as np
-        # sequences
-        if isinstance(seq, (list, tuple)):
-            return sum(_none_like(x) for x in seq)
-        # numpy arrays
-        if isinstance(seq, np.ndarray):
-            if seq.dtype == object:
-                # iterate elements (handles 0-D, 1-D, etc.)
-                return sum(_none_like(x) for x in seq.ravel())
-            return 0
-        # scalars
-        return int(_none_like(seq))
-    try:
-        import numpy as np
-        if isinstance(images, np.ndarray):
-            print(f"[SINK.NORM] images ndarray shape={images.shape} dtype={images.dtype} ndim={images.ndim}")
-        elif isinstance(images, (list, tuple)):
-            t0 = type(images[0]).__name__ if images else "<empty>"
-            print(f"[SINK.NORM] images list len={len(images)} t0={t0}")
-        print(f"[SINK.NORM] none_like={_count_none_like(images)}")
-    except Exception:
-        pass
+            paths = [paths[i] if i < len(paths) else None for i in keep]
 
     enc_bytes, heights, widths, chans = [], [], [], []
     for img in images:

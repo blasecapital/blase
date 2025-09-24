@@ -1,6 +1,7 @@
 import pytest
 import warnings
 import types
+from pathlib import Path
 
 import pandas as pd
 import polars as pl
@@ -319,3 +320,242 @@ def test_seed_default_applied_when_shuffle_true(isolate_deps, monkeypatch, tmp_p
     )
     # The implementation sets seed to 42 when shuffle=True and seed is None
     assert called["seed"] == 42
+
+
+# ---------------- read_parquet tests ----------------
+
+
+def test_read_parquet_param_validation_errors(monkeypatch):
+    from blase.extract import Extract
+    import blase.extract as mod
+
+    # Minimal stubs to avoid touching FS if anything runs
+    monkeypatch.setattr(
+        mod, "_normalize_source_list", lambda *a, **k: [Path("/p/a.parquet")]
+    )
+    monkeypatch.setattr(
+        mod,
+        "_scan_parquet_manifest_stub",
+        lambda **kw: {"schema_fp": "S", "kind": "parquet"},
+    )
+    monkeypatch.setattr(
+        mod, "_plan_parquet_batches_stub", lambda **kw: [{"count": 1, "is_last": True}]
+    )
+
+    ex = Extract()
+
+    with pytest.raises(ValueError):
+        for _ in ex.read_parquet("/p", format="bad"):  # noqa: B018
+            pass
+
+    with pytest.raises(ValueError):
+        for _ in ex.read_parquet("/p", return_type="bad"):  # noqa: B018
+            pass
+
+    with pytest.raises(ValueError):
+        for _ in ex.read_parquet("/p", mode="bad"):  # noqa: B018
+            pass
+
+    with pytest.raises(ValueError):
+        for _ in ex.read_parquet("/p", decode="bad"):  # noqa: B018
+            pass
+
+    with pytest.raises(ValueError):
+        for _ in ex.read_parquet("/p", images_return="bad"):  # noqa: B018
+            pass
+
+
+def test_read_parquet_untracked_table_mode(monkeypatch):
+    """
+    Track disabled (or Track.get -> None).
+    Expect simple dict batches: {"data": <table_like>, "meta": {...}}.
+    """
+    from blase.extract import Extract
+    import blase.extract as mod
+
+    # Force untracked path
+    monkeypatch.setattr(mod, "Track", types.SimpleNamespace(get=lambda _: None))
+
+    # Stubs
+    monkeypatch.setattr(
+        mod,
+        "_normalize_source_list",
+        lambda *a, **k: [Path("/p/a.parquet"), Path("/p/b.parquet")],
+    )
+    monkeypatch.setattr(
+        mod,
+        "_scan_parquet_manifest_stub",
+        lambda **kw: {"schema_fp": "SFP", "kind": "dataset"},
+    )
+    monkeypatch.setattr(
+        mod,
+        "_plan_parquet_batches_stub",
+        lambda **kw: [{"count": 2, "is_last": False}, {"count": 1, "is_last": True}],
+    )
+    monkeypatch.setattr(
+        mod,
+        "_read_parquet_table_stub",
+        lambda manifest,
+        plan,
+        return_type,
+        columns,
+        use_threads,
+        to_pandas_kwargs=None,
+        mode=None: f"T{plan['count']}",
+    )
+
+    ex = Extract()
+    it = ex.read_parquet(
+        source="/data/parquet_root",
+        mode="table",
+        return_type="arrow",
+        track=False,  # belt-and-suspenders; Track.get also returns None
+    )
+
+    batches = list(it)
+    assert len(batches) == 2
+
+    d0 = batches[0]
+    assert set(d0.keys()) == {"data", "meta"}
+    assert d0["data"] == "T2"
+    m0 = d0["meta"]
+    assert m0["ordinal"] == 1
+    assert m0["count"] == 2
+    assert m0["mode"] == "table"
+    assert m0["schema_fp"] == "SFP"
+    assert m0["source_kind"] == "dataset"
+    assert m0["batch_policy"]["mode"] == "rows"
+
+    d1 = batches[1]
+    assert d1["data"] == "T1"
+    assert d1["meta"]["ordinal"] == 2
+    assert d1["meta"]["count"] == 1
+    assert d1["meta"]["mode"] == "table"
+
+
+def test_read_parquet_tracked_images_mode(monkeypatch):
+    """
+    Track enabled. images mode.
+    Expect per-batch tuples: ((imgs, labels, paths), is_last, meta)
+    with upstream references and items count.
+    """
+    from blase.extract import Extract
+    import blase.extract as mod
+
+    # Use provided FakeTracker/FakeStream
+    t = FakeTracker()
+    monkeypatch.setattr(mod, "Track", types.SimpleNamespace(get=lambda _: t))
+
+    # Manifest + hashing + dataset
+    monkeypatch.setattr(
+        mod, "_normalize_source_list", lambda *a, **k: [Path("/p/a.parquet")]
+    )
+    monkeypatch.setattr(
+        mod,
+        "_scan_parquet_manifest_stub",
+        lambda **kw: {"schema_fp": "SFP", "kind": "dataset"},
+    )
+    monkeypatch.setattr(
+        mod, "_ensure_parquet_content_hashes", lambda manifest: manifest
+    )
+    monkeypatch.setattr(
+        mod, "_compute_manifest_root_hash_stub", lambda manifest: "rootHASH"
+    )
+    monkeypatch.setattr(
+        mod,
+        "build_manifest_descriptor",
+        lambda **kw: {"root_hash": "rootHASH", "n": 2},
+    )
+    monkeypatch.setattr(mod, "ensure_dataset_for_manifest", lambda **kw: "ds1")
+
+    # Plan: two batches, counts 2 then 1
+    monkeypatch.setattr(
+        mod,
+        "_plan_parquet_batches_stub",
+        lambda **kw: [
+            {"count": 2, "is_last": False, "fragment": 0, "row_group": 0, "offset": 0},
+            {"count": 1, "is_last": True, "fragment": 0, "row_group": 1, "offset": 2},
+        ],
+    )
+    monkeypatch.setattr(
+        mod, "_compute_batch_hash_stub", lambda root, plan: f"bh_{plan['count']}"
+    )
+
+    # Table read is irrelevant for images but keep a stub
+    monkeypatch.setattr(
+        mod,
+        "_read_parquet_table_stub",
+        lambda manifest,
+        plan,
+        return_type,
+        columns,
+        mode=None: f"ArrowTable(count={plan['count']})",
+    )
+
+    # Images path helpers
+    monkeypatch.setattr(
+        mod,
+        "_auto_detect_image_cols",
+        lambda table_like, bytes_col, dims_cols, label_col, path_col: (
+            bytes_col,
+            dims_cols,
+            label_col,
+            path_col,
+        ),
+    )
+    monkeypatch.setattr(mod, "_validate_image_schema", lambda **kw: None)
+
+    def _iter_images_from_table(**kw):
+        cnt = kw["table_like"]
+        # parse "ArrowTable(count=N)" -> N
+        n = int(str(cnt).split("=")[1].rstrip(")"))
+        imgs = [f"img{i}" for i in range(n)]
+        labels = [f"lbl{i}" for i in range(n)] if kw.get("label_col") else None
+        paths = [f"/p/{i}.jpg" for i in range(n)]
+        yield imgs, labels, paths
+
+    monkeypatch.setattr(
+        mod, "_iter_images_from_table", lambda **kw: _iter_images_from_table(**kw)
+    )
+
+    ex = Extract()
+    gen = ex.read_parquet(
+        source="/data/parquet_root",
+        mode="images",
+        return_type="arrow",
+        decode="np",
+        images_return="np",
+        track=True,
+    )
+
+    out = list(gen)
+    assert len(out) == 2
+
+    # Batch 1
+    (imgs1, lbls1, paths1), last1, meta1 = out[0]
+    assert last1 is False
+    assert imgs1 == ["img0", "img1"]
+    assert isinstance(lbls1, list) and len(lbls1) == 2
+    assert len(paths1) == 2
+    assert meta1["ordinal"] == 1
+    assert meta1["count"] == 2
+    assert meta1["manifest_root_hash"] == "rootHASH"
+    assert meta1["producer_step"] == "fake_step_hash"
+    up1 = meta1["upstream"]
+    roles1 = {u["role"] for u in up1}
+    assert roles1 == {"manifest", "batch_desc", "batch"}
+
+    # Batch 2
+    (imgs2, lbls2, paths2), last2, meta2 = out[1]
+    assert last2 is True
+    assert imgs2 == ["img0"]
+    assert isinstance(lbls2, list) and len(lbls2) == 1
+    assert len(paths2) == 1
+    assert meta2["ordinal"] == 2
+    assert meta2["count"] == 1
+
+    # Stream registered outputs: manifest + batch_desc_* tokens exist
+    names = [
+        name for (name, _id) in t.stream("x", {}, None).step.outputs
+    ]  # new stream; check shape only
+    assert isinstance(names, list)  # sanity of FakeStream API

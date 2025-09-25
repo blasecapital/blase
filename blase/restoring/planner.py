@@ -88,6 +88,77 @@ def _latest_producer_of_output_before(
     return r["step_hash"] if r else None
 
 
+def _append_if(plan: List[str], step_hash: Optional[str]) -> None:
+    if step_hash:
+        plan.append(step_hash)
+
+
+def _prefer_parquet_then_images_for_manifest(
+    db, manifest_hash: str, ts_before: int
+) -> Optional[str]:
+    """Return latest extract step for a manifest, preferring parquet then images."""
+    ex_tbl = _latest_producer_of_output_before(
+        db, "%blase.Extract.read_parquet%", data_hash=manifest_hash, ts_before=ts_before
+    ) or _latest_with_input_before(
+        db,
+        "%blase.Extract.read_parquet%",
+        role="manifest",
+        data_hash=manifest_hash,
+        ts_before=ts_before,
+    )
+    if ex_tbl:
+        return ex_tbl
+
+    ex_img = _latest_producer_of_output_before(
+        db, "%blase.Extract.read_images%", data_hash=manifest_hash, ts_before=ts_before
+    ) or _latest_with_input_before(
+        db,
+        "%blase.Extract.read_images%",
+        role="manifest",
+        data_hash=manifest_hash,
+        ts_before=ts_before,
+    )
+    return ex_img
+
+
+def _latest_extract_for_source(db, src_hash: str, ts_before: int) -> Optional[str]:
+    """CSV lineage fallback when no manifest path exists."""
+    return _latest_with_source_before(
+        db, "%blase.Extract.read_csv%", src_hash, ts_before
+    )
+
+
+def _latest_transform_for_manifest_or_source(
+    db, tip_ts: int, manifest_hash: Optional[str], src_hash: Optional[str]
+) -> Optional[str]:
+    """
+    Find the latest Transform.apply_function that is causally before tip_ts,
+    anchored by manifest when available, else by source.
+    """
+    if manifest_hash:
+        tr = _latest_with_input_before(
+            db,
+            "%blase.Transform.apply_function%",
+            role="manifest",
+            data_hash=manifest_hash,
+            ts_before=tip_ts,
+        )
+        if tr:
+            return tr
+
+    if src_hash:
+        return _latest_with_source_before(
+            db, "%blase.Transform.apply_function%", src_hash, tip_ts
+        )
+
+    return None
+
+
+# ---------------------------
+# Main planner
+# ---------------------------
+
+
 def plan_for_step(run_path: Path, tip_step_hash: str) -> List[str]:
     """
     Construct a replay plan for a given pipeline step.
@@ -152,184 +223,80 @@ def plan_for_step(run_path: Path, tip_step_hash: str) -> List[str]:
     tip = _step_row(db, tip_step_hash)
     fqn = tip["function_fqn"]
     ts = tip["ts_start"]
-    # CSV-style source if present (back-compat)
+
+    # Back-compat CSV source (may be absent on image/table flows)
     src = _source_hash_for_step(db, tip_step_hash)
     plan: List[str] = []
 
-    # ---------------------------
-    # Load → CSV (existing path)
-    # ---------------------------
+    # ---- Load.save_to_csv ----
     if fqn.endswith("Load.save_to_csv"):
         if src:
             tr = _latest_with_source_before(
                 db, "%blase.Transform.apply_function%", src, ts
             )
             if tr:
-                # prefer parquet lineage if transform had a manifest
-                man = _input_hash_for_role(db, tr, "manifest")
                 tr_ts = _step_row(db, tr)["ts_start"]
+                man = _input_hash_for_role(db, tr, "manifest")
+
                 if man:
-                    # try parquet first
-                    ex_tbl = _latest_with_input_before(
-                        db,
-                        "%blase.Extract.read_parquet%",
-                        role="manifest",
-                        data_hash=man,
-                        ts_before=tr_ts,
+                    _append_if(
+                        plan, _prefer_parquet_then_images_for_manifest(db, man, tr_ts)
                     )
-                    if ex_tbl:
-                        plan.append(ex_tbl)
-                    else:
-                        ex_img = _latest_with_input_before(
-                            db,
-                            "%blase.Extract.read_images%",
-                            role="manifest",
-                            data_hash=man,
-                            ts_before=_step_row(db, tr)["ts_start"],
-                        )
-                        if ex_img:
-                            plan.append(ex_img)
-                # TODO Make a better fallback or update read_csv
                 else:
-                    ex_csv = _latest_with_source_before(
-                        db,
-                        "%blase.Extract.read_csv%",
-                        src,
-                        _step_row(db, tr)["ts_start"],
-                    )
-                    if ex_csv:
-                        plan.append(ex_csv)
+                    _append_if(plan, _latest_extract_for_source(db, src, tr_ts))
+
                 plan.append(tr)
+
         plan.append(tip_step_hash)
         return plan
 
-    # ---------------------------------------------
-    # Load → images→parquet (prefer manifest)
-    # ---------------------------------------------
-    elif fqn.endswith("Load.save_images_to_parquet"):
-        man = _input_hash_for_role(db, tip_step_hash, "manifest")
-        tr = None
-        if man:
-            tr = _latest_with_input_before(
-                db,
-                "%blase.Transform.apply_function%",
-                role="manifest",
-                data_hash=man,
-                ts_before=ts,
-            )
-        if tr is None and src:
-            tr = _latest_with_source_before(
-                db, "%blase.Transform.apply_function%", src, ts
-            )
+    # ---- Load.save_images_to_parquet ----
+    if fqn.endswith("Load.save_images_to_parquet"):
+        man_tip = _input_hash_for_role(db, tip_step_hash, "manifest")
+        tr = _latest_transform_for_manifest_or_source(db, ts, man_tip, src)
 
         if tr:
             tr_ts = _step_row(db, tr)["ts_start"]
             man_tr = _input_hash_for_role(db, tr, "manifest")
 
-            ex_img = None
             if man_tr:
-                # prefer parquet, then images
-                ex_tbl = _latest_producer_of_output_before(
-                    db,
-                    "%blase.Extract.read_parquet%",
-                    data_hash=man_tr,
-                    ts_before=tr_ts,
+                _append_if(
+                    plan, _prefer_parquet_then_images_for_manifest(db, man_tr, tr_ts)
                 )
-                if ex_tbl is None:
-                    ex_tbl = _latest_with_input_before(
-                        db,
-                        "%blase.Extract.read_parquet%",
-                        role="manifest",
-                        data_hash=man_tr,
-                        ts_before=tr_ts,
-                    )
-                if ex_tbl:
-                    plan.append(ex_tbl)
-                else:
-                    ex_img = _latest_producer_of_output_before(
-                        db,
-                        "%blase.Extract.read_images%",
-                        data_hash=man_tr,
-                        ts_before=tr_ts,
-                    )
-                    if ex_img is None:
-                        ex_img = _latest_with_input_before(
-                            db,
-                            "%blase.Extract.read_images%",
-                            role="manifest",
-                            data_hash=man_tr,
-                            ts_before=tr_ts,
-                        )
-
-            if ex_img:
-                plan.append(ex_img)
             else:
                 src_tr = _source_hash_for_step(db, tr)
-                if src_tr:
-                    ex_csv = _latest_with_source_before(
-                        db, "%blase.Extract.read_csv%", src_tr, tr_ts
-                    )
-                    if ex_csv:
-                        plan.append(ex_csv)
+                _append_if(
+                    plan,
+                    _latest_extract_for_source(db, src_tr, tr_ts) if src_tr else None,
+                )
+
             plan.append(tr)
         else:
-            # fallback to CSV/source lineage
-            src_tr = _source_hash_for_step(db, tr)
-            if src_tr:
-                ex_csv = _latest_with_source_before(
-                    db, "%blase.Extract.read_csv%", src_tr, tr_ts
-                )
-                if ex_csv:
-                    plan.append(ex_csv)
-
-            plan.append(tr)
+            # pure CSV/source fallback (very old runs)
+            if src:
+                _append_if(plan, _latest_extract_for_source(db, src, ts))
 
         plan.append(tip_step_hash)
         return plan
 
-    # ---------------------------
-    # Transform (images or csv)
-    # ---------------------------
-    elif fqn.endswith("Transform.apply_function"):
+    # ---- Transform.apply_function ----
+    if fqn.endswith("Transform.apply_function"):
         man = _input_hash_for_role(db, tip_step_hash, "manifest")
         if man:
-            ex_tbl = _latest_producer_of_output_before(
-                db, "%blase.Extract.read_parquet%", data_hash=man, ts_before=ts
-            ) or _latest_with_input_before(
-                db,
-                "%blase.Extract.read_parquet%",
-                role="manifest",
-                data_hash=man,
-                ts_before=ts,
-            )
-            if ex_tbl:
-                plan.append(ex_tbl)
-            else:
-                ex_img = _latest_producer_of_output_before(
-                    db, "%blase.Extract.read_images%", data_hash=man, ts_before=ts
-                )
-                if ex_img:
-                    plan.append(ex_img)
+            _append_if(plan, _prefer_parquet_then_images_for_manifest(db, man, ts))
         elif src:
-            ex_csv = _latest_with_source_before(db, "%blase.Extract.read_csv%", src, ts)
-            if ex_csv:
-                plan.append(ex_csv)
+            _append_if(plan, _latest_extract_for_source(db, src, ts))
+
         plan.append(tip_step_hash)
         return plan
 
-    # ---------------------------
-    # Extracts
-    # ---------------------------
-    elif fqn.endswith("Extract.read_csv"):
+    # ---- Extracts ----
+    if (
+        fqn.endswith("Extract.read_csv")
+        or fqn.endswith("Extract.read_images")
+        or fqn.endswith("Extract.read_parquet")
+    ):
         return [tip_step_hash]
 
-    elif fqn.endswith("Extract.read_images"):
-        return [tip_step_hash]
-
-    elif fqn.endswith("Extract.read_parquet"):
-        return [tip_step_hash]
-
-    # ---------------------------
-    # Fallback
-    # ---------------------------
+    # ---- Fallback ----
     return [tip_step_hash]

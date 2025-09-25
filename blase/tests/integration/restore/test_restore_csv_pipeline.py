@@ -225,7 +225,7 @@ def data_replay(project_root: Path, data_hash: str, final_path: Path):
         "--on-conflict",
         "overwrite",
     ]
-    return subprocess.run(cmd, cwd=project_root, capture_output=True, text=True)
+    return subprocess.run(cmd, cwd=project_root)
 
 
 def data_materialize(project_root: Path, data_hash: str, final_path: Path):

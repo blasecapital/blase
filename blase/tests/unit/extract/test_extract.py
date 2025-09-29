@@ -6,6 +6,7 @@ from pathlib import Path
 import pandas as pd
 import polars as pl
 
+from blase.types import Batch
 from blase.extract import Extract
 import blase.extract as mod
 
@@ -155,7 +156,7 @@ def test_read_csv_batches(temp_csv_file):
     extractor = Extract()
     batches = [
         batch
-        for batch, _, _ in extractor.read_csv(
+        for batch in extractor.read_csv(
             file_path=temp_csv_file,
             mode="manual",
             batch_size=2,
@@ -166,18 +167,18 @@ def test_read_csv_batches(temp_csv_file):
 
     # Should split into 3 batches (2+2+1)
     assert len(batches) == 3
-    assert isinstance(batches[0], pd.DataFrame)
-    assert batches[0].shape[0] == 2
-    assert batches[1].shape[0] == 2
-    assert batches[2].shape[0] == 1
-    assert batches[0].iloc[0]["id"] == 1
+    assert isinstance(batches[0].data, pd.DataFrame)
+    assert batches[0].data.shape[0] == 2
+    assert batches[1].data.shape[0] == 2
+    assert batches[2].data.shape[0] == 1
+    assert batches[0].data.iloc[0]["id"] == 1
 
 
 def test_read_csv_batches_polars(temp_csv_file):
     extractor = Extract()
     batches = [
         batch
-        for batch, _, _ in extractor.read_csv(
+        for batch in extractor.read_csv(
             file_path=temp_csv_file,
             mode="manual",
             batch_size=2,
@@ -188,13 +189,13 @@ def test_read_csv_batches_polars(temp_csv_file):
 
     # Should split into 3 batches (2+2+1)
     assert len(batches) == 3
-    assert isinstance(batches[0], pl.DataFrame)
-    assert batches[0].shape[0] == 2
-    assert batches[1].shape[0] == 2
-    assert batches[2].shape[0] == 1
+    assert isinstance(batches[0].data, pl.DataFrame)
+    assert batches[0].data.shape[0] == 2
+    assert batches[1].data.shape[0] == 2
+    assert batches[2].data.shape[0] == 1
 
     # Polars uses `batches[0][col][row]` for indexing
-    assert batches[0]["id"][0] == 1
+    assert batches[0].data["id"][0] == 1
 
 
 # ----- Extract().read_images test -----
@@ -221,15 +222,19 @@ def test_untracked_auto_mode_yields_dict_batches(isolate_deps, monkeypatch, tmp_
     outs = list(gen)
     assert len(outs) == 3
     for i, batch in enumerate(outs, 1):
-        assert isinstance(batch, dict)
-        assert set(batch.keys()) == {"paths", "images", "meta"}
-        assert all(p.startswith("/img/") for p in batch["paths"])
-        assert len(batch["paths"]) == len(batch["images"])
-        assert batch["meta"]["ordinal"] == i
-        assert batch["meta"]["batch_hash"].startswith("bh_")
-        assert batch["meta"]["manifest_root_hash"] == "rootHASH"
-        assert batch["meta"]["reader_backend"] == "pil"
-        assert batch["meta"]["return_type"] == "np"
+        assert isinstance(batch, Batch)
+        # paths and images
+        assert all(p.startswith("/img/") for p in (batch.paths or []))
+        assert len(batch.paths or []) == len(batch.data)
+        # meta checks
+        m = batch.meta
+        assert m["ordinal"] == i
+        assert m["batch_hash"].startswith("bh_")
+        assert m["manifest_root_hash"] == "rootHASH"
+        assert m["reader_backend"] == "pil"
+        assert m["return_type"] == "np"
+        # optional: last flag
+        assert batch.is_last == (i == len(outs))
 
 
 def test_tracked_path_emits_tuple_and_logs(isolate_deps, monkeypatch, tmp_path):
@@ -255,19 +260,20 @@ def test_tracked_path_emits_tuple_and_logs(isolate_deps, monkeypatch, tmp_path):
     outs = list(gen)
     assert len(outs) == 3
 
-    # Each yield is (paths, is_last, images, meta)
-    for i, tup in enumerate(outs, 1):
-        assert isinstance(tup, (list, tuple)) and len(tup) == 4
-        paths, is_last, images, meta = tup
-        assert all(p.startswith("/img/") for p in paths)
-        assert isinstance(is_last, bool)
-        assert len(paths) == len(images)
-        assert meta["batch_hash"].startswith("bh_")
-        assert meta["manifest_root_hash"] == "rootHASH"
-        assert meta["producer_step"]  # added in FakeStream.emit
+    for i, batch in enumerate(outs, 1):
+        assert isinstance(batch, Batch)
+        # paths and images
+        assert all(p.startswith("/img/") for p in (batch.paths or []))
+        assert isinstance(batch.is_last, bool)
+        assert len(batch.paths or []) == len(batch.data)
+        # meta/log assertions
+        m = batch.meta
+        assert m["batch_hash"].startswith("bh_")
+        assert m["manifest_root_hash"] == "rootHASH"
+        assert m["producer_step"]  # added in FakeStream.emit
 
-    # Last tuple should have is_last True
-    assert outs[-1][1] is True
+    # Last batch should have is_last True
+    assert outs[-1].is_last is True
 
 
 def test_invalid_mode_raises(monkeypatch, isolate_deps, tmp_path):
@@ -415,22 +421,28 @@ def test_read_parquet_untracked_table_mode(monkeypatch):
     batches = list(it)
     assert len(batches) == 2
 
-    d0 = batches[0]
-    assert set(d0.keys()) == {"data", "meta"}
-    assert d0["data"] == "T2"
-    m0 = d0["meta"]
+    BatchRef = type(batches[0])  # handles module reloads
+
+    b0 = batches[0]
+    assert isinstance(b0, BatchRef)
+    assert b0.data == "T2"
+    m0 = b0.meta
     assert m0["ordinal"] == 1
     assert m0["count"] == 2
     assert m0["mode"] == "table"
     assert m0["schema_fp"] == "SFP"
     assert m0["source_kind"] == "dataset"
     assert m0["batch_policy"]["mode"] == "rows"
+    assert b0.is_last is False
 
-    d1 = batches[1]
-    assert d1["data"] == "T1"
-    assert d1["meta"]["ordinal"] == 2
-    assert d1["meta"]["count"] == 1
-    assert d1["meta"]["mode"] == "table"
+    b1 = batches[1]
+    assert isinstance(b1, BatchRef)
+    assert b1.data == "T1"
+    m1 = b1.meta
+    assert m1["ordinal"] == 2
+    assert m1["count"] == 1
+    assert m1["mode"] == "table"
+    assert b1.is_last is True
 
 
 def test_read_parquet_tracked_images_mode(monkeypatch):
@@ -481,18 +493,15 @@ def test_read_parquet_tracked_images_mode(monkeypatch):
         mod, "_compute_batch_hash_stub", lambda root, plan: f"bh_{plan['count']}"
     )
 
-    # Table read is irrelevant for images but keep a stub
-    monkeypatch.setattr(
-        mod,
-        "_read_parquet_table_stub",
-        lambda manifest,
-        plan,
-        return_type,
-        columns,
-        mode=None: f"ArrowTable(count={plan['count']})",
-    )
+    # table read stub: accept all kwargs
+    def _tbl_stub(**kw):
+        # plan is passed in kw; just return a tag with its count
+        plan = kw["plan"]
+        return f"ArrowTable(count={plan['count']})"
 
-    # Images path helpers
+    monkeypatch.setattr(mod, "_read_parquet_table_stub", _tbl_stub)
+
+    # images helpers
     monkeypatch.setattr(
         mod,
         "_auto_detect_image_cols",
@@ -506,9 +515,8 @@ def test_read_parquet_tracked_images_mode(monkeypatch):
     monkeypatch.setattr(mod, "_validate_image_schema", lambda **kw: None)
 
     def _iter_images_from_table(**kw):
-        cnt = kw["table_like"]
         # parse "ArrowTable(count=N)" -> N
-        n = int(str(cnt).split("=")[1].rstrip(")"))
+        n = int(str(kw["table_like"]).split("=")[1].rstrip(")"))
         imgs = [f"img{i}" for i in range(n)]
         labels = [f"lbl{i}" for i in range(n)] if kw.get("label_col") else None
         paths = [f"/p/{i}.jpg" for i in range(n)]
@@ -528,31 +536,30 @@ def test_read_parquet_tracked_images_mode(monkeypatch):
         track=True,
     )
 
-    out = list(gen)
-    assert len(out) == 2
+    outs = list(gen)
+    assert len(outs) == 2
 
-    # Batch 1
-    (imgs1, lbls1, paths1), last1, meta1 = out[0]
-    assert last1 is False
-    assert imgs1 == ["img0", "img1"]
-    assert isinstance(lbls1, list) and len(lbls1) == 2
-    assert len(paths1) == 2
-    assert meta1["ordinal"] == 1
-    assert meta1["count"] == 2
-    assert meta1["manifest_root_hash"] == "rootHASH"
-    assert meta1["producer_step"] == "fake_step_hash"
-    up1 = meta1["upstream"]
-    roles1 = {u["role"] for u in up1}
-    assert roles1 == {"manifest", "batch_desc", "batch"}
+    BatchRef = type(outs[0])  # active Batch class from the reloaded module
 
-    # Batch 2
-    (imgs2, lbls2, paths2), last2, meta2 = out[1]
-    assert last2 is True
-    assert imgs2 == ["img0"]
-    assert isinstance(lbls2, list) and len(lbls2) == 1
-    assert len(paths2) == 1
-    assert meta2["ordinal"] == 2
-    assert meta2["count"] == 1
+    # assertions per Batch
+    for i, b in enumerate(outs, 1):
+        assert isinstance(b, BatchRef)
+        assert isinstance(b.is_last, bool)
+        assert len(b.paths or []) == len(b.data)
+        assert all(p.startswith("/p/") for p in (b.paths or []))
+
+        m = b.meta
+        assert m["schema_fp"] == "SFP"
+        assert m["manifest_root_hash"] == "rootHASH"
+        assert m["batch_hash"].startswith("bh_")
+        assert m["ordinal"] == i
+        assert m["items"] == len(b.data)
+        roles = {u["role"] for u in m["upstream"]}
+        assert {"manifest", "batch_desc", "batch"} <= roles
+        assert m.get("producer_step")
+
+    assert outs[0].is_last is False
+    assert outs[1].is_last is True
 
     # Stream registered outputs: manifest + batch_desc_* tokens exist
     names = [

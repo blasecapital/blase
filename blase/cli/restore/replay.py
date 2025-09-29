@@ -1,5 +1,5 @@
 from pathlib import Path
-from typing import Optional, Tuple, Set, List, Dict, Optional
+from typing import Optional, Tuple, Set, List, Dict
 
 from blase.cli.restore.replay_cas import _assert_path_matches_hash
 from blase.cli.restore.replay_exec import (
@@ -47,6 +47,7 @@ def _realized_for_read_csv(run_path: Path, step_hash: str) -> Dict:
     src = next((i["data_hash"] for i in ins if i["role"] == "source"), None)
     return {"__expected_source_hash__": src} if src else {}
 
+
 def _realized_for_read_images(run_path: Path, step_hash: str, params: Dict) -> Dict:
     ins = store.load_step_inputs(run_path, step_hash)
     man = next((i["data_hash"] for i in ins if i["role"] == "manifest"), None)
@@ -59,6 +60,7 @@ def _realized_for_read_images(run_path: Path, step_hash: str, params: Dict) -> D
     if batches:
         r["batch"] = batches
     return r
+
 
 def _realized_for_read_parquet(run_path: Path, step_hash: str, params: Dict) -> Dict:
     ins = store.load_step_inputs(run_path, step_hash)
@@ -96,34 +98,68 @@ def _find_upstream_stream_node(run_path: Path, step_hash: str) -> Optional[Dict]
     if man:
         ex = store.producer_step_for_data(run_path, man)
         if ex:
-            return {"step_hash": ex, "function_fqn": store.load_step(run_path, ex)["function_fqn"]}
+            return {
+                "step_hash": ex,
+                "function_fqn": store.load_step(run_path, ex)["function_fqn"],
+            }
 
     bdesc = next(
-        (i["data_hash"] for i in ins if i["role"] in {
-            "batch_desc","batch_meta","batchmeta","batch_desc_1","batch_desc_2","table.batch.meta"
-        }), None
+        (
+            i["data_hash"]
+            for i in ins
+            if i["role"]
+            in {
+                "batch_desc",
+                "batch_meta",
+                "batchmeta",
+                "batch_desc_1",
+                "batch_desc_2",
+                "table.batch.meta",
+            }
+        ),
+        None,
     )
     if bdesc:
         ex = store.producer_step_for_data(run_path, bdesc)
         if ex:
-            return {"step_hash": ex, "function_fqn": store.load_step(run_path, ex)["function_fqn"]}
+            return {
+                "step_hash": ex,
+                "function_fqn": store.load_step(run_path, ex)["function_fqn"],
+            }
 
-    b = next((i["data_hash"] for i in ins if i["role"] in {"batch","image.batch","table.batch"}), None)
+    b = next(
+        (
+            i["data_hash"]
+            for i in ins
+            if i["role"] in {"batch", "image.batch", "table.batch"}
+        ),
+        None,
+    )
     if b:
         ex = store.producer_step_for_data(run_path, b)
         if ex:
-            return {"step_hash": ex, "function_fqn": store.load_step(run_path, ex)["function_fqn"]}
+            return {
+                "step_hash": ex,
+                "function_fqn": store.load_step(run_path, ex)["function_fqn"],
+            }
 
     return None
+
 
 def _fallback_csv_path_as_stream(run_path: Path, step_hash: str) -> str:
     ins = store.load_step_inputs(run_path, step_hash)
     src = next((i["data_hash"] for i in ins if i["role"] == "source"), None)
     if not src:
-        raise SystemExit("restore: cannot locate upstream producer for Transform.apply_function")
-    p = store.get_materialized_path(run_path, src) or store.get_recorded_source_path(run_path, src)
+        raise SystemExit(
+            "restore: cannot locate upstream producer for Transform.apply_function"
+        )
+    p = store.get_materialized_path(run_path, src) or store.get_recorded_source_path(
+        run_path, src
+    )
     if not p or not p.exists():
-        p = materialize.ensure_local(run_path, src, kind=store.get_data_kind(run_path, src))
+        p = materialize.ensure_local(
+            run_path, src, kind=store.get_data_kind(run_path, src)
+        )
     return p.as_posix()
 
 
@@ -188,22 +224,28 @@ def _build_stream_for_step(run_path: Path, step_hash: str):
 
     if fqn.endswith("Extract.read_csv"):
         realized = _realized_for_read_csv(run_path, step_hash)
-        return bindings.run_read_csv_restore(run_path=run_path, params=st["params"], realized=realized, transform_fn=None)
+        return bindings.run_read_csv_restore(
+            run_path=run_path, params=st["params"], realized=realized, transform_fn=None
+        )
 
     if fqn.endswith("Extract.read_images"):
         realized = _realized_for_read_images(run_path, step_hash, st["params"])
-        return bindings.run_read_images_restore(run_path=run_path, params=st["params"], realized=realized, transform_fn=None)
+        return bindings.run_read_images_restore(
+            run_path=run_path, params=st["params"], realized=realized, transform_fn=None
+        )
 
     if fqn.endswith("Extract.read_parquet"):
         realized = _realized_for_read_parquet(run_path, step_hash, st["params"])
-        return bindings.run_read_parquet_restore(run_path=run_path, params=st["params"], realized=realized, transform_fn=None)
+        return bindings.run_read_parquet_restore(
+            run_path=run_path, params=st["params"], realized=realized, transform_fn=None
+        )
 
     if fqn.endswith("Transform.apply_function"):
         upstream_node = _find_upstream_stream_node(run_path, step_hash)
         upstream_gen = (
             _build_stream_for_step(run_path, upstream_node["step_hash"])
-            if upstream_node is not None else
-            _fallback_csv_path_as_stream(run_path, step_hash)
+            if upstream_node is not None
+            else _fallback_csv_path_as_stream(run_path, step_hash)
         )
         ins = store.load_step_inputs(run_path, step_hash)
         code_hash = store.pick_code_hash(ins)
@@ -217,6 +259,7 @@ def _build_stream_for_step(run_path: Path, step_hash: str):
 
     # Non-stream fallback
     from blase import restore as restore_mod
+
     return restore_mod.step(run_path, step_hash, kind="data")
 
 

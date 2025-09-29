@@ -47,7 +47,7 @@ def _exec_extract_csv(run_path, sh, st):
 # read_images
 # ==========
 def _exec_extract_images(run_path, sh, st):
-    ins = store.load_step_inputs(run_path, sh)  # code/env only
+    _ = store.load_step_inputs(run_path, sh)  # code/env only
     outs = store.load_step_outputs(run_path, sh)  # manifest + batch_desc_*
 
     # recorded artifacts come from outputs
@@ -84,7 +84,7 @@ def _exec_extract_images(run_path, sh, st):
 # read_parquet
 # ==========
 def _exec_extract_parquet(run_path, sh, st):
-    ins = store.load_step_inputs(run_path, sh)  # code/env only (unused here)
+    _ = store.load_step_inputs(run_path, sh)  # code/env only (unused here)
     outs = store.load_step_outputs(run_path, sh)  # manifest + batch_desc_*
 
     manifest_hash = next(
@@ -294,7 +294,7 @@ def _exec_load_save_to_csv(
 
         upstream_gen = _upstream_gen_for_sink(run_path, sh)
 
-    out = bindings.run_save_to_csv_replay(
+    res = bindings.run_save_to_csv_replay(
         run_path=run_path,
         params=st["params"],
         realized={},
@@ -306,10 +306,10 @@ def _exec_load_save_to_csv(
         on_conflict=conflict_policy,
         record_materialization=(not ephemeral_only),
     )
-    print(f"Replayed: {out}")
+    print(f"Replayed: {res}")
 
     if expected_out_hash:
-        outp = Path(out)
+        outp = Path(res.artifacts[0].path)
         produced[expected_out_hash] = outp
         created_paths.append(outp)
         produced_hashes.add(expected_out_hash)
@@ -331,7 +331,7 @@ def _exec_load_save_images_to_parquet(
     created_paths,
     produced_hashes,
 ):
-    ins = store.load_step_inputs(run_path, sh)
+    _ = store.load_step_inputs(run_path, sh)
     outs = store.load_step_outputs(run_path, sh)
     st = store.load_step(run_path, sh)
 

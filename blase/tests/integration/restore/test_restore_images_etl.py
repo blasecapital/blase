@@ -145,18 +145,14 @@ def run_image_pipeline_once(
 
     out_paths = []
     try:
-        for paths, is_last, images, meta in batches:
-            out, last, meta = tr.apply_function(
-                data=images,
+        for batch in batches:
+            batch = tr.apply_function(
+                batch=batch,
                 transform_func=modify_images,
-                last_batch=is_last,
-                meta=meta,
                 track=track,
             )
-            shard_path, last_batch, _meta = ld.save_images_to_parquet(
-                data=(out, None, paths),
-                last_batch=last,
-                meta=meta,
+            res = ld.save_images_to_parquet(
+                batch=batch,
                 encode="jpeg",
                 jpeg_quality=90,
                 include_paths=True,
@@ -168,7 +164,7 @@ def run_image_pipeline_once(
                 use_blase_path=False,
                 path="data/working",
             )
-            out_paths.append(Path(shard_path))
+            out_paths.append(Path(res.artifacts[0].path))
     finally:
         try:
             batches.close()

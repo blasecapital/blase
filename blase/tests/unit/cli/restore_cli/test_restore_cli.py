@@ -6,6 +6,7 @@ import pytest
 import sys
 import importlib
 
+from blase.types import SinkResult, Artifact
 from blase.cli.restore import restore_cli as rc
 from blase.cli.restore import dispatcher as disp
 from blase.cli.restore import replay as rep
@@ -509,7 +510,11 @@ def test__exec_plan_for_step_runs_all_kinds(run_dir, monkeypatch, tmp_path):
 
     def save_stub(**k):
         out_file.write_text("ok\n")
-        return str(out_file)
+        return SinkResult(
+            artifacts=[Artifact(path=str(out_file), kind="csv")],
+            is_last=True,
+            meta={},
+        )
 
     # bindings runners
     out_file = tmp_path / "final.csv"
@@ -782,9 +787,8 @@ def test_apply_function_manifest_uses_parquet_and_calls_apply_restore(
         rexe, "bindings", SimpleNamespace(run_apply_function_restore=_apply_restore)
     )
 
-    out = rep._exec_plan_for_step(run_path, sh, None, None)
+    _ = rep._exec_plan_for_step(run_path, sh, None, None)
 
-    # optional assertions on `calls`
     assert calls["gen_called"] == 1
     assert calls["apply_called"] == 1
 
@@ -1137,7 +1141,8 @@ def test_parquet_with_recorded_outs_and_override(monkeypatch, tmp_path):
         raising=True,
     )
 
-    fake_up = lambda rp, s: object()
+    def fake_up(_rp, _s):
+        return object()
     monkeypatch.setattr(
         "blase.cli.restore.replay_exec._upstream_gen_for_sink", fake_up, raising=False
     )
@@ -1239,7 +1244,8 @@ def test_parquet_without_recorded_outs_uses_default_dir_and_hashes(
         raising=True,
     )
 
-    fake_up = lambda rp, s: object()
+    def fake_up(_rp, _s):
+        return object()
     monkeypatch.setattr(
         "blase.cli.restore.replay_exec._upstream_gen_for_sink", fake_up, raising=False
     )

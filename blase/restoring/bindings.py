@@ -7,6 +7,7 @@ import json
 
 import numpy as np
 
+from blase.types import Batch, SinkResult, Artifact
 from blase.extracting.csv_backend import read_batches_pandas, read_batches_polars
 from blase.extracting.image_backend import (
     scan_manifest_headers,
@@ -221,7 +222,7 @@ def run_read_csv_restore(
     params: Dict[str, Any],
     realized: Dict[str, Any],
     transform_fn=None,  # unused; signature kept for uniformity
-) -> Iterator[Tuple[Any, bool]]:
+) -> Iterator[Batch]:
     """
     Replay an ``Extract.read_csv`` step from a prior run.
 
@@ -270,7 +271,7 @@ def run_read_csv_restore(
 
     impl = read_batches_pandas if backend == "pandas" else read_batches_polars
     for batch, is_last in impl(file_path, batch_size, use_cols, filter_by):
-        yield batch, is_last
+        yield Batch(data=batch, labels=None, paths=None, is_last=is_last, meta={})
 
 
 def run_read_images_restore(
@@ -279,7 +280,7 @@ def run_read_images_restore(
     params: Dict[str, Any],
     realized: Dict[str, Any],
     transform_fn=None,  # unused; signature kept for uniformity
-) -> Iterator[Tuple[Any, Dict, bool]]:
+) -> Iterator[Batch]:
     """
     Restore a prior `Extract.read_images` step deterministically.
 
@@ -491,7 +492,13 @@ def run_read_images_restore(
             ],
         }
 
-        yield decoded, meta, is_last
+        yield Batch(
+            data=decoded,
+            labels=None,
+            paths=None,
+            is_last=is_last,
+            meta=meta,
+        )
 
 
 def run_read_parquet_restore(
@@ -500,7 +507,7 @@ def run_read_parquet_restore(
     params: Dict[str, Any],
     realized: Dict[str, Any],
     transform_fn=None,  # unused; kept for uniformity
-) -> Iterator[Tuple[Any, Dict, bool]]:
+) -> Iterator[Batch]:
     """
     Restore a prior `Extract.read_parquet` step deterministically.
     Yields `(data, meta, is_last)` where `data` is either a table (arrow/pandas)
@@ -662,7 +669,14 @@ def run_read_parquet_restore(
         }
 
         if mode == "table":
-            yield table_like, meta, is_last
+            yield Batch(
+                data=table_like,
+                labels=None,
+                paths=None,
+                role="parquet.table",
+                is_last=is_last,
+                meta=meta,
+            )
             continue
 
         # mode == "images": collapse rows in this plan into one images batch
@@ -700,7 +714,14 @@ def run_read_parquet_restore(
                 lbls.extend(one_lbl_list or [None])
             pths.extend(one_path_list or [None])
 
-        yield (imgs, (lbls if lbls is not None else None), pths), meta, is_last
+        yield Batch(
+            data=(imgs, (lbls if lbls is not None else None), pths),
+            labels=lbls if lbls is not None else None,
+            paths=pths,
+            role="parquet.image",
+            is_last=is_last,
+            meta=meta,
+        )
 
 
 def run_apply_function_restore(
@@ -709,7 +730,7 @@ def run_apply_function_restore(
     params: Dict[str, Any],
     realized: Dict[str, Any],
     transform_fn,
-) -> Iterator[Tuple[Any, bool]]:
+) -> Iterator[Batch]:
     """
     Replay a ``Transform.apply_function`` step without tracking.
 
@@ -869,40 +890,26 @@ def run_apply_function_restore(
             return (_normalize_imgs(imgs), labels, paths)
         return _normalize_imgs(z)
 
-    for item in gen:
-        batch, meta, is_last = item, {}, False
-
-        if isinstance(item, tuple):
-            if len(item) == 3:
-                a, b, c = item
-                if isinstance(b, dict):  # (batch, meta, is_last)
-                    batch, meta, is_last = a, b, bool(c)
-                elif isinstance(c, dict):  # (batch, is_last, meta)
-                    batch, is_last, meta = a, bool(b), c
-                else:  # (batch, is_last, _)
-                    batch, is_last, meta = a, bool(b), {}
-            elif len(item) == 2:
-                a, b = item
-                if isinstance(b, dict):  # (batch, meta)
-                    batch, meta = a, b
-                else:  # (batch, is_last)
-                    batch, is_last = a, bool(b)
-            else:
-                batch = item[0]
-
+    for batch in gen:
         if csv_mode:
-            out = transform_fn(batch)
-            yield out, is_last
+            out = transform_fn(batch.data)
+            yield Batch(
+                data=out,
+                labels=None,
+                paths=None,
+                is_last=batch.is_last,
+                meta=batch.meta,
+            )
             continue
 
         # Non-CSV: images/parquet-images or other non-tabular data
-        batch, meta = _normalize_images_batch(batch, meta)  # pre
-        out = transform_fn(batch)
-        out, meta = _normalize_images_batch(out, meta)  # post
+        out_n, meta_n = _normalize_images_batch(batch.data, batch.meta)  # pre
+        out = transform_fn(out_n)
+        out, meta = _normalize_images_batch(out, meta_n)  # post
 
-        out = transform_fn(batch)
+        out = transform_fn(out)
         out = _normalize_out(out)
-        yield out, meta, is_last
+        yield Batch(data=out, labels=None, paths=None, is_last=batch.is_last, meta=meta)
 
 
 def run_save_to_csv_replay(
@@ -919,7 +926,7 @@ def run_save_to_csv_replay(
     preseed_path: Optional[Path] = None,
     expected_out_hash: Optional[str] = None,
     record_materialization: bool = True,
-) -> str:
+) -> SinkResult:
     """
     Replay a ``Load.save_to_csv`` step.
 
@@ -983,32 +990,40 @@ def run_save_to_csv_replay(
             tmp.unlink()
         shutil.copy2(preseed_path, tmp)
 
-    # consume to tmp (append semantics preserved if seed existed)
-    def _coerce2(gen):
-        for item in gen:
-            if isinstance(item, tuple):
-                if len(item) == 3:
-                    b, _meta, last = item
-                    yield b, last
-                elif len(item) == 2:
-                    b, last = item
-                    yield b, last
-                else:
-                    yield item[0], False
-            else:
-                yield item, False
+    def _to_batch(item: Any) -> Batch:
+        if isinstance(item, Batch):
+            return item
+        if isinstance(item, tuple):
+            if len(item) == 2:
+                data, last = item
+                return Batch(
+                    data=data, labels=None, paths=None, is_last=bool(last), meta={}
+                )
+            if len(item) == 3:
+                data, last, meta = item
+                return Batch(
+                    data=data,
+                    labels=None,
+                    paths=None,
+                    is_last=bool(last),
+                    meta=meta or {},
+                )
+            # fallback: first as data
+            return Batch(data=item[0], labels=None, paths=None, is_last=False, meta={})
+        # scalar → single-item batch
+        return Batch(data=[item], labels=None, paths=None, is_last=False, meta={})
 
     ld = Load()
-    for b, last in _coerce2(upstream_gen):
-        ld.save_to_csv(
-            data=b,
-            last_batch=last,
-            meta={},
+    last_meta = {}
+    for batch in upstream_gen:
+        res = ld.save_to_csv(
+            batch=batch,
             path=str(tmp),
             backend=backend,
             track=False,
             use_blase_path=False,
         )
+        last_meta = dict(res.meta or {})
 
     computed = Hash().hash_file(tmp)
     if expected_out_hash and computed != expected_out_hash:
@@ -1020,14 +1035,18 @@ def run_save_to_csv_replay(
         target_path.unlink()
     os.replace(tmp, target_path)
 
-    # only record durable finals, never ephemeral seeds
     if record_materialization:
         try:
             store.record_materialization(run_path, final_hash, str(target_path))
         except Exception:
             pass
 
-    return str(target_path)
+    # return a SinkResult that references the final path
+    return SinkResult(
+        artifacts=[Artifact(path=str(target_path), kind="csv", data_hash=final_hash)],
+        is_last=True,
+        meta=last_meta,
+    )
 
 
 def _deterministic_shard_path(
@@ -1049,7 +1068,7 @@ def run_save_images_to_parquet_replay(
     on_conflict: str = "overwrite",
     expected_out_hashes: Optional[List[str]] = None,
     record_materialization: bool = True,
-) -> List[Path]:
+) -> SinkResult:
     """
     Re-run a recorded `Load.save_images_to_parquet` step.
 
@@ -1108,37 +1127,27 @@ def run_save_images_to_parquet_replay(
     jpeg_quality = int(params.get("jpeg_quality", 95))
     include_paths = bool(params.get("include_paths", True))
 
-    out_paths: List[Path] = []
+    artifacts: List[Artifact] = []
     hasher = Hash()
 
-    ordinal = 0
     # --------- 2) Stream batches and write shards ----------
     writer_cfg = params.get("writer_cfg") or RECORDED_WRITER_CFG
 
-    for item in upstream_gen:
-        if len(item) == 3:
-            batch, meta, is_last = item
-            ordinal = meta.get("ordinal") or (ordinal + 1)
-        else:
-            batch, is_last = item
-            ordinal += 1
-            meta = {"ordinal": ordinal}
-
-        labels = (meta or {}).get("labels")
-        paths = (meta or {}).get("items_rel_paths") or (meta or {}).get("paths")
+    ordinal_ctr = 0
+    for b in upstream_gen:
+        # ordinal: prefer recorded meta, else increment
+        bmeta = b.meta or {}
+        ordinal = int(bmeta.get("ordinal") or (ordinal_ctr + 1))
+        ordinal_ctr = ordinal
 
         table = _build_parquet_table_from_images(
-            data=(batch, labels, paths),
-            meta=meta,
+            batch=b,
             encode=encode,
             jpeg_quality=jpeg_quality,
             include_paths=include_paths,
         )
 
         shard_path = _deterministic_shard_path(target_dir, shard_prefix, ordinal)
-        shard_path = _write_parquet_table(
-            table, shard_path, writer_cfg=writer_cfg, on_conflict="overwrite"
-        )
         shard_path = resolve_conflict_path(
             shard_path,
             policy=on_conflict,
@@ -1151,29 +1160,31 @@ def run_save_images_to_parquet_replay(
             writer_cfg=writer_cfg,
             on_conflict="overwrite",
         )
+
         h = hasher.hash_file(shard_path)
 
-        if expected_out_hashes:
-            h = hasher.hash_file(shard_path)
-            if ordinal - 1 < len(expected_out_hashes):
-                exp = expected_out_hashes[ordinal - 1]
-                if exp and exp != h:
-                    raise IOError(
-                        f"[restore] parquet shard #{ordinal} hash mismatch: "
-                        f"expected={exp[:16]}… got={h[:16]}…"
-                    )
+        if expected_out_hashes and (ordinal - 1) < len(expected_out_hashes):
+            exp = expected_out_hashes[ordinal - 1]
+            if exp and exp != h:
+                raise IOError(
+                    f"[restore] parquet shard #{ordinal} hash mismatch: "
+                    f"expected={exp[:16]}… got={h[:16]}…"
+                )
 
         if record_materialization:
             try:
-                store.record_materialization(
-                    run_path, hasher.hash_file(shard_path), str(shard_path)
-                )
+                store.record_materialization(run_path, h, str(shard_path))
             except Exception:
                 pass
 
-        out_paths.append(shard_path)
+        artifacts.append(Artifact(path=str(shard_path), kind="parquet", data_hash=h))
 
-    return out_paths
+    # Return a single SinkResult summarizing produced shards
+    return SinkResult(
+        artifacts=artifacts,
+        is_last=True,
+        meta={"target_dir": str(target_dir), "count": len(artifacts)},
+    )
 
 
 # Public registry of handlers (by function FQN)

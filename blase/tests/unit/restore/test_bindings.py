@@ -5,6 +5,7 @@ import pytest
 import json
 import sqlite3
 
+from blase.types import Batch, SinkResult, Artifact
 import blase.restoring.bindings as b
 
 
@@ -321,8 +322,8 @@ def test_run_read_csv_restore_backend_and_hash_check(tmp_path, monkeypatch, back
         realized={"source": str(f), "__expected_source_hash__": "H"},
         transform_fn=None,
     )
-    batch, last = next(gen)
-    assert batch == ["row"] and last is True
+    batch = next(gen)
+    assert batch.data == ["row"] and batch.is_last is True
     assert called["used"] == backend
 
 
@@ -352,13 +353,14 @@ def test_run_apply_function_restore_happy(tmp_path, monkeypatch):
 
     # make the batch reader yield two batches
     def reader(path, batch_size, use_cols, filter_by):
-        yield (["r1"], False)
-        yield (["r2"], True)
+        yield Batch(data=["r1"], labels=None, paths=None, is_last=False, meta={})
+        yield Batch(data=["r2"], labels=None, paths=None, is_last=True, meta={})
 
     monkeypatch.setattr(b, "read_batches_pandas", reader)
 
-    def fn(batch):
-        return [x.upper() for x in batch]
+    # transform works on data (or make it Batch-aware if your impl prefers)
+    def fn(data):
+        return [x.upper() for x in data]
 
     out = list(
         b.run_apply_function_restore(
@@ -368,7 +370,11 @@ def test_run_apply_function_restore_happy(tmp_path, monkeypatch):
             transform_fn=fn,
         )
     )
-    assert out == [(["R1"], False), (["R2"], True)]
+
+    assert out[0].data == ["R1"]
+    assert out[0].is_last is False
+    assert out[1].data == ["R2"]
+    assert out[1].is_last is True
 
 
 def test_run_apply_function_restore_missing_source_raises(tmp_path):
@@ -389,33 +395,42 @@ def test_run_apply_function_restore_missing_source_raises(tmp_path):
 def _fake_saver(records):
     """Return a Load.save_to_csv replacement that appends 'records' to the tmp file."""
 
-    def _save_to_csv(*, data, last_batch, meta, path, backend, track, use_blase_path):
-        # append one line per element in 'data'
+    def _save_to_csv(
+        *, batch: Batch, path: str, backend=None, track=None, use_blase_path=None
+    ) -> SinkResult:
         p = Path(path)
+        p.parent.mkdir(parents=True, exist_ok=True)
         mode = "a" if p.exists() else "w"
         with p.open(mode) as fh:
-            for r in data:
-                fh.write(str(r) + "\n")
+            for r in batch.data:
+                fh.write(f"{r}\n")
+        return SinkResult(
+            artifacts=[Artifact(path=str(p), kind="csv")],
+            is_last=batch.is_last,
+            meta=dict(batch.meta or {}),
+        )
 
     return _save_to_csv
 
 
 def test_run_save_to_csv_replay_writes_and_overwrites(tmp_path, monkeypatch):
     target = tmp_path / "final.csv"
-    # upstream yields two batches
-    upstream = iter([(["a"], False), (["b"], True)])
-    # make Load.save_to_csv write to the tmp path
+
+    def as_batches(seq):
+        for data, last in seq:
+            yield Batch(data=data, labels=None, paths=None, is_last=last, meta={})
+
+    upstream = as_batches([(["a"], False), (["b"], True)])
+
+    # saver uses new API
     monkeypatch.setattr(b.Load, "save_to_csv", staticmethod(_fake_saver(["a", "b"])))
 
-    # hash matches after write
     def fake_hash(self, p):
-        # temp file should contain two lines "a\nb\n"
         text = Path(p).read_text()
         return "OK" if text.strip().splitlines() == ["a", "b"] else "BAD"
 
     monkeypatch.setattr(b.Hash, "hash_file", fake_hash)
 
-    # make sure record_materialization is called
     recorded = {}
 
     def record_materialization(run_path, data_hash, path):
@@ -423,14 +438,15 @@ def test_run_save_to_csv_replay_writes_and_overwrites(tmp_path, monkeypatch):
 
     monkeypatch.setattr(b.store, "record_materialization", record_materialization)
 
-    out = b.run_save_to_csv_replay(
+    res = b.run_save_to_csv_replay(
         run_path=tmp_path,
         params={"target": str(target)},
         upstream_gen=upstream,
         on_conflict="overwrite",
         expected_out_hash="OK",
     )
-    assert Path(out) == target
+
+    assert Path(res.artifacts[0].path) == target
     assert target.read_text().strip().splitlines() == ["a", "b"]
     assert recorded.get("ok") is True
 
@@ -446,7 +462,7 @@ def test_run_save_to_csv_replay_fail_without_upstream(tmp_path):
 
 def test_run_save_to_csv_replay_hash_mismatch_raises(tmp_path, monkeypatch):
     target = tmp_path / "x.csv"
-    upstream = iter([(["one"], True)])
+    upstream = iter([Batch(data=(["one"], True), is_last=True, meta={})])
     monkeypatch.setattr(b.Load, "save_to_csv", staticmethod(_fake_saver(["one"])))
     monkeypatch.setattr(b.Hash, "hash_file", lambda self, p: "WRONG")
     with pytest.raises(RuntimeError):
@@ -471,20 +487,20 @@ def test_run_save_to_csv_replay_rename_conflict(tmp_path, monkeypatch):
     target = tmp_path / "out.csv"
     target.write_text("old\n")
 
-    upstream = iter([(["x"], True)])
+    upstream = iter([Batch(data=(["x"], True), is_last=True, meta={})])
     monkeypatch.setattr(b.Load, "save_to_csv", staticmethod(_fake_saver(["x"])))
     # any computed hash is fine since we don't pass expected_out_hash
     monkeypatch.setattr(b.Hash, "hash_file", lambda self, p: "H")
 
-    out = b.run_save_to_csv_replay(
+    res = b.run_save_to_csv_replay(
         run_path=tmp_path,
         params={"target": str(target)},
         upstream_gen=upstream,
         on_conflict="rename",
     )
-    assert Path(out) != target
-    assert Path(out).name == "out_replayed_20250101-120000.csv"
-    assert Path(out).exists()
+    assert Path(res.artifacts[0].path) != target
+    assert Path(res.artifacts[0].path).name == "out_replayed_20250101-120000.csv"
+    assert Path(res.artifacts[0].path).exists()
     # original remains
     assert target.read_text() == "old\n"
 
@@ -493,20 +509,25 @@ def test_run_save_to_csv_replay_preseed_appends(tmp_path, monkeypatch):
     target = tmp_path / "out.csv"
     pre = tmp_path / "seed.csv"
     pre.write_text("seed\n")
-    upstream = iter([(["n1"], False), (["n2"], True)])
+    upstream = iter(
+        [
+            Batch(data=["n1"], labels=None, paths=None, is_last=False, meta={}),
+            Batch(data=["n2"], labels=None, paths=None, is_last=True, meta={}),
+        ]
+    )
+
     monkeypatch.setattr(b.Load, "save_to_csv", staticmethod(_fake_saver(["n1", "n2"])))
-    # hash returns something, not enforcing a particular value
     monkeypatch.setattr(b.Hash, "hash_file", lambda self, p: "HASH")
 
-    out = b.run_save_to_csv_replay(
+    res = b.run_save_to_csv_replay(
         run_path=tmp_path,
         params={"target": str(target)},
         upstream_gen=upstream,
         preseed_path=pre,
         on_conflict="overwrite",
     )
-    lines = Path(out).read_text().splitlines()
-    # should include seed + new lines (order preserved)
+
+    lines = Path(res.artifacts[0].path).read_text().splitlines()
     assert lines == ["seed", "n1", "n2"]
 
 
@@ -532,14 +553,14 @@ def test_restore_happy_path_with_manifest_and_batch_descs(isolate_restore, tmp_p
     gen = b.run_read_images_restore(run_path=run_path, params=params, realized=realized)
     outs = list(gen)
     assert len(outs) == 3
-    for i, (images, meta, is_last) in enumerate(outs, 1):
-        assert isinstance(images, list) and images
-        assert meta["manifest_root_hash"] == "rootHASH"
-        assert meta["batch_hash"] == f"BH{2 if i < 3 else 1}"
-        assert meta["manifest"] == "manifest1"
-        assert isinstance(is_last, bool)
+    for i, batch in enumerate(outs, 1):
+        assert isinstance(batch.data, list) and batch.data
+        assert batch.meta["manifest_root_hash"] == "rootHASH"
+        assert batch.meta["batch_hash"] == f"BH{2 if i < 3 else 1}"
+        assert batch.meta["manifest"] == "manifest1"
+        assert isinstance(batch.is_last, bool)
         # upstream should include manifest and batch entries
-        roles = [u["role"] for u in meta["upstream"] if u]
+        roles = [u["role"] for u in batch.meta["upstream"] if u]
         assert "manifest" in roles and "batch" in roles
 
 
@@ -674,17 +695,25 @@ def test_basic_replay(isolate_save):
 
     # upstream generator yields two batches
     def upstream():
-        yield (["im1"], {"ordinal": 1}, False)
-        yield (["im2"], {"ordinal": 2}, True)
+        yield Batch(
+            data=["im1"], labels=None, paths=None, is_last=False, meta={"ordinal": 1}
+        )
+        yield Batch(
+            data=["im2"], labels=None, paths=None, is_last=True, meta={"ordinal": 2}
+        )
 
-    out = b.run_save_images_to_parquet_replay(
+    res: SinkResult = b.run_save_images_to_parquet_replay(
         run_path=run_path,
         params=params,
         realized={},
         upstream_gen=upstream(),
     )
-    assert len(out) == 2
-    assert all(str(p).endswith(".parquet") for p in out)
+
+    # one sink result containing two parquet artifacts
+    assert isinstance(res, SinkResult)
+    assert len(res.artifacts) == 2
+    paths = [a.path for a in res.artifacts]
+    assert all(str(p).endswith(".parquet") for p in paths)
 
 
 def test_expected_hash_mismatch_raises(isolate_save):
@@ -693,7 +722,7 @@ def test_expected_hash_mismatch_raises(isolate_save):
 
     # one batch
     def upstream():
-        yield (["im1"], {"ordinal": 1}, True)
+        yield Batch(data="im1", meta={"ordinal": 1}, is_last=True)
 
     # expected hash deliberately mismatched
     with pytest.raises(IOError):
@@ -712,9 +741,9 @@ def test_target_override_and_on_conflict(isolate_save):
     params = {"shard_prefix": "c"}
 
     def upstream():
-        yield (["im1"], {"ordinal": 1}, True)
+        yield Batch(data="im1", meta={"ordinal": 1}, is_last=True)
 
-    out = b.run_save_images_to_parquet_replay(
+    res = b.run_save_images_to_parquet_replay(
         run_path=run_path,
         params=params,
         realized={},
@@ -723,4 +752,4 @@ def test_target_override_and_on_conflict(isolate_save):
         on_conflict="overwrite",
     )
     # directory override respected
-    assert all(p.parent == override_dir for p in out)
+    assert all(Path(a.path).parent == override_dir for a in res.artifacts)

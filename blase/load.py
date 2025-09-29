@@ -1,5 +1,5 @@
 from __future__ import annotations
-from typing import Any, Optional, Dict, Tuple, Callable, Literal
+from typing import Any, Optional, Callable, Literal
 from pathlib import Path
 
 import numpy as np
@@ -11,6 +11,7 @@ from blase.loading.img_parquet_backend import (
     _compute_shard_path,
     RECORDED_WRITER_CFG,
 )
+from blase.types import Batch, SinkResult, Artifact
 from blase.utils.backends import resolve_backend_csv
 from blase.track import Track
 
@@ -127,18 +128,14 @@ class Load:
     def save_to_csv(
         self,
         *,
-        data: Any,
-        last_batch: bool,
-        meta: Optional[
-            Dict[str, Any]
-        ] = None,  # pass upstream lineage from Extract/Transform
+        batch: Batch,
         path: Optional[str] = None,
         file_name: Optional[str] = None,
         subdir: Optional[str] = "csv_data",
         backend: str = "pandas",
         track: bool = True,
         use_blase_path: bool = True,
-    ) -> Tuple[str, bool, Dict[str, Any]]:
+    ) -> SinkResult:
         """
         Write one batch of data to a CSV target with optional tracking and lineage.
 
@@ -151,15 +148,16 @@ class Load:
 
         Parameters
         ----------
-        data : Any
-            A batch of records to append to the CSV file. Typically a `pandas.DataFrame`
-            or `polars.DataFrame`, depending on the backend chosen.
-        last_batch : bool
-            Whether this batch is the final batch in the stream. If ``True``, the stream
-            is sealed and the completed file is registered as an output.
-        meta : dict, optional
-            Metadata propagated from upstream steps (e.g., from Extract or Transform).
-            This information is recorded per batch when tracking is enabled.
+        batch: Batch
+            - batch.data: Any
+                A batch of records to append to the CSV file. Typically a `pandas.DataFrame`
+                or `polars.DataFrame`, depending on the backend chosen.
+            - batch.is_last : bool
+                Whether this batch is the final batch in the stream. If ``True``, the stream
+                is sealed and the completed file is registered as an output.
+            - batch.meta : dict, optional
+                Metadata propagated from upstream steps (e.g., from Extract or Transform).
+                This information is recorded per batch when tracking is enabled.
         path : str, optional
             Absolute or relative path to the output file. Mutually exclusive with
             ``file_name``/``subdir`` if ``use_blase_path=True``.
@@ -180,15 +178,14 @@ class Load:
 
         Returns
         -------
-        tuple of (str, bool, dict)
-            A 3-tuple containing:
-            - ``target_path`` : str
-            Filesystem path of the CSV file being written to.
-            - ``last_batch`` : bool
-            Echo of the input flag, enabling downstream flow control.
-            - ``new_meta`` : dict
-            Metadata returned by the tracking system’s emit call if tracking is enabled,
-            otherwise the input ``meta`` or an empty dict.
+        SinkResult
+            - artifacts: list of Artifacts
+                Filesystem path of the CSV file being written to.
+            - is_last: bool
+                Echo of the input flag, enabling downstream flow control.
+            - meta: dict
+                Metadata returned by the tracking system’s emit call if tracking is enabled,
+                otherwise the input ``meta`` or an empty dict.
 
         Notes
         -----
@@ -200,7 +197,7 @@ class Load:
         append semantics to be faithfully restored during replay.
         - **Lineage:** Each batch inherits upstream metadata via ``meta`` and is logged
         through the stream step’s emit call.
-        - **Finalization:** On ``last_batch=True``, the completed file is registered in CAS
+        - **Finalization:** On ``batch.is_last=True``, the completed file is registered in CAS
         as an output artifact of kind "csv", then the step is sealed.
         - **Untracked path:** When ``track=False``, this method only writes the data to
         the target file using the chosen backend. No tracking, CAS registration, or
@@ -215,12 +212,11 @@ class Load:
         Examples
         --------
         >>> loader = Load()
-        >>> for batch, is_last, meta in pipeline:
-        ...     target, last, out_meta = loader.save_to_csv(
-        ...         data=batch, last_batch=is_last, meta=meta,
-        ...         file_name="output.csv", backend="pandas"
+        >>> for batch in pipeline:
+        ...     batch = loader.save_to_csv(
+        ...         batch=batch, file_name="output.csv", backend="pandas"
         ...     )
-        >>> print("Final output:", target)
+        >>> print("Final output:", batch.data)
         """
         backend = resolve_backend_csv(backend)
         tracker = Track.get(track)
@@ -236,9 +232,13 @@ class Load:
             )
             file_exists = target.exists()
             (save_batch_pandas if backend == "pandas" else save_batch_polars)(
-                data, target, file_exists
+                batch.data, target, file_exists
             )
-            return str(target), last_batch, (meta or {})
+            return SinkResult(
+                artifacts=[Artifact(path=str(target), kind="csv")],
+                is_last=batch.is_last,
+                meta=dict(batch.meta or {}),
+            )
 
         # ---------- Tracked path ----------
         target = self._resolve_target_path(
@@ -283,9 +283,9 @@ class Load:
         file_exists = target.exists()
         try:
             if backend == "pandas":
-                save_batch_pandas(data, target, file_exists)
+                save_batch_pandas(batch.data, target, file_exists)
             else:
-                save_batch_polars(data, target, file_exists)
+                save_batch_polars(batch.data, target, file_exists)
         except Exception as e:
             if self._stream is not None:
                 self._stream.close_error(type(e), e, e.__traceback__)
@@ -294,10 +294,10 @@ class Load:
                 self._backend = None
             raise
 
-        self._stream.step.add_upstream_from_meta(meta)
-        new_meta = self._stream.emit(last_batch=last_batch, meta=meta)
+        self._stream.step.add_upstream_from_meta(batch.meta)
+        new_meta = self._stream.emit(last_batch=batch.is_last, meta=batch.meta)
 
-        if last_batch:
+        if batch.is_last:
             out_hash = self._stream.step.register_data(
                 kind="csv",
                 version="1",
@@ -311,28 +311,28 @@ class Load:
             self._target_path = None
             self._backend = None
 
-        return str(target), last_batch, new_meta
+        return SinkResult(
+            artifacts=[Artifact(path=str(target), kind="csv")],
+            is_last=batch.is_last,
+            meta=new_meta,
+        )
 
     def save_images_to_parquet(
         self,
         *,
-        data: Any,  # (images, labels, paths) OR just images; see _normalize_images_batch()
-        last_batch: bool,
-        meta: Optional[
-            Dict[str, Any]
-        ] = None,  # upstream lineage (manifest_root_hash, batch_hash, etc.)
-        path: Optional[str] = None,  # base dir for shards
+        batch: Batch,
+        path: Optional[str] = None,
         file_name: Optional[str] = None,
-        subdir: str = "parquet_data",  # used if target_dir is None and use_blase_path=True
+        subdir: str = "parquet_data",
         shard_prefix: str = "batch",
         encode: Literal["jpeg", "png"] = "jpeg",
         jpeg_quality: int = 95,
         compression: Literal["zstd", "snappy"] = "zstd",
-        include_paths: bool = True,  # store original rel paths in a column
-        use_blase_path: bool = True,  # mirror save_to_csv behavior
+        include_paths: bool = True,
+        use_blase_path: bool = True,
         on_conflict: Literal["overwrite", "fail", "rename"] = "overwrite",
         track: bool = True,
-    ) -> Tuple[str, bool, Dict[str, Any]]:
+    ) -> SinkResult:
         """
         Write one Parquet shard for a batch of images.
 
@@ -343,21 +343,22 @@ class Load:
 
         Parameters
         ----------
-        data : Any
-            Batch to persist. Either:
-            - images
-            - (images, labels)
-            - (images, labels, paths)
-            where *images* is a list/array of HxWxC uint8 RGB (or HxW for gray)
-            NumPy arrays, PIL.Image objects, or torch tensors. *labels* is optional
-            and can be any sequence alignable to images. *paths* are optional
-            original relative paths for lineage.
-        last_batch : bool
-            True if this is the final batch for the current stream.
-        meta : dict, optional
-            Upstream lineage and batch metadata (e.g., ``manifest_root_hash``,
-            ``batch_hash``, ``ordinal``, ``upstream``). Passed through and used for
-            deterministic shard naming when ``ordinal`` is present.
+        batch : Batch
+            - batch.data
+                Batch to persist. Either:
+                - images
+                - (images, labels)
+                - (images, labels, paths)
+                where *images* is a list/array of HxWxC uint8 RGB (or HxW for gray)
+                NumPy arrays, PIL.Image objects, or torch tensors. *labels* is optional
+                and can be any sequence alignable to images. *paths* are optional
+                original relative paths for lineage.
+            - batch.is_last: bool
+                True if this is the final batch for the current stream.
+            - batch.meta: dict, optional
+                Upstream lineage and batch metadata (e.g., ``manifest_root_hash``,
+                ``batch_hash``, ``ordinal``, ``upstream``). Passed through and used for
+                deterministic shard naming when ``ordinal`` is present.
         path : str, optional
             Base directory to write shards into. If omitted, the target directory is
             derived from ``use_blase_path`` and ``subdir``.
@@ -388,11 +389,12 @@ class Load:
 
         Returns
         -------
-        tuple[str, bool, dict]
-            ``(shard_path, last_batch, meta_out)`` where:
-            - ``shard_path`` is the absolute path to the written Parquet file,
-            - ``last_batch`` is the input flag echoed back,
-            - ``meta_out`` is the (possibly enriched) metadata emitted by tracking.
+        SinkResult
+
+            - artifacts is a list of Artifact objects which include
+                the absolute path to the written Parquet file,
+            - is_last is the input flag echoed back,
+            - meta is the (possibly enriched) metadata emitted by tracking.
 
         Notes
         -----
@@ -431,12 +433,11 @@ class Load:
             shard_path = _compute_shard_path(
                 base_dir=base_dir,
                 shard_prefix=shard_prefix,
-                meta=meta,
+                meta=batch.meta,
                 fallback_idx=self._bump_counter(base_dir, shard_prefix),
             )
             table = _build_parquet_table_from_images(
-                data=data,
-                meta=meta,
+                batch=batch,
                 encode=encode,
                 jpeg_quality=jpeg_quality,
                 include_paths=include_paths,
@@ -444,7 +445,11 @@ class Load:
             _write_parquet_table(
                 table, shard_path, writer_cfg=writer_cfg, on_conflict=on_conflict
             )
-            return str(shard_path), last_batch, (meta or {})
+            return SinkResult(
+                artifacts=[Artifact(path=str(shard_path), kind="parquet")],
+                is_last=batch.is_last,
+                meta=batch.meta or {},
+            )
 
         # ---------- Tracked path ----------
         new_stream = (
@@ -474,14 +479,13 @@ class Load:
         shard_path = _compute_shard_path(
             base_dir=base_dir,
             shard_prefix=shard_prefix,
-            meta=meta,
+            meta=batch.meta,
             fallback_idx=self._bump_stream_counter(),
         )
 
         try:
             table = _build_parquet_table_from_images(
-                data=data,
-                meta=meta,
+                batch=batch,
                 encode=encode,
                 jpeg_quality=jpeg_quality,
                 include_paths=include_paths,
@@ -506,8 +510,8 @@ class Load:
             self._parquet_counter = 0
             raise
 
-        if isinstance(meta, dict):
-            up = meta.get("upstream") or []
+        if isinstance(batch.meta, dict):
+            up = batch.meta.get("upstream") or []
             for u in up:
                 rid = u.get("id")
                 role = u.get("role")
@@ -516,13 +520,13 @@ class Load:
                         self._stream.step.add_input(rid, role=role, arg_name=None)
                     except Exception:
                         pass
-        rh = (meta or {}).get("manifest_root_hash")
+        rh = (batch.meta or {}).get("manifest_root_hash")
         if rh:
             try:
                 self._stream.step.add_input(rh, role="manifest_root", arg_name=None)
             except Exception:
                 pass
-        new_meta = self._stream.emit(last_batch=last_batch, meta=meta)
+        new_meta = self._stream.emit(last_batch=batch.is_last, meta=batch.meta)
 
         shard_hash = self._stream.step.register_data(
             kind="parquet",
@@ -534,7 +538,7 @@ class Load:
             shard_hash, name=f"parquet_shard_{self._parquet_counter:05d}"
         )
 
-        if last_batch:
+        if batch.is_last:
             self._stream.close_ok()
             self._stream = None
             self._parquet_base_dir = None
@@ -543,7 +547,11 @@ class Load:
             self._parquet_comp = None
             self._parquet_counter = 0
 
-        return str(shard_path), last_batch, new_meta
+        return SinkResult(
+            artifacts=[Artifact(path=str(shard_path), kind="parquet")],
+            is_last=batch.is_last,
+            meta=new_meta or {},
+        )
 
     def save_to_npy(self, data: np.ndarray, path: str):
         pass

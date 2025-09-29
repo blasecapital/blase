@@ -14,6 +14,17 @@ from .monitor import Monitor
 from .update import Update
 from .track import Track
 from .pipeline import Pipeline
+from .types import (
+    StepMsg,
+    Batch,
+    Artifact,
+    SinkResult,
+    Metrics,
+    Predictions,
+    Checkpoint,
+    Progress,
+    Alert,
+)
 
 __all__ = [
     "Extract",
@@ -30,4 +41,13 @@ __all__ = [
     "Update",
     "Track",
     "Pipeline",
+    "StepMsg",
+    "Batch",
+    "Artifact",
+    "SinkResult",
+    "Metrics",
+    "Predictions",
+    "Checkpoint",
+    "Progress",
+    "Alert",
 ]

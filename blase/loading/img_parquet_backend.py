@@ -7,6 +7,8 @@ from PIL import Image
 import pyarrow as pa
 import pyarrow.parquet as pq
 
+from blase.types import Batch
+
 
 # ---- path & counters ----
 def _compute_shard_path(
@@ -147,14 +149,13 @@ def _encode_image(
 
 def _build_parquet_table_from_images(
     *,
-    data: Any,
-    meta: Optional[Dict[str, Any]],
+    batch: Batch,
     encode: Literal["jpeg", "png"],
     jpeg_quality: int,
     include_paths: bool,
 ) -> pa.Table:
     """Create a Arrow table with encoded bytes + dims + optional labels/paths + lineage."""
-    images, labels, paths = _normalize_images_batch(data, meta)
+    images, labels, paths = _normalize_images_batch(batch.data, batch.meta)
 
     # drop/align invalid rows here to avoid NoneType in encoder
     bad_ix = [i for i, x in enumerate(images) if x is None]
@@ -178,7 +179,7 @@ def _build_parquet_table_from_images(
         chans.append(c)
 
     # lineage
-    m = meta or {}
+    m = batch.meta or {}
     # support both direct and nested styles
     manifest_root_hash = m.get("manifest_root_hash") or m.get("identity", {}).get(
         "root_hash"
@@ -202,7 +203,7 @@ def _build_parquet_table_from_images(
     }
 
     # derive paths from meta, keep order 1:1 with enc_bytes
-    paths = list((meta or {}).get("items_rel_paths") or [])
+    paths = list((batch.meta or {}).get("items_rel_paths") or [])
 
     if include_paths and paths and len(paths) == len(enc_bytes):
         cols["path"] = pa.array(paths, type=pa.string())

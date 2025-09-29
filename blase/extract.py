@@ -54,6 +54,7 @@ from blase.extracting.manifest_utils import (
     build_manifest_descriptor,
     ensure_dataset_for_manifest,
 )
+from blase.types import Batch
 from blase.utils.backends import resolve_backend_csv, resolve_backend_images
 from blase.track import Track
 
@@ -104,8 +105,8 @@ class Extract:
     Example:
     --------
     >>> extractor = Extract()
-    >>> for batch, flag, parent_hash in extractor.read_csv("data.csv", batch_size=1000):
-    >>>     process_batch(batch, parent_hash)  # Handle each batch separately
+    >>> for batch in extractor.read_csv("data.csv", batch_size=1000):
+    >>>     process_batch(batch)  # Handle each batch separately
 
     Extending to Cloud:
     -------------------
@@ -139,7 +140,7 @@ class Extract:
         filter_by: Optional[list] = None,
         backend: str = "polars",
         track: bool = True,
-    ) -> Iterable[Any]:
+    ) -> Iterable[Batch]:
         """
         Stream a CSV in memory-safe batches with optional lineage tracking.
 
@@ -187,16 +188,15 @@ class Extract:
 
         Yields
         ------
-        tuple
-            A 3-tuple ``(batch, is_last, meta)``:
-            - ``batch`` : DataFrame-like batch (``pandas.DataFrame`` or
-            ``polars.DataFrame`` depending on backend).
-            - ``is_last`` : bool indicating the final batch for this stream.
-            - ``meta`` : dict with lineage/step info when ``track=True``; ``None``
-            when ``track=False``. When tracked, ``meta`` includes (at minimum):
-            ``{"upstream": [{"id": <data_hash>, "role": "source"}],
-                "producer_step": <step_hash>, "ordinal": <int>, "chunk_size": <int>,
-                "reader_backend": <str>, "use_cols": <list|None>, "filter_by": <list|None>}``.
+        Batch
+            - batch.data: DataFrame-like batch (``pandas.DataFrame`` or
+                ``polars.DataFrame`` depending on backend).
+            - batch.is_last: bool indicating the final batch for this stream.
+            - batch.meta: dict with lineage/step info when ``track=True``; ``None``
+                when ``track=False``. When tracked, ``meta`` includes (at minimum):
+                ``{"upstream": [{"id": <data_hash>, "role": "source"}],
+                    "producer_step": <step_hash>, "ordinal": <int>, "chunk_size": <int>,
+                    "reader_backend": <str>, "use_cols": <list|None>, "filter_by": <list|None>}``.
 
         Raises
         ------
@@ -224,17 +224,17 @@ class Extract:
         Basic (untracked) streaming:
 
         >>> ex = Extract()
-        >>> for batch, is_last, meta in ex.read_csv("data.csv", backend="pandas", track=False):
-        ...     do_something(batch)
+        >>> for batch in ex.read_csv("data.csv", backend="pandas", track=False):
+        ...     do_something(batch.data)
 
         Tracked run with manual batching and column subset:
 
         >>> ex = Extract()
-        >>> for batch, is_last, meta in ex.read_csv(
+        >>> for batch in ex.read_csv(
         ...         "data.csv", mode="manual", batch_size=10_000,
         ...         use_cols=["colA", "colB"], backend="polars", track=True):
         ...     # meta contains source data hash and step metadata
-        ...     consume(batch)
+        ...     consume(batch.data)
         """
 
         backend = resolve_backend_csv(backend)
@@ -254,19 +254,15 @@ class Extract:
         # ----- untracked path -----
         if tracker is None:
             if backend == "polars":
-                yield from (
-                    (b, last, None)
-                    for (b, last) in read_batches_polars(
-                        file_path, batch_size, use_cols, filter_by
-                    )
-                )
+                for b, last in read_batches_polars(
+                    file_path, batch_size, use_cols, filter_by
+                ):
+                    yield Batch(data=b, labels=None, paths=None, is_last=last, meta={})
             else:
-                yield from (
-                    (b, last, None)
-                    for (b, last) in read_batches_pandas(
-                        file_path, batch_size, use_cols, filter_by
-                    )
-                )
+                for b, last in read_batches_pandas(
+                    file_path, batch_size, use_cols, filter_by
+                ):
+                    yield Batch(data=b, labels=None, paths=None, is_last=last, meta={})
             return
 
         # ----- tracked path -----
@@ -298,7 +294,9 @@ class Extract:
                     "filter_by": filter_by,
                 }
                 new_meta = stream.emit(last_batch=is_last, meta=meta)
-                yield (batch, is_last, new_meta)
+                yield Batch(
+                    data=batch, labels=None, paths=None, is_last=is_last, meta=new_meta
+                )
             stream.close_ok()
         except Exception as e:
             stream.close_error(type(e), e, e.__traceback__)
@@ -322,7 +320,7 @@ class Extract:
         color: Literal["rgb", "gray"] = "rgb",
         max_side: Optional[int] = None,
         track: bool = True,
-    ) -> Iterator:
+    ) -> Iterator[Batch]:
         """
         Yield memory-aware batches of decoded images from a directory.
 
@@ -369,18 +367,16 @@ class Extract:
 
         Yields
         ------
-        dict or tuple
+        Batch
             **Untracked mode** (`Track.get(track)` is None):
-                `dict` with keys:
-                - "paths": list[str]
-                - "images": decoded images (list/array/tensor per `return_type`)
-                - "meta": dict with batch planning details
+                - batch.paths: list[str]
+                - batch.data: decoded images (list/array/tensor per `return_type`)
+                - batch.meta: dict with batch planning details
             **Tracked mode** (active tracker):
-                `tuple`:
-                - paths: list[str]
-                - is_last: bool
-                - images: decoded images (per `return_type`)
-                - meta: dict including upstream lineage, batch and manifest hashes
+                - batch.paths: list[str]
+                - batch.is_last: bool
+                - batch.data: decoded images (per `return_type`)
+                - batch.meta: dict including upstream lineage, batch and manifest hashes
 
         Notes
         -----
@@ -472,11 +468,13 @@ class Extract:
                     "shuffle": shuffle,
                     "seed": seed,
                 }
-                yield {
-                    "paths": [it["abs_path"] for it in batch["items"]],
-                    "images": decoded,
-                    "meta": meta,
-                }
+                yield Batch(
+                    data=decoded,
+                    labels=None,
+                    paths=[it["abs_path"] for it in batch["items"]],
+                    is_last=bool(batch.get("is_last", False)),
+                    meta=meta,
+                )
             return
 
         # ---------------- tracked path ----------------
@@ -599,11 +597,12 @@ class Extract:
                 new_meta = stream.emit(last_batch=batch["is_last"], meta=meta_no_up)
                 new_meta["upstream"] = meta["upstream"]
 
-                yield (
-                    [it["abs_path"] for it in batch["items"]],
-                    batch["is_last"],
-                    decoded,
-                    new_meta,
+                yield Batch(
+                    data=decoded,
+                    labels=None,
+                    paths=[it["abs_path"] for it in batch["items"]],
+                    is_last=batch["is_last"],
+                    meta=new_meta,
                 )
 
             stream.close_ok()
@@ -640,7 +639,7 @@ class Extract:
         images_return: Literal["bytes", "np", "pil", "tensor"] = "bytes",
         # tracking
         track: bool = True,
-    ) -> Iterator:
+    ) -> Iterator[Batch]:
         """
         Stream Parquet/Feather data as batched tables or decoded images.
 
@@ -701,14 +700,16 @@ class Extract:
 
         Yields
         ------
-        dict
-            When ``track=False`` (untracked): objects of the form
-            ``{"data": table_like, "meta": {...}}`` where *data* is a
-            ``pyarrow.Table`` or ``pandas.DataFrame`` per *return_type*.
-        tuple
-            When ``track=True`` and ``mode='images'``: tuples
-            ``((images, labels|None, paths), is_last, meta)`` where *images*
-            are ``bytes``/``np``/``PIL.Image``/tensor per *images_return*.
+        Batch
+            **Untracked mode** (`Track.get(track)` is None):
+                - batch.data: where *data* is a
+                    ``pyarrow.Table`` or ``pandas.DataFrame`` per *return_type*.
+                - batch.meta: {...}
+            **Tracked mode** (`Track.get(track)` is True):
+                - batch.data: images where *images*
+                    are ``bytes``/``np``/``PIL.Image``/tensor per *images_return*.
+                - batch.is_last
+                - batch.meta
 
         Raises
         ------
@@ -728,12 +729,12 @@ class Extract:
         Untracked tables:
 
         >>> it = ex.read_parquet("data/", return_type="arrow", track=False)
-        >>> first = next(it); table, meta = first["data"], first["meta"]
+        >>> first = next(it); table, meta = first.data, first.meta
 
         Tracked images as NumPy arrays:
 
         >>> it = ex.read_parquet("imgs/", mode="images", decode="np", images_return="np")
-        >>> (imgs, labels, paths), is_last, meta = next(it)
+        >>> batch = next(it)
         """
         if format not in ("auto", "parquet", "dataset", "feather"):
             raise ValueError(
@@ -787,7 +788,13 @@ class Extract:
         if tracker is None:
             for i, plan in enumerate(batch_plan, 1):
                 table_like = _read_parquet_table_stub(
-                    manifest, plan, return_type, columns, use_threads, to_pandas_kwargs
+                    manifest,
+                    plan,
+                    return_type,
+                    columns,
+                    use_threads,
+                    to_pandas_kwargs,
+                    mode=mode,
                 )
                 meta = {
                     "ordinal": i,
@@ -805,7 +812,51 @@ class Extract:
                     "decode": decode,
                     "images_return": images_return,
                 }
-                yield {"data": table_like, "meta": meta}
+                if mode == "images":
+                    # 1) resolve columns
+                    eff_bytes, eff_dims, eff_label, eff_path = _auto_detect_image_cols(
+                        table_like=table_like,
+                        bytes_col=bytes_col,
+                        dims_cols=dims_cols,
+                        label_col=label_col,
+                        path_col=path_col,
+                    )
+                    # 2) validate schema
+                    _validate_image_schema(
+                        table_like=table_like,
+                        bytes_col=eff_bytes,
+                        dims_cols=eff_dims,
+                        label_col=eff_label,
+                        path_col=eff_path,
+                    )
+                    # 3) iterate rows → per-image items
+                    imgs: List[Any] = []
+                    lbls: Optional[List[Any]] = [] if eff_label else None
+                    pths: List[Optional[str]] = []
+
+                    for one_imgs, one_labels, one_paths in _iter_images_from_table(
+                        table_like=table_like,
+                        return_type=return_type,
+                        bytes_col=eff_bytes,
+                        dims_cols=eff_dims,
+                        label_col=eff_label,
+                        path_col=eff_path,
+                        decode=decode,
+                        images_return=images_return,
+                    ):
+                        imgs.extend(one_imgs)
+                        if lbls is not None:
+                            lbls.extend(one_labels or [None] * len(one_imgs))
+                        pths.extend(one_paths or [None] * len(one_imgs))
+
+                    meta["items"] = len(imgs)
+                yield Batch(
+                    data=table_like if mode == "table" else imgs,
+                    labels=None if mode == "table" else lbls,
+                    paths=None if mode == "table" else pths,
+                    is_last=plan["is_last"],
+                    meta=meta,  # dict
+                )
             return
 
         # ---------- 5) Tracked path ----------
@@ -895,10 +946,12 @@ class Extract:
                 stream.step.add_output(btoken_hash, name=f"batch_{i}")  # type: ignore[attr-defined]
 
                 table_like = _read_parquet_table_stub(
-                    manifest,
-                    plan,
-                    return_type,
-                    columns,
+                    manifest=manifest,
+                    plan=plan,
+                    return_type=return_type,
+                    columns=columns,
+                    use_threads=use_threads,
+                    to_pandas_kwargs=to_pandas_kwargs,
                     mode=mode,
                 )
 
@@ -921,7 +974,16 @@ class Extract:
                 new_meta = stream.emit(last_batch=plan["is_last"], meta=meta_no_up)  # type: ignore[attr-defined]
                 new_meta["upstream"] = meta["upstream"]
 
-                if mode == "images":
+                if mode == "table":
+                    yield Batch(
+                        data=table_like,
+                        labels=None,
+                        paths=None,
+                        is_last=plan["is_last"],
+                        meta=new_meta,
+                    )
+
+                elif mode == "images":
                     # 1) resolve columns
                     eff_bytes, eff_dims, eff_label, eff_path = _auto_detect_image_cols(
                         table_like=table_like,
@@ -959,10 +1021,12 @@ class Extract:
                         pths.extend(one_paths or [None] * len(one_imgs))
 
                     new_meta["items"] = len(imgs)
-                    yield (
-                        (imgs, lbls if lbls is not None else None, pths),
-                        plan["is_last"],
-                        new_meta,
+                    yield Batch(
+                        data=imgs,
+                        labels=lbls,
+                        paths=pths,
+                        is_last=plan["is_last"],
+                        meta=new_meta,
                     )
 
             stream.close_ok()  # type: ignore[attr-defined]

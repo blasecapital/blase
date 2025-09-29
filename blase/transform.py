@@ -2,6 +2,7 @@ from __future__ import annotations
 from typing import Iterable
 
 from blase.track import Track
+from blase.types import Batch
 
 
 class Transform:
@@ -30,19 +31,13 @@ class Transform:
     apply_standard_transformation(data, transformation: str, columns: list):
         Applies a built-in transformation such as standard scaling, min-max scaling, or one-hot encoding.
 
-    Logging:
-    --------
-    - Set `enable_logging=True` when instantiating Transform to enable logging.
-    - Logging outputs which transformation was applied to each batch.
-    - Users can also choose to log to a file using `log_to_file=True` and specify a path with `log_file`.
-
     Example:
     --------
     >>> def custom_feature_engineering(batch):
     >>>     batch["new_feature"] = batch["feature1"] * batch["feature2"]
     >>>     return batch
     >>>
-    >>> transformer = Transform(enable_logging=True)
+    >>> transformer = Transform()
     >>> transformed_data = transformer.apply_function(extracted_batches, custom_feature_engineering)
     >>> for batch in transformed_data:
     >>>     process(batch)
@@ -64,9 +59,7 @@ class Transform:
         self._stream = None
         self._fn_tag = None
 
-    def apply_function(
-        self, *, data, transform_func, last_batch, meta=None, track=True
-    ):
+    def apply_function(self, *, batch: Batch, transform_func, track=True) -> Batch:
         """
         Apply a user transform to one batch in a tracked stream, propagating lineage.
 
@@ -80,28 +73,29 @@ class Transform:
 
         Parameters
         ----------
-        data : Any
-            The batch payload to transform (e.g., a pandas or polars DataFrame). The type is
-            whatever the upstream Extract yielded.
+        batch: Batch
+            batch.data: Any
+                The batch payload to transform (e.g., a pandas or polars DataFrame). The type is
+                whatever the upstream Extract yielded.
+            batch.is_last: bool
+                ``True`` if this is the final batch for the stream. Triggers sealing the tracked
+                step (when tracking is enabled) and resets internal stream state.
+            batch.meta: dict or None, optional
+                Per-batch metadata propagated from upstream (e.g., the Extract step). Common
+                fields include:
+                ``{"upstream": [{"id": <source_hash>, "role": "source"}],
+                "producer_step": <extract_step_hash>,
+                "ordinal": <int>,
+                "chunk_size": <int>,
+                "reader_backend": <"pandas"|"polars">,
+                "use_cols": <list|None>,
+                "filter_by": <list|None>}``.
+                These hints are copied into the Transform step's params on the first batch to
+                facilitate deterministic restore/replay. May be ``None``.
         transform_func : callable
             User-supplied function that accepts ``data`` and returns the transformed batch.
             The function's qualified name (``__qualname__``) is used to group all batches
             of a stream into a single tracked step.
-        last_batch : bool
-            ``True`` if this is the final batch for the stream. Triggers sealing the tracked
-            step (when tracking is enabled) and resets internal stream state.
-        meta : dict or None, optional
-            Per-batch metadata propagated from upstream (e.g., the Extract step). Common
-            fields include:
-            ``{"upstream": [{"id": <source_hash>, "role": "source"}],
-            "producer_step": <extract_step_hash>,
-            "ordinal": <int>,
-            "chunk_size": <int>,
-            "reader_backend": <"pandas"|"polars">,
-            "use_cols": <list|None>,
-            "filter_by": <list|None>}``.
-            These hints are copied into the Transform step's params on the first batch to
-            facilitate deterministic restore/replay. May be ``None``.
         track : bool, default True
             If ``True``, use the tracking system to record a single Transform step for the
             whole stream (per unique ``transform_func``), snapshotting code/env once and
@@ -109,13 +103,12 @@ class Transform:
 
         Returns
         -------
-        tuple
-            A 3-tuple ``(out, last_batch, new_meta)``:
-            - ``out`` : Any
+        Batch
+            - batch.data : Any
             The result of ``transform_func(data)``.
-            - ``last_batch`` : bool
+            - batch.is_last : bool
             Echo of the input flag to enable downstream control flow.
-            - ``new_meta`` : dict
+            - batch.meta : dict
             When tracking, the metadata returned by the stream step's ``emit`` (includes
             lineage and this transform's producer step). When not tracking, ``meta`` is
             passed through or replaced with an empty dict.
@@ -148,15 +141,20 @@ class Transform:
         ...     df = df.copy()
         ...     df["x_norm"] = df["x"] / df["x"].abs().max()
         ...     return df
-        >>> out, last, meta = tr.apply_function(
-        ...     data=batch, transform_func=normalize, last_batch=is_last, meta=up_meta, track=True
+        >>> batch = tr.apply_function(
+        ...     batch=batch, transform_func=normalize, track=True
         ... )
         """
         tracker = Track.get(track)
 
         if tracker is None:
-            out = transform_func(data)
-            return out, last_batch, (meta or {})
+            return Batch(
+                data=transform_func(batch.data),
+                labels=batch.labels,
+                paths=batch.paths,
+                is_last=batch.is_last,
+                meta=dict(batch.meta or {}),
+            )
 
         fn_qual = getattr(
             transform_func,
@@ -173,7 +171,7 @@ class Transform:
             if getattr(self, "_stream", None) is not None:
                 self._stream.close_ok()
 
-            m = meta or {}
+            m = batch.meta or {}
             params = {
                 "fn_qualname": fn_qual,
             }
@@ -202,7 +200,7 @@ class Transform:
             self._stream = tracker.stream(
                 "blase.Transform.apply_function", params, code_fn=transform_func
             )
-            m = meta or {}
+            m = batch.meta or {}
             up = m.get("upstream") or []
             for u in up:
                 rid = u.get("id")
@@ -225,22 +223,28 @@ class Transform:
             self._fn_tag = fn_qual
 
         try:
-            out = transform_func(data)
+            out = transform_func(batch.data)
         except Exception as e:
             self._stream.close_error(type(e), e, e.__traceback__)
             self._stream = None
             self._fn_tag = None
             raise
 
-        self._stream.step.add_upstream_from_meta(meta)
-        new_meta = self._stream.emit(last_batch=last_batch, meta=meta)
+        self._stream.step.add_upstream_from_meta(batch.meta)
+        new_meta = self._stream.emit(last_batch=batch.is_last, meta=batch.meta)
 
-        if last_batch:
+        if batch.is_last:
             self._stream.close_ok()
             self._stream = None
             self._fn_tag = None
 
-        return out, last_batch, new_meta
+        return Batch(
+            data=out,
+            labels=batch.labels,
+            paths=batch.paths,
+            is_last=batch.is_last,
+            meta=new_meta,
+        )
 
     def apply_from_module(
         self, data: Iterable, module_path: str, function_name: str

@@ -209,18 +209,14 @@ def run_images_to_parquet_once(
 
     out_paths = []
     try:
-        for paths, is_last, images, meta in batches:
-            out, last, meta = tr.apply_function(
-                data=images,
+        for batch in batches:
+            batch = tr.apply_function(
+                batch=batch,
                 transform_func=flip,
-                last_batch=is_last,
-                meta=meta,
                 track=True,
             )
-            shard_path, _, _ = ld.save_images_to_parquet(
-                data=(out, None, paths),
-                last_batch=last,
-                meta=meta,
+            res = ld.save_images_to_parquet(
+                batch=batch,
                 encode="jpeg",
                 jpeg_quality=90,
                 include_paths=True,
@@ -232,7 +228,7 @@ def run_images_to_parquet_once(
                 use_blase_path=False,
                 path="data/working",
             )
-            out_paths.append(Path(shard_path))
+            out_paths.append(Path(res.artifacts[0].path))
     finally:
         try:
             batches.close()
@@ -269,18 +265,14 @@ def run_parquet_to_parquet_once(
 
     out_paths = []
     try:
-        for (images, labels, paths), is_last, meta in batches:
-            out, last, meta = tr.apply_function(
-                data=images,
+        for batch in batches:
+            batch = tr.apply_function(
+                batch=batch,
                 transform_func=flip,
-                last_batch=is_last,
-                meta=meta,
                 track=True,
             )
-            shard_path, _, _ = ld.save_images_to_parquet(
-                data=(out, labels, paths),
-                last_batch=last,
-                meta=meta,
+            res = ld.save_images_to_parquet(
+                batch=batch,
                 encode="jpeg",
                 jpeg_quality=90,
                 include_paths=True,
@@ -292,7 +284,7 @@ def run_parquet_to_parquet_once(
                 use_blase_path=False,
                 path="data/working",
             )
-            out_paths.append(Path(shard_path))
+            out_paths.append(Path(res.artifacts[0].path))
     finally:
         try:
             batches.close()

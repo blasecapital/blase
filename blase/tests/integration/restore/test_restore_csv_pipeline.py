@@ -73,25 +73,21 @@ def run_pipeline_once(src: Path, blase_mod=None) -> Path:
     )
     final_path = None
     try:
-        for i, (b, last, meta) in enumerate(gen, 1):
-            tb, tl, tm = tr.apply_function(
-                data=b,
+        for i, batch in enumerate(gen, 1):
+            batch = tr.apply_function(
+                batch=batch,
                 transform_func=func_pandas,
-                last_batch=last,
-                meta=meta,
                 track=True,
             )
-            out, ol, om = ld.save_to_csv(
-                data=tb,
-                last_batch=tl,
-                meta=tm,
+            res = ld.save_to_csv(
+                batch=batch,
                 file_name="house_rent_transformed.csv",
                 subdir="csv_data",
                 backend="pandas",
                 track=True,
                 use_blase_path=True,
             )
-            final_path = Path(out)
+            final_path = Path(res.artifacts[0].path)
             if i >= 2:
                 break
         return final_path
@@ -225,7 +221,7 @@ def data_replay(project_root: Path, data_hash: str, final_path: Path):
         "--on-conflict",
         "overwrite",
     ]
-    return subprocess.run(cmd, cwd=project_root, capture_output=True, text=True)
+    return subprocess.run(cmd, cwd=project_root)
 
 
 def data_materialize(project_root: Path, data_hash: str, final_path: Path):

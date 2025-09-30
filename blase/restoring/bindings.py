@@ -907,7 +907,6 @@ def run_apply_function_restore(
         out = transform_fn(out_n)
         out, meta = _normalize_images_batch(out, meta_n)  # post
 
-        out = transform_fn(out)
         out = _normalize_out(out)
         yield Batch(data=out, labels=None, paths=None, is_last=batch.is_last, meta=meta)
 

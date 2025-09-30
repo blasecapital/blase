@@ -1143,6 +1143,7 @@ def test_parquet_with_recorded_outs_and_override(monkeypatch, tmp_path):
 
     def fake_up(_rp, _s):
         return object()
+
     monkeypatch.setattr(
         "blase.cli.restore.replay_exec._upstream_gen_for_sink", fake_up, raising=False
     )
@@ -1246,6 +1247,7 @@ def test_parquet_without_recorded_outs_uses_default_dir_and_hashes(
 
     def fake_up(_rp, _s):
         return object()
+
     monkeypatch.setattr(
         "blase.cli.restore.replay_exec._upstream_gen_for_sink", fake_up, raising=False
     )

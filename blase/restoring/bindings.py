@@ -41,6 +41,7 @@ from blase.loading.img_parquet_backend import (
     _write_parquet_table,
     RECORDED_WRITER_CFG,
 )
+from blase.examine import Examine
 
 # simple arg mapping: role -> kwarg
 REGISTRY = {
@@ -1186,6 +1187,71 @@ def run_save_images_to_parquet_replay(
     )
 
 
+def run_restore_preview_images(
+    *,
+    run_path,
+    params,
+    realized,
+    upstream_gen=None,
+    target_override=None,
+    backend_override=None,
+):
+    step_hash = params["step_hash"]
+    st = store.load_step(run_path, step_hash)
+
+    # find preview.manifest among outputs
+    outs = store.load_step_outputs(run_path, step_hash) or []
+    man = next(
+        (
+            o
+            for o in outs
+            if (store.get_data_kind(run_path, o["data_hash"]) == "preview.manifest")
+        ),
+        None,
+    )
+
+    # rebuild kwargs
+    kwargs = {
+        "source": st["params"]["source"],
+        "source_kind": params.get("source_kind") or st["params"]["source_kind"],
+        "sample_size": len(params.get("sample_indices", []))
+        or st["params"].get("sample_size", 9),
+        "seed": params.get("seed", st["params"].get("seed", 42)),
+        "parquet_image_bytes_col": params.get("bytes_col")
+        or st["params"].get("parquet_image_bytes_col"),
+        "parquet_path_col": params.get("path_col")
+        or st["params"].get("parquet_path_col"),
+        "path_root": params.get("path_root") or st["params"].get("path_root"),
+        "head_read_bytes": st["params"].get("head_read_bytes", 128 * 1024),
+        "max_side": st["params"].get("max_side"),
+        "track": False,
+    }
+
+    exm = Examine(
+        thumb_size=params.get("thumb_size", st["params"].get("thumb_size", 256))
+    )
+
+    # honor target overrides
+    save = bool(target_override or st["params"].get("to"))
+    to = target_override or st["params"].get("to")
+    save_individual = bool(st["params"].get("save_individual"))
+    out_dir = st["params"].get("out_dir")
+
+    res = exm.preview_images(
+        **kwargs,
+        save=save,
+        to=to,
+        save_individual=save_individual,
+        out_dir=out_dir,
+        # keep original format/quality if present
+        format=st["params"].get("format", "png"),
+        jpeg_quality=st["params"].get("jpeg_quality", 90),
+    )
+
+    written = res.meta.get("written", [])
+    return written[0] if written else ""
+
+
 # Public registry of handlers (by function FQN)
 RESTORE_HANDLERS: Dict[str, Any] = {
     "blase.Extract.read_csv": run_read_csv_restore,
@@ -1194,4 +1260,5 @@ RESTORE_HANDLERS: Dict[str, Any] = {
     "blase.Transform.apply_function": run_apply_function_restore,
     "blase.Load.save_to_csv": run_save_to_csv_replay,
     "blase.Load.save_images_to_parquet": run_save_images_to_parquet_replay,
+    "blase.Examine.preview_images": run_restore_preview_images,
 }

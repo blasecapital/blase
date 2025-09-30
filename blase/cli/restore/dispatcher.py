@@ -236,9 +236,18 @@ def run_step(
 
     # ---- REPLAY: for sinks, wire upstream; for non-sinks, just restore ----
     if policy.mode == "replay":
-        if fqn in ("blase.Load.save_to_csv", "blase.Load.save_images_to_parquet"):
-            upstream_gen = _upstream_gen_for_sink(run_path, step_hash)
-            handler = bindings.RESTORE_HANDLERS[fqn]  # handler must exist for both FQNs
+        if fqn in (
+            "blase.Load.save_to_csv",
+            "blase.Load.save_images_to_parquet",
+            "blase.Examine.preview_images",
+        ):
+            upstream_gen = (
+                _upstream_gen_for_sink(run_path, step_hash)
+                if fqn.startswith("blase.Load.")
+                else None
+            )
+            handler = bindings.RESTORE_HANDLERS[fqn]
+            st["params"]["step_hash"] = step_hash
             out_path = handler(
                 run_path=run_path,
                 params=st["params"],

@@ -12,7 +12,9 @@ from blase.examining.preview_image_backend import (
     parquet_bytes_available,
     sample_parquet_bytes,
     get_source,
+    maybe_materialize_grid,
     maybe_materialize_grid_bytes,
+    maybe_materialize_thumbs,
     maybe_materialize_thumbs_bytes,
     build_meta,
     sample_population,
@@ -21,6 +23,8 @@ from blase.examining.preview_image_backend import (
     register_tracked_population,
     register_tracked_preview_manifest,
     register_tracked_materializations,
+    _pct_stats,
+    _percentile,
 )
 
 
@@ -174,7 +178,9 @@ class Examine:
                     if wp:
                         written.append(wp)
                 if save_individual and out_dir:
-                     written.extend(maybe_materialize_thumbs_bytes(items, Path(out_dir), seed))
+                    written.extend(
+                        maybe_materialize_thumbs_bytes(items, Path(out_dir), seed)
+                    )
                 meta = build_meta(
                     {
                         "mode": "parquet_bytes",
@@ -223,7 +229,9 @@ class Examine:
                 if wp:
                     written.append(wp)
             if save_individual and out_dir:
-                written.extend(maybe_materialize_thumbs_bytes(items, Path(out_dir), seed))
+                written.extend(
+                    maybe_materialize_thumbs_bytes(items, Path(out_dir), seed)
+                )
 
             meta = build_meta(
                 {
@@ -253,11 +261,21 @@ class Examine:
         # ======================
         # TRACKED
         # ======================
+        is_bytes_mode = (
+            source_kind == "parquet"
+            and parquet_image_bytes_col
+            and parquet_bytes_available(str(src_path), parquet_image_bytes_col)
+        )
         # Common params recorded on the step
         step_params = {
             "source": str(src_path),
             "source_kind": source_kind,
             "pattern": pattern if source_kind == "directory" else None,
+            "mode": "parquet_bytes"
+            if is_bytes_mode
+            else "paths"
+            if (source_kind == "parquet" and parquet_image_bytes_col)
+            else "paths",
             "parquet_path_col": parquet_path_col if source_kind == "parquet" else None,
             "parquet_image_bytes_col": parquet_image_bytes_col,
             "path_root": path_root,
@@ -301,11 +319,7 @@ class Examine:
             manifest_hash = register_tracked_population(stream, manifest_desc)
 
             # B) Collect items via bytes or paths path
-            if (
-                source_kind == "parquet"
-                and parquet_image_bytes_col
-                and parquet_bytes_available(str(src_path), parquet_image_bytes_col)
-            ):
+            if is_bytes_mode:
                 idx, items = sample_parquet_bytes(
                     source=str(src_path),
                     bytes_col=parquet_image_bytes_col,
@@ -315,6 +329,7 @@ class Examine:
                     thumb_size=self.thumb_size,
                     max_side=max_side,
                 )
+                pop_meta = manifest_desc.get("population_meta")
             else:
                 adapter = get_source(source_kind)
                 pop, pop_meta = adapter(
@@ -336,14 +351,64 @@ class Examine:
                     max_total_decode_bytes=max_total_decode_bytes,
                 )
 
+            # empty guard
+            if not items:
+                stream.emit(
+                    last_batch=True,
+                    meta={
+                        "manifest_root_hash": root_hash,
+                        "ok_count": 0,
+                        "bad_count": 0,
+                    },
+                )
+                stream.close_ok()
+                return PreviewResult(
+                    items=[],
+                    meta=build_meta(
+                        {
+                            "mode": "parquet_bytes" if is_bytes_mode else "paths",
+                            "source": str(src_path),
+                            "source_kind": source_kind,
+                            "sample_size_req": sample_size,
+                            "seed": seed,
+                            "thumb_size": self.thumb_size,
+                            "items": [],
+                            "written": [],
+                            "sample_indices": idx,
+                            "manifest_root_hash": root_hash,
+                            "population_meta": pop_meta,
+                        }
+                    ),
+                )
+
             # C) Optional materializations
             written: List[str] = []
             if save and to and any(it.ok for it in items):
-                wp = maybe_materialize_grid_bytes(items, Path(to))
+                if is_bytes_mode:
+                    wp = maybe_materialize_grid_bytes(items, Path(to))  # bytes grid
+                else:
+                    wp = maybe_materialize_grid(
+                        items, Path(to), format, jpeg_quality, self.thumb_size
+                    )
                 if wp:
                     written.append(wp)
+
             if save_individual and out_dir:
-                written.extend(maybe_materialize_thumbs_bytes(items, Path(out_dir), seed))
+                if is_bytes_mode:
+                    written.extend(
+                        maybe_materialize_thumbs_bytes(items, Path(out_dir), seed)
+                    )  # bytes thumbs
+                else:
+                    written.extend(
+                        maybe_materialize_thumbs(
+                            items,
+                            Path(out_dir),
+                            format,
+                            jpeg_quality,
+                            self.thumb_size,
+                            seed,
+                        )
+                    )
 
             # D) Preview manifest (diagnostic) + emit
             meta_core = {
@@ -351,24 +416,57 @@ class Examine:
                 "sample_indices": idx,
                 "seed": seed,
                 "thumb_size": self.thumb_size,
+                "source_kind": source_kind,
+                "bytes_col": parquet_image_bytes_col if is_bytes_mode else None,
+                "path_col": parquet_path_col if not is_bytes_mode else None,
+                "path_root": path_root,
+                "schema_fp": manifest_desc.get("schema_fp"),
+                "min_w": min_w,
+                "min_h": min_h,
+                "max_aspect": max_aspect,
             }
             preview_hash = register_tracked_preview_manifest(stream, items, meta_core)
             register_tracked_materializations(stream, written)
 
+            ok = sum(1 for it in items if it.ok)
+            bad = len(items) - ok
+            reasons = {}
+            for it in items:
+                if not it.ok:
+                    reasons[it.reason] = reasons.get(it.reason, 0) + 1
+
+            ws = [it.w for it in items if it.ok]
+            hs = [it.h for it in items if it.ok]
+            means = [it.mean for it in items if it.ok]
+            stds = [it.std for it in items if it.ok]
+
             new_meta = {
                 "manifest_root_hash": root_hash,
+                "manifest_hash": manifest_hash,
                 "preview_hash": preview_hash,
                 "written": written,
+                "ok_count": ok,
+                "bad_count": bad,
+                "bad_reasons": reasons,
+                "sample_size_got": len(items),
+                "sample_indices": idx,
+                "size_stats": _pct_stats(ws, hs),
+                "intensity_stats": {
+                    "mean_p50": _percentile(means, 50),
+                    "std_p50": _percentile(stds, 50),
+                },
+                "bytes_col": parquet_image_bytes_col if is_bytes_mode else None,
+                "path_col": parquet_path_col if not is_bytes_mode else None,
+                "schema_fp": manifest_desc.get("schema_fp"),
             }
+
             stream.emit(last_batch=True, meta=new_meta)
             stream.close_ok()
 
             # E) Return result
             meta = build_meta(
                 {
-                    "mode": "parquet_bytes"
-                    if (source_kind == "parquet" and parquet_image_bytes_col)
-                    else "paths",
+                    "mode": "parquet_bytes" if is_bytes_mode else "paths",
                     "source": str(src_path),
                     "source_kind": source_kind,
                     "pattern": pattern if source_kind == "directory" else None,
@@ -390,7 +488,8 @@ class Examine:
                     "sample_indices": idx,
                     "manifest_root_hash": root_hash,
                     "preview_hash": preview_hash,
-                    "population_meta": manifest_desc.get("population_meta"),
+                    "manifest_hash": manifest_hash,
+                    "population_meta": pop_meta,
                 }
             )
             return PreviewResult(items=items, meta=meta)

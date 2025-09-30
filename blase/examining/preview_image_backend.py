@@ -277,9 +277,9 @@ def parquet_bytes_available(path: str, bytes_col: str) -> bool:
             return _has_any_nonempty_bytes(col.slice(0, n))
     except Exception:
         import traceback
+
         traceback.print_exc()
         return False
-
 
 
 def _has_any_nonempty_bytes(arr) -> bool:
@@ -306,7 +306,11 @@ def _has_any_nonempty_bytes(arr) -> bool:
             # fallback: treat all as possibly valid
             valid = [True] * n
 
-        if pa.types.is_binary(ty) or pa.types.is_large_binary(ty) or pa.types.is_fixed_size_binary(ty):
+        if (
+            pa.types.is_binary(ty)
+            or pa.types.is_large_binary(ty)
+            or pa.types.is_fixed_size_binary(ty)
+        ):
             for i in range(m):
                 if not valid[i]:
                     continue
@@ -519,7 +523,11 @@ def _extract_cell_bytes(col, i: int) -> Optional[bytes]:
     cell = ch[li]
 
     # Binary-like
-    if pa.types.is_binary(ty) or pa.types.is_large_binary(ty) or pa.types.is_fixed_size_binary(ty):
+    if (
+        pa.types.is_binary(ty)
+        or pa.types.is_large_binary(ty)
+        or pa.types.is_fixed_size_binary(ty)
+    ):
         try:
             buf = cell.as_buffer()
             return buf.to_pybytes() if buf is not None else None
@@ -588,6 +596,7 @@ def maybe_materialize_grid_bytes(
     items: List[PreviewItem], to_path: Path, cols: int = 3
 ) -> Optional[str]:
     from PIL import Image
+
     ok = [it for it in items if it.ok and it.thumb_bytes]
     if not ok:
         return None
@@ -615,6 +624,106 @@ def maybe_materialize_thumbs_bytes(
         fn = out_dir / f"thumb_{seed}_{i}.png"
         fn.write_bytes(it.thumb_bytes)
         written.append(str(fn.resolve()))
+    return written
+
+
+def maybe_materialize_grid(
+    items: List[PreviewItem],
+    to_path: Path,
+    fmt: str,
+    jpeg_quality: int,
+    thumb_size: int,
+    cols: int = 3,
+) -> Optional[str]:
+    """
+    Save a thumbnail grid for OK items that have real readable file paths.
+    Returns the written absolute path, or None if nothing was written.
+    Skips items from in-memory sources (e.g., pseudo paths like 'parquet:...').
+    """
+    ok_paths = []
+    for it in items:
+        # only use items that are ok and point to an existing file
+        try:
+            p = Path(it.path)
+            if it.ok and p.is_file():
+                ok_paths.append(p)
+        except Exception:
+            continue
+
+    if not ok_paths:
+        return None
+
+    # Build thumbs
+    thumbs: List[Image.Image] = []
+    for p in ok_paths:
+        try:
+            with Image.open(p) as im:
+                im = ImageOps.exif_transpose(im).convert("RGB")
+                im.thumbnail((thumb_size, thumb_size), Image.Resampling.BILINEAR)
+                canvas = Image.new("RGB", (thumb_size, thumb_size))
+                x = (thumb_size - im.width) // 2
+                y = (thumb_size - im.height) // 2
+                canvas.paste(im, (x, y))
+                thumbs.append(canvas)
+        except Exception:
+            continue
+
+    if not thumbs:
+        return None
+
+    cols = max(1, min(cols, len(thumbs)))
+    rows = (len(thumbs) + cols - 1) // cols
+    grid = Image.new("RGB", (cols * thumb_size, rows * thumb_size))
+    for i, t in enumerate(thumbs):
+        r, c = divmod(i, cols)
+        grid.paste(t, (c * thumb_size, r * thumb_size))
+
+    ensure_parent_dir(to_path)
+    ext = fmt.lower()
+    if ext in ("jpg", "jpeg"):
+        grid.save(to_path, "JPEG", quality=int(jpeg_quality), optimize=True)
+    else:
+        grid.save(to_path, "PNG", optimize=True)
+
+    return str(to_path.resolve())
+
+
+def maybe_materialize_thumbs(
+    items: List[PreviewItem],
+    out_dir: Path,
+    fmt: str,
+    jpeg_quality: int,
+    thumb_size: int,
+    seed: int,
+) -> List[str]:
+    """
+    Save individual thumbnails for OK items that point to readable files.
+    Skips pseudo-path items (e.g., 'parquet:...') and non-existent files.
+    Returns a list of written absolute file paths.
+    """
+    out_dir.mkdir(parents=True, exist_ok=True)
+    written: List[str] = []
+
+    ext = "jpg" if fmt.lower() in ("jpg", "jpeg") else "png"
+
+    for i, it in enumerate(items):
+        p = Path(it.path)
+        if not it.ok or not p.is_file():
+            continue
+        try:
+            with Image.open(p) as im:
+                im = ImageOps.exif_transpose(im).convert("RGB")
+                im.thumbnail((thumb_size, thumb_size), Image.Resampling.BILINEAR)
+                fn = out_dir / f"thumb_{seed}_{i}.{ext}"
+                if ext == "jpg":
+                    im.save(fn, "JPEG", quality=int(jpeg_quality), optimize=True)
+                else:
+                    im.save(fn, "PNG", optimize=True)
+                written.append(str(fn.resolve()))
+        except Exception:
+            # ignore unreadable paths
+            continue
+
     return written
 
 
@@ -1133,7 +1242,6 @@ def register_tracked_population(stream, manifest_desc: Dict[str, Any]) -> str:
     )
     stream.step.add_input(manifest_hash, role="population")  # type: ignore[attr-defined]
     return manifest_hash
-
 
 
 def register_tracked_preview_manifest(

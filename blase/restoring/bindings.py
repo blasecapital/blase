@@ -41,6 +41,14 @@ from blase.loading.img_parquet_backend import (
     _write_parquet_table,
     RECORDED_WRITER_CFG,
 )
+from blase.examine import Examine
+from blase.examining.preview_image_backend import (
+    maybe_materialize_grid,
+    maybe_materialize_grid_bytes,
+    maybe_materialize_thumbs,
+    maybe_materialize_thumbs_bytes,
+)
+from blase.utils.fs import ensure_parent_dir
 
 # simple arg mapping: role -> kwarg
 REGISTRY = {
@@ -907,7 +915,6 @@ def run_apply_function_restore(
         out = transform_fn(out_n)
         out, meta = _normalize_images_batch(out, meta_n)  # post
 
-        out = transform_fn(out)
         out = _normalize_out(out)
         yield Batch(data=out, labels=None, paths=None, is_last=batch.is_last, meta=meta)
 
@@ -989,29 +996,6 @@ def run_save_to_csv_replay(
         if tmp.exists():
             tmp.unlink()
         shutil.copy2(preseed_path, tmp)
-
-    def _to_batch(item: Any) -> Batch:
-        if isinstance(item, Batch):
-            return item
-        if isinstance(item, tuple):
-            if len(item) == 2:
-                data, last = item
-                return Batch(
-                    data=data, labels=None, paths=None, is_last=bool(last), meta={}
-                )
-            if len(item) == 3:
-                data, last, meta = item
-                return Batch(
-                    data=data,
-                    labels=None,
-                    paths=None,
-                    is_last=bool(last),
-                    meta=meta or {},
-                )
-            # fallback: first as data
-            return Batch(data=item[0], labels=None, paths=None, is_last=False, meta={})
-        # scalar → single-item batch
-        return Batch(data=[item], labels=None, paths=None, is_last=False, meta={})
 
     ld = Load()
     last_meta = {}
@@ -1187,6 +1171,96 @@ def run_save_images_to_parquet_replay(
     )
 
 
+def run_restore_preview_images(
+    *,
+    run_path,
+    params,
+    step_hash,
+    realized,
+    upstream_gen=None,
+    target_override=None,
+    backend_override=None,
+):
+    st = store.load_step(run_path, step_hash)
+    sp = st["params"]
+
+    source_kind = sp.get("source_kind")
+    kwargs = {
+        "source": sp["source"],
+        "source_kind": source_kind,
+        "sample_size": sp.get("sample_size", 9),
+        "seed": sp.get("seed", 42),
+        "parquet_image_bytes_col": sp.get("parquet_image_bytes_col"),
+        "parquet_path_col": sp.get("parquet_path_col"),
+        "path_root": sp.get("path_root"),
+        "pattern": sp.get("pattern") if source_kind == "directory" else None,
+        "recursive": sp.get("recursive", True),
+        "allowed_ext": sp.get("allowed_ext"),
+        "head_read_bytes": sp.get("head_read_bytes", 128 * 1024),
+        "max_side": sp.get("max_side"),
+        "track": False,
+    }
+
+    exm = Examine(thumb_size=sp.get("thumb_size", 256))
+
+    grid_to = str(target_override) if target_override else sp.get("to")
+    save_grid = bool(grid_to)
+    save_thumbs = bool(sp.get("save_individual"))
+    thumbs_dir = sp.get("out_dir")
+
+    res = exm.preview_images(
+        **{k: v for k, v in kwargs.items() if v is not None},
+        save=save_grid,
+        to=grid_to,
+        save_individual=save_thumbs,
+        out_dir=thumbs_dir,
+        format=sp.get("format", "png"),
+        jpeg_quality=sp.get("jpeg_quality", 90),
+    )
+
+    # Guarantee grid if requested
+    if grid_to:
+        gp = Path(grid_to)
+        ensure_parent_dir(gp)
+        if not gp.exists():
+            is_bytes = (source_kind == "parquet") and bool(
+                sp.get("parquet_image_bytes_col")
+            )
+            if is_bytes:
+                maybe_materialize_grid_bytes(res.items, gp)
+            else:
+                maybe_materialize_grid(
+                    res.items,
+                    gp,
+                    sp.get("format", "png"),
+                    sp.get("jpeg_quality", 90),
+                    exm.thumb_size,
+                )
+
+    # Guarantee thumbs if the step asked for them
+    if save_thumbs and thumbs_dir:
+        outp = Path(thumbs_dir)
+        outp.mkdir(parents=True, exist_ok=True)
+        existing = list(outp.glob("thumb_*.png")) + list(outp.glob("thumb_*.jpg"))
+        if not existing:
+            is_bytes = (source_kind == "parquet") and bool(
+                sp.get("parquet_image_bytes_col")
+            )
+            if is_bytes:
+                maybe_materialize_thumbs_bytes(res.items, outp, sp.get("seed", 42))
+            else:
+                maybe_materialize_thumbs(
+                    res.items,
+                    outp,
+                    sp.get("format", "png"),
+                    sp.get("jpeg_quality", 90),
+                    exm.thumb_size,
+                    sp.get("seed", 42),
+                )
+
+    return grid_to if grid_to and Path(grid_to).exists() else ""
+
+
 # Public registry of handlers (by function FQN)
 RESTORE_HANDLERS: Dict[str, Any] = {
     "blase.Extract.read_csv": run_read_csv_restore,
@@ -1195,4 +1269,5 @@ RESTORE_HANDLERS: Dict[str, Any] = {
     "blase.Transform.apply_function": run_apply_function_restore,
     "blase.Load.save_to_csv": run_save_to_csv_replay,
     "blase.Load.save_images_to_parquet": run_save_images_to_parquet_replay,
+    "blase.Examine.preview_images": run_restore_preview_images,
 }

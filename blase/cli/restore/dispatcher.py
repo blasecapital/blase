@@ -247,15 +247,25 @@ def run_step(
                 else None
             )
             handler = bindings.RESTORE_HANDLERS[fqn]
-            st["params"]["step_hash"] = step_hash
-            out_path = handler(
-                run_path=run_path,
-                params=st["params"],
-                realized={},  # sinks don’t need extra realized inputs
-                upstream_gen=upstream_gen,
-                target_override=getattr(policy, "to", None),
-                backend_override=getattr(policy, "backend", None),
-            )
+            if fqn.startswith("blase.Examine"):
+                out_path = handler(
+                    run_path=run_path,
+                    params=st["params"],
+                    step_hash=step_hash,
+                    realized={},  # sinks don’t need extra realized inputs
+                    upstream_gen=upstream_gen,
+                    target_override=getattr(policy, "to", None),
+                    backend_override=getattr(policy, "backend", None),
+                )
+            else:
+                out_path = handler(
+                    run_path=run_path,
+                    params=st["params"],
+                    realized={},  # sinks don’t need extra realized inputs
+                    upstream_gen=upstream_gen,
+                    target_override=getattr(policy, "to", None),
+                    backend_override=getattr(policy, "backend", None),
+                )
             print(out_path)
             return 0
 

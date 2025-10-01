@@ -1,13 +1,12 @@
-from typing import Union, Literal, Optional, List, Dict, Any
-import random
+from typing import Union, Literal, Optional, List
 from pathlib import Path
-import json
 
 import numpy as np
 import pandas as pd
 
 from blase.track import Track
 from blase.types import PreviewResult
+from blase.utils.fs import ensure_parent_dir
 from blase.examining.preview_image_backend import (
     parquet_bytes_available,
     sample_parquet_bytes,
@@ -114,22 +113,22 @@ class Examine:
             "s3",
         ] = "directory",
         pattern: str = "**/*",
-        allowed_ext: Optional[List[str]] = None,  # directory only
-        parquet_path_col: Optional[str] = None,  # parquet: on-disk paths
-        parquet_image_bytes_col: Optional[str] = None,  # parquet: in-file bytes
-        path_root: Optional[str] = None,  # parquet: base dir for relative paths
+        allowed_ext: Optional[List[str]] = None,
+        parquet_path_col: Optional[str] = None,
+        parquet_image_bytes_col: Optional[str] = None,
+        path_root: Optional[str] = None,
         recursive: bool = True,
         sample_size: int = 9,
         seed: Optional[int] = 42,
         backend: Literal["pil"] = "pil",
-        return_thumbs: bool = False,  # reserved (we do stats-only by default)
+        return_thumbs: bool = False,
         head_read_bytes: int = 128 * 1024,
         max_side: Optional[int] = None,
         max_total_decode_bytes: Optional[
             int
-        ] = None,  # guard; enforced in probe helpers
+        ] = None,
         save: bool = False,
-        to: Optional[str] = None,  # grid image path
+        to: Optional[str] = None,
         save_individual: bool = False,
         out_dir: Optional[str] = None,
         format: Literal["png", "jpg"] = "png",
@@ -140,8 +139,169 @@ class Examine:
         track: bool = True,
     ) -> PreviewResult:
         """
-        Headless preview with deterministic sampling, mixed-type directory handling, and restore wiring.
-        Returns stats and optional thumbnails; writes only if requested.
+        Preview a sample of images from a source and compute lightweight diagnostics.
+
+        This method supports two acquisition modes:
+
+        1. **Path-based mode** (default): Build a population of file paths from a mixed
+        directory or a path-bearing dataset (e.g., Parquet with a path column),
+        deterministically sample `sample_size` entries, then open each path and
+        probe a thumbnail plus basic stats.
+
+        2. **Parquet-bytes mode**: If `source_kind == "parquet"` and
+        `parquet_image_bytes_col` is provided and found to contain non-empty image
+        bytes (via a fast check), read only that column and decode thumbnails
+        directly from in-file bytes without touching the filesystem paths.
+
+        Both modes are designed to be **headless** and **deterministic** with `seed`.
+        Optional tracking hooks write a minimal “preview manifest” for reproducibility
+        and future restore.
+
+        Parameters
+        ----------
+        source : str
+            Input source. For `source_kind="directory"`, this is a directory path.
+            For `source_kind="parquet"`, this is a Parquet file path. Other kinds are
+            reserved for future extensions.
+        source_kind : {'directory', 'parquet', 'csv', 'jsonl', 'tfrecord', 'npy', 'video', 'hf_datasets', 's3'}, optional
+            Interpretation of `source`. Defaults to ``'directory'``. Currently,
+            path-based mode is implemented for ``'directory'`` and ``'parquet'`` with a path column.
+        pattern : str, optional
+            Glob for directory enumeration. Ignored unless `source_kind='directory'`.
+            Default is ``'**/*'``.
+        allowed_ext : list of str, optional
+            File extensions to include in directory mode (e.g., ``['.jpg', '.png']``).
+            Case-insensitive. If ``None``, a standard image extension set is used.
+        parquet_path_col : str, optional
+            Column name containing on-disk image paths for Parquet path-based mode.
+            If omitted, a common name is guessed: ``'path'``, ``'image_path'``,
+            or ``'filepath'``.
+        parquet_image_bytes_col : str, optional
+            Column name containing image bytes for Parquet-bytes mode. If provided,
+            the function will prefer bytes mode when the column is present and has
+            any non-empty cells.
+        path_root : str, optional
+            Base directory to join with relative paths from a path column.
+        recursive : bool, optional
+            Recurse into subdirectories when in directory mode. Default ``True``.
+        sample_size : int, optional
+            Number of samples to return. Must be > 0. Default ``9``.
+        seed : int, optional
+            RNG seed for deterministic sampling. If ``None``, defaults to ``42``.
+        backend : {'pil'}, optional
+            Image decode backend. Only ``'pil'`` is supported. Default ``'pil'``.
+        return_thumbs : bool, optional
+            Reserved. Thumbnails are computed internally for stats, but this method
+            returns only metadata objects; thumbnails are written only via `save` or
+            `save_individual`. Default ``False``.
+        head_read_bytes : int, optional
+            Maximum header bytes to read for format probing in bytes mode. Default
+            ``128 * 1024``.
+        max_side : int, optional
+            Optional max side length for thumbnail decode. If ``None``, a sensible
+            default is used by probing helpers.
+        max_total_decode_bytes : int, optional
+            Upper bound on aggregate decoded byte budget across the sampled set;
+            decoding may be skipped once the budget is exceeded. Enforced in probe
+            helpers. If ``None``, no additional guard is applied beyond defaults.
+        save : bool, optional
+            If ``True`` and any items are OK, write a contact-sheet grid to `to`.
+        to : str, optional
+            Output filepath for grid image. Used only when `save=True`.
+        save_individual : bool, optional
+            If ``True``, write per-sample thumbnails to `out_dir`.
+        out_dir : str, optional
+            Output directory for individual thumbnails. Used when `save_individual=True`.
+        format : {'png', 'jpg'}, optional
+            Output format for path-based thumbnail writing. Default ``'png'``.
+        jpeg_quality : int, optional
+            JPEG quality when `format='jpg'`. Default ``90``.
+        min_w : int, optional
+            Minimum image width accepted as OK. Default ``64``.
+        min_h : int, optional
+            Minimum image height accepted as OK. Default ``64``.
+        max_aspect : float, optional
+            Maximum aspect ratio (long_side / short_side) accepted as OK. Default ``5.0``.
+        track : bool, optional
+            If ``True``, record a tracked preview step, including a population
+            manifest hash and a preview manifest for restore/replay. Default ``True``.
+
+        Returns
+        -------
+        PreviewResult
+            Dataclass-like object with:
+            - ``items`` : list of PreviewItem
+                One per sampled image. Each item includes fields such as:
+                ``ok`` (bool), ``reason`` (str if not ok), dimensions (``w``, ``h``),
+                intensity stats (``mean``, ``std``), thumbnail byte size, and a
+                ``path`` or pseudo-path (e.g., ``'parquet:<file>#rg=<i>:row=<j>'``).
+            - ``meta`` : dict
+                Context and summary statistics:
+                - ``mode`` : ``'paths'`` or ``'parquet_bytes'``.
+                - ``source``, ``source_kind``, and relevant column names.
+                - ``sample_size_req`` and ``sample_indices`` (global row indices or
+                population indices).
+                - ``thumb_size`` (implementation default), ``min_w``, ``min_h``,
+                ``max_aspect``.
+                - ``ok_count``, ``bad_count``, and ``bad_reasons``.
+                - ``size_stats`` and ``intensity_stats`` percentiles.
+                - Optional tracking keys when `track=True`:
+                ``manifest_root_hash``, ``manifest_hash``, ``preview_hash``,
+                and any recorded materializations in ``written``.
+
+        Raises
+        ------
+        ValueError
+            If ``backend`` is not ``'pil'`` or ``sample_size <= 0``.
+        RuntimeError
+            Propagated errors from tracking stream if an unexpected exception occurs
+            during a tracked run.
+
+        Notes
+        -----
+        - **Bytes-first heuristic**: When `source_kind='parquet'` and
+        `parquet_image_bytes_col` is set, a constant-time scan checks for any
+        non-empty bytes in that column. If present, the function enters
+        parquet-bytes mode and decodes directly from column data.
+        - **Determinism**: Sampling uses a local RNG seeded by `seed` and is stable
+        for the same population and inputs.
+        - **Side effects**: No files are written unless `save=True` and/or
+        `save_individual=True`. When tracking is enabled, preview manifests and
+        materialization references are registered for restore.
+        - **Performance**: Parquet-bytes mode column-projects and reads only the row
+        groups required by the sampled indices. Path-based mode opens only the
+        sampled files.
+
+        Examples
+        --------
+        Preview from a directory and write a grid:
+
+        >>> res = examiner.preview_images(
+        ...     "/data/images",
+        ...     source_kind="directory",
+        ...     sample_size=12,
+        ...     seed=123,
+        ...     save=True,
+        ...     to="/tmp/preview_grid.png",
+        ...     save_individual=True,
+        ...     out_dir="/tmp/preview_sample"
+        ... )
+
+        Preview from a Parquet file with an image-bytes column:
+
+        >>> res = examiner.preview_images(
+        ...     "dataset.parquet",
+        ...     source_kind="parquet",
+        ...     parquet_image_bytes_col="image_bytes",
+        ...     sample_size=9,
+        ...     seed=42,
+        ... )
+
+        See Also
+        --------
+        sample_population : Deterministic sampling over an abstract population adapter.
+        sample_parquet_bytes : Efficient sampler/decoder for Parquet image-bytes columns.
+        probe_paths : Path-based probe producing per-item stats and thumbnails.
         """
         if backend != "pil":
             raise ValueError("Only 'pil' supported.")
@@ -384,12 +544,15 @@ class Examine:
             # C) Optional materializations
             written: List[str] = []
             if save and to and any(it.ok for it in items):
-                if is_bytes_mode:
-                    wp = maybe_materialize_grid_bytes(items, Path(to))  # bytes grid
-                else:
-                    wp = maybe_materialize_grid(
-                        items, Path(to), format, jpeg_quality, self.thumb_size
+                tp = Path(to)
+                ensure_parent_dir(tp)
+                wp = (
+                    maybe_materialize_grid_bytes(items, tp)
+                    if is_bytes_mode
+                    else maybe_materialize_grid(
+                        items, tp, format, jpeg_quality, self.thumb_size
                     )
+                )
                 if wp:
                     written.append(wp)
 

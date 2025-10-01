@@ -1,8 +1,6 @@
 from pathlib import Path
 from typing import Dict, Any, Optional, List, Tuple
 import random
-import base64
-import binascii
 import io
 from collections import Counter
 import json
@@ -490,7 +488,8 @@ def _extract_cell_bytes(col, i: int) -> Optional[bytes]:
     Returns None for null or empty cells.
     """
     import pyarrow as pa
-    import base64, binascii
+    import base64
+    import binascii
 
     # Locate chunk and local position
     if isinstance(col, pa.ChunkedArray):
@@ -1129,7 +1128,6 @@ def build_manifest_and_hash(
         src = Path(context["source"]).resolve()
         pattern = context.get("pattern", "**/*")
         recursive = bool(context.get("recursive", True))
-        head_read_bytes: Optional[int] = context.get("head_read_bytes")
 
         manifest = scan_manifest_headers(
             directory=str(src),
@@ -1256,7 +1254,7 @@ def register_tracked_preview_manifest(
     safe_items = []
     for it in items:
         d = it.to_dict()
-        tb = d.pop("thumb_bytes", None)  # remove bytes
+        tb = d.pop("thumb_bytes", None)
         if tb:
             d["thumb_bytes_len"] = len(tb)
             d["thumb_bytes_sha256"] = Hash().hash_bytes(tb)

@@ -1,29 +1,53 @@
-from blase.preparing.interfaces import ManifestBatch
-from blase.preparing.stats import counters as counters_mod
+from blase.types import Batch
+from blase.prepare import Prepare
+from typing import Dict, Any, Sequence
 
 
-# Fake ManifestBatch generator
-def _b(rows, last=False):
-    return ManifestBatch(
-        data=rows, is_last=last, meta={"class_map": {"weed": 0, "radish": 1}}
-    )
+def _mb(rows: Sequence[Dict[str, Any]], last=False):
+    return Batch(data=rows, meta={"count": len(rows)}, is_last=last)
 
 
-def _manifest_iter():
-    yield _b(
-        [
-            {
-                "image_id": "a",
-                "det": [
-                    {"xmin": 0.1, "ymin": 0.1, "xmax": 0.2, "ymax": 0.2, "label": 0}
-                ],
-                "cls": [1],
-            }
-        ]
-    )
-    yield _b([{"image_id": "b", "det": [], "cls": [0]}], last=True)
+def _manifest():
+    rows1 = [
+        {
+            "image_id": "a",
+            "height": 2,
+            "width": 4,
+            "det": [{"label": "weed"}],
+            "cls": ["good"],
+        },
+        {
+            "image_id": "b",
+            "height": 4,
+            "width": 8,
+            "det": [{"label": "radish"}, {"label": "weed"}],
+            "cls": [],
+        },
+    ]
+    yield _mb(rows1, last=True)
 
 
-def test_counters_has_class_histogram():
-    stats = counters_mod.compute(_manifest_iter(), cfg={})
-    assert "class_hist" in stats and sum(stats["class_hist"].values()) >= 2
+def test_stats_class():
+    prep = Prepare()
+    b = prep.compute_stats(_manifest(), by="class")
+    h = b.data["class_hist"]
+    assert b.data["by"] == "class"
+    assert b.data["n_images"] == 2
+    assert h == {"good": 1, "radish": 1, "weed": 2}
+
+
+def test_stats_image():
+    prep = Prepare()
+    b = prep.compute_stats(_manifest(), by="image")
+    imgs = {r["image_id"]: r for r in b.data["images"]}
+    assert imgs["a"]["n_det"] == 1 and imgs["a"]["n_cls"] == 1
+    assert imgs["b"]["n_det"] == 2 and imgs["b"]["n_cls"] == 0
+
+
+def test_stats_global():
+    prep = Prepare()
+    b = prep.compute_stats(_manifest(), by="global")
+    assert b.data["n_images"] == 2
+    assert b.data["n_det"] == 3
+    assert b.data["n_cls"] == 1
+    assert b.data["class_hist"]["weed"] == 2

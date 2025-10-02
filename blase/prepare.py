@@ -6,21 +6,34 @@ from typing import (
     Sequence,
     Mapping,
     Literal,
-    Iterator,
     Protocol,
     Union,
     List,
 )
 from pathlib import Path
 from dataclasses import dataclass, field
+from itertools import islice
 
 from blase.types import Batch, SinkResult
+
 from blase.preparing.registry import PrepareRegistry
+
 from blase.preparing.default_registry import default_registry
+
 from blase.preparing.interfaces import ManifestBatch
+
 from blase.preparing.manifest import index_images as _idx
 from blase.preparing.manifest import align_stream as _align
 from blase.preparing.manifest import classmap as _classmap
+
+from blase.preparing.stats import counters as _counters
+
+from blase.preparing.splitters import random as _split_random
+from blase.preparing.splitters import stratified as _split_strat
+from blase.preparing.splitters import group as _split_group
+from blase.preparing.splitters import time as _split_time
+
+from blase.preparing.writers.tfrecord import writer as _tfr_writer
 
 
 # -------------------------
@@ -289,7 +302,7 @@ class Prepare:
         box_cfg: BoxConfig = BoxConfig(),
         class_cfg: ClassConfig = ClassConfig(),
         scale_cfg: ScaleConfig = ScaleConfig(),
-    ) -> Iterator[ManifestBatch]:
+    ) -> Iterable[ManifestBatch]:
         # coerce inputs
         ds = _coerce_list_data_sources(data_sources)
         ls = _coerce_list_label_sources(label_sources)
@@ -312,30 +325,56 @@ class Prepare:
             },
         )
 
-        # 2) labels → iterables (via registry.label_readers)
-        label_iters: list[Iterable[Dict[str, Any]]] = []
+        # 2) label readers → reopenable callables
+        label_reader_fns: list[callable] = []
         for src in ls:
             reader = self._reg.label_readers.get(src.fmt)
             if reader is None:
                 raise ValueError(f"no label reader registered for fmt={src.fmt!r}")
-            label_iters.append(
-                reader.read(
-                    {"uri": src.uri, "fmt": src.fmt, "options": dict(src.options)}
-                )
-            )
 
-        # 3) class map
+            def _mk(fn=reader.read, _src=src):
+                def _reader():
+                    return fn(
+                        {
+                            "uri": _src.uri,
+                            "fmt": _src.fmt,
+                            "options": dict(_src.options),
+                        }
+                    )
+
+                return _reader
+
+            label_reader_fns.append(_mk())
+
+        # 3) class map (first pass)
+        label_iters_for_map = [fn() for fn in label_reader_fns]
         class_map, class_meta = _classmap.build_or_validate_class_map(
-            label_iters,
+            label_iters_for_map,
             {
                 "class_map": class_cfg.class_map,
                 "normalize_names": class_cfg.normalize_names,
             },
         )
 
-        # 4) align stream
+        # 3.1) optional sanity probe (helps catch id_from/id_col mismatches fast)
+        kv_ids = set(kv_index.keys())
+        probe_ids = set()
+        for it in [fn() for fn in label_reader_fns]:
+            for row in islice(it, 1000):
+                iid = row.get("image_id")
+                if iid:
+                    probe_ids.add(iid)
+        if probe_ids and not (kv_ids & probe_ids):
+            raise RuntimeError(
+                "no label image_ids match Parquet ids; check LabelSource.options['id_from'] "
+                "and ImageConfig.id_col; examples="
+                f"labels:{sorted(list(probe_ids))[:5]} vs parquet:{sorted(list(kv_ids))[:5]}"
+            )
+
+        # 4) align stream (second pass)
+        label_iters_for_align = [fn() for fn in label_reader_fns]
         yield from _align.align_stream(
-            label_iters=label_iters,
+            label_iters=label_iters_for_align,
             kv_index=kv_index,
             rg_index=rg_index,
             join_cfg={
@@ -366,7 +405,10 @@ class Prepare:
         manifest: Iterable[ManifestBatch],
         *,
         by: Literal["class", "image", "global"] = "class",
-    ) -> Batch[Stats, ManifestMeta]: ...
+    ) -> Batch[Stats, ManifestMeta]:
+        stats = _counters.compute(manifest, {"by": by})
+        meta: ManifestMeta = {"by": by}
+        return Batch(data=stats, meta=meta, is_last=True)
 
     def split(
         self,
@@ -380,7 +422,35 @@ class Prepare:
         group_key: str = "image_id",
         stratify_on: str = "class",
         holdout_query: Optional[str] = None,
-    ) -> Batch[Splits, ManifestMeta]: ...
+    ) -> Batch[Splits, ManifestMeta]:
+        cfg = {
+            "fractions": {"train": train, "val": val, "test": test},
+            "seed": seed,
+            "group_key": group_key,
+            "stratify_on": stratify_on,
+            "holdout_query": holdout_query,
+        }
+        if abs(train + val + test - 1.0) > 1e-6:
+            raise ValueError("train+val+test must equal 1.0")
+
+        if method == "random":
+            s = _split_random.split(manifest, cfg)
+        elif method == "stratified":
+            s = _split_strat.split(manifest, cfg)
+        elif method == "group":
+            s = _split_group.split(manifest, cfg)
+        elif method == "time":
+            s = _split_time.split(manifest, cfg)
+        else:
+            raise ValueError(f"unknown split method {method!r}")
+
+        meta: ManifestMeta = {
+            "method": method,
+            "fractions": cfg["fractions"],
+            "seed": seed,
+            "sizes": {k: len(v) for k, v in s.items()},
+        }
+        return Batch(data=s, meta=meta, is_last=True)
 
     def to_tfrecord(
         self,
@@ -398,7 +468,21 @@ class Prepare:
         write_workers: Optional[int] = None,
         write_alignment_index: bool = True,
         example_id_feature: str = "example/id",
-    ) -> SinkResult: ...
+    ) -> SinkResult:
+        cfg = {
+            "out_dir": Path(out_dir),
+            "mode": mode,
+            "shard_size_mb": int(shard_size_mb),
+            "compression": compression,
+            "include_image_bytes": bool(include_image_bytes),
+            "read_bytes_from": read_bytes_from,
+            "deterministic_order": bool(deterministic_order),
+            "order_key": order_key,
+            "write_workers": write_workers,
+            "write_alignment_index": bool(write_alignment_index),
+            "example_id_feature": example_id_feature,
+        }
+        return _tfr_writer.write(manifest, splits, cfg)
 
     def write_label_sidecars(
         self,

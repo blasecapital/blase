@@ -1,6 +1,7 @@
 from pathlib import Path
 from typing import Optional, Any, Tuple, List, Literal, Dict
 import io
+import json
 
 import numpy as np
 from PIL import Image
@@ -155,21 +156,38 @@ def _build_parquet_table_from_images(
     include_paths: bool,
 ) -> pa.Table:
     """Create a Arrow table with encoded bytes + dims + optional labels/paths + lineage."""
-    images, labels, paths = _normalize_images_batch(batch.data, batch.meta)
+    # 1) prefer explicit fields on Batch
+    imgs = list(batch.data)
+    labels = getattr(batch, "labels", None)
+    paths = getattr(batch, "paths", None)
 
-    # drop/align invalid rows here to avoid NoneType in encoder
-    bad_ix = [i for i, x in enumerate(images) if x is None]
+    # 2) fallback to meta normalization only if needed
+    if labels is None or paths is None:
+        ni, nl, np_ = _normalize_images_batch(batch.data, batch.meta)
+        if labels is None:
+            labels = nl
+        if paths is None:
+            paths = np_
+
+    # 3) drop/align invalid
+    bad_ix = [i for i, x in enumerate(imgs) if x is None]
     if bad_ix:
-        # keep indices
-        keep = [i for i in range(len(images)) if i not in bad_ix]
-        images = [images[i] for i in keep]
-        if labels is not None:
-            labels = [labels[i] if i < len(labels) else None for i in keep]
-        if paths is not None:
-            paths = [paths[i] if i < len(paths) else None for i in keep]
+        keep = [i for i in range(len(imgs)) if i not in bad_ix]
+        imgs = [imgs[i] for i in keep]
+        labels = (
+            [labels[i] if (labels and i < len(labels)) else None for i in keep]
+            if labels is not None
+            else None
+        )
+        paths = (
+            [paths[i] if (paths and i < len(paths)) else None for i in keep]
+            if paths is not None
+            else None
+        )
 
+    # 4) encode
     enc_bytes, heights, widths, chans = [], [], [], []
-    for img in images:
+    for img in imgs:
         u8 = _ensure_uint8_rgb(img)
         enc = _encode_image(u8, fmt=encode, quality=jpeg_quality)
         enc_bytes.append(enc)
@@ -178,35 +196,45 @@ def _build_parquet_table_from_images(
         widths.append(w)
         chans.append(c)
 
-    # lineage
     m = batch.meta or {}
-    # support both direct and nested styles
     manifest_root_hash = m.get("manifest_root_hash") or m.get("identity", {}).get(
         "root_hash"
     )
     batch_hash = m.get("batch_hash")
+
+    # 5) choose paths: Batch.paths first, else meta fallback
+    if not paths:
+        paths = list((m.get("items_rel_paths") or [])) or None
+
+    # 6) labels column: JSON strings are safest
+    if labels is not None:
+        lab_col = pa.array(
+            [json.dumps(x) if x not in (None, []) else None for x in labels],
+            type=pa.string(),
+        )
+    else:
+        lab_col = pa.nulls(len(enc_bytes), type=pa.string())
 
     cols = {
         "img_bytes": pa.array(enc_bytes, type=pa.binary()),
         "height": pa.array(heights, type=pa.int32()),
         "width": pa.array(widths, type=pa.int32()),
         "channels": pa.array(chans, type=pa.int8()),
-        "label": (
-            pa.array(labels)
-            if labels is not None
-            else pa.nulls(len(enc_bytes), type=pa.int32())
-        ),
+        "label": lab_col,
         "manifest_root_hash": pa.array(
             [manifest_root_hash] * len(enc_bytes), type=pa.string()
         ),
         "batch_hash": pa.array([batch_hash] * len(enc_bytes), type=pa.string()),
     }
 
-    # derive paths from meta, keep order 1:1 with enc_bytes
-    paths = list((batch.meta or {}).get("items_rel_paths") or [])
-
     if include_paths and paths and len(paths) == len(enc_bytes):
         cols["path"] = pa.array(paths, type=pa.string())
+        # optional convenience: filename
+        from pathlib import Path as _P
+
+        cols["filename"] = pa.array(
+            [_P(p).name if p else None for p in paths], type=pa.string()
+        )
     else:
         cols["path"] = pa.nulls(len(enc_bytes), type=pa.string())
 
@@ -219,10 +247,10 @@ def _build_parquet_table_from_images(
         "manifest_root_hash",
         "batch_hash",
         "path",
+        "filename",
     ]
     names = [k for k in order if k in cols]
     arrays = [cols[k] for k in names]
-
     return pa.Table.from_arrays(arrays, names=names)
 
 

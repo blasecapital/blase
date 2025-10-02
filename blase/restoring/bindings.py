@@ -503,7 +503,7 @@ def run_read_images_restore(
         yield Batch(
             data=decoded,
             labels=None,
-            paths=None,
+            paths=[it["abs_path"] or it["rel_path"] for it in items],
             is_last=is_last,
             meta=meta,
         )
@@ -790,6 +790,7 @@ def run_apply_function_restore(
 
     # Treat as CSV/tabular if the pipeline says so, regardless of generator vs path.
     csv_mode = params.get("backend") in ("pandas", "polars")
+    pass_batch = bool(params.get("pass_batch"))
 
     # ---- image helpers ----
     def _looks_like_img(b: bytes) -> bool:
@@ -899,24 +900,77 @@ def run_apply_function_restore(
         return _normalize_imgs(z)
 
     for batch in gen:
+        # --- CSV mode ---
         if csv_mode:
-            out = transform_fn(batch.data)
-            yield Batch(
-                data=out,
-                labels=None,
-                paths=None,
-                is_last=batch.is_last,
-                meta=batch.meta,
-            )
+            if pass_batch:
+                out = transform_fn(batch)
+                if not isinstance(out, Batch):
+                    out = type(batch)(
+                        data=out,
+                        labels=batch.labels,
+                        paths=batch.paths,
+                        is_last=batch.is_last,
+                        meta=batch.meta,
+                    )
+            else:
+                out = transform_fn(batch.data)
+                out = type(batch)(
+                    data=out,
+                    labels=batch.labels,
+                    paths=batch.paths,
+                    is_last=batch.is_last,
+                    meta=batch.meta,
+                )
+            yield out
             continue
 
-        # Non-CSV: images/parquet-images or other non-tabular data
+        # --- Image/non-tabular mode ---
+        if pass_batch:
+            b = batch
+            paths = (
+                getattr(b, "paths", None)
+                or (b.meta or {}).get("paths")
+                or (b.meta or {}).get("items_rel_paths")
+            )
+            if paths is None:
+                # keep length, avoid crash; adapter can no-op on None
+                paths = [None] * (len(b.data) if hasattr(b, "data") else 0)
+            b = type(b)(
+                data=b.data,
+                labels=b.labels,
+                paths=list(paths),
+                is_last=b.is_last,
+                meta=b.meta,
+            )
+            out = transform_fn(b)
+            if not isinstance(out, Batch):
+                out = type(b)(
+                    data=out,
+                    labels=b.labels,
+                    paths=b.paths,
+                    is_last=b.is_last,
+                    meta=b.meta,
+                )
+            yield out
+            continue
+
+        # Legacy data-only replay (kept for old runs)
         out_n, meta_n = _normalize_images_batch(batch.data, batch.meta)  # pre
         out = transform_fn(out_n)
         out, meta = _normalize_images_batch(out, meta_n)  # post
-
         out = _normalize_out(out)
-        yield Batch(data=out, labels=None, paths=None, is_last=batch.is_last, meta=meta)
+
+        # Prefer labels/paths from meta if produced; else keep originals
+        lbls = (meta or {}).get("labels", None)
+        paths = (meta or {}).get("paths", None)
+        if lbls is None:
+            lbls = batch.labels
+        if paths is None:
+            paths = batch.paths
+
+        yield Batch(
+            data=out, labels=lbls, paths=paths, is_last=batch.is_last, meta=meta
+        )
 
 
 def run_save_to_csv_replay(

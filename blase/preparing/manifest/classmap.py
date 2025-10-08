@@ -1,5 +1,6 @@
 from typing import Any, Dict, Iterable, Iterator, Mapping, Sequence, Tuple, Set
 from collections import OrderedDict
+import re
 
 
 def _iter_labels(
@@ -78,3 +79,54 @@ def build_or_validate_class_map(
     names_sorted = sorted(seen.keys())
     meta = {"normalize_names": normalize, "class_names": names_sorted, "counts": counts}
     return provided, meta
+
+
+# ----------
+# class_map_io
+# ----------
+
+_NAME_CLEAN_RE = re.compile(r"\s+")
+
+
+def _normalize_name(s: str) -> str:
+    s = s.strip().lower()
+    s = _NAME_CLEAN_RE.sub("_", s)
+    return s
+
+
+def canonicalize_class_map(
+    cm: Mapping[str, int],
+    *,
+    normalize_names: bool = True,
+) -> Dict[str, int]:
+    """
+    Returns a deterministic class map:
+      - optionally normalizes keys,
+      - validates uniqueness and contiguous non-negative ids,
+      - sorts by id and returns a plain dict.
+    """
+    if not cm:
+        return {}
+
+    # 1) normalize keys if requested
+    items = []
+    seen_keys: Set[str] = set()
+    for k, v in cm.items():
+        if not isinstance(v, int) or v < 0:
+            raise ValueError(f"class id must be non-negative int; got {k!r}:{v!r}")
+        kk = _normalize_name(k) if normalize_names else k
+        if kk in seen_keys:
+            raise ValueError(f"duplicate class after normalization: {kk!r}")
+        seen_keys.add(kk)
+        items.append((kk, v))
+
+    # 2) ensure ids are unique
+    ids = [v for _, v in items]
+    if len(ids) != len(set(ids)):
+        raise ValueError("duplicate class ids detected")
+
+    # 3) sort deterministically by id
+    items.sort(key=lambda kv: kv[1])
+
+    # 4) return as dict preserving order
+    return dict(items)

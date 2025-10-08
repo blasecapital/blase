@@ -13,8 +13,10 @@ from typing import (
 from pathlib import Path
 from dataclasses import dataclass, field
 from itertools import islice
+import json
 
 from blase.types import Batch, SinkResult
+from blase.utils.hashing import Hash
 
 from blase.preparing.registry import PrepareRegistry
 
@@ -34,6 +36,10 @@ from blase.preparing.splitters import group as _split_group
 from blase.preparing.splitters import time as _split_time
 
 from blase.preparing.writers.tfrecord import writer as _tfr_writer
+from blase.preparing.writers.tfrecord.inspect import head as _tfr_head
+
+from blase.preparing.writers.sidecar import jsonl as _sidecar_jsonl
+from blase.preparing.writers.sidecar import parquet as _sidecar_parquet
 
 
 # -------------------------
@@ -463,6 +469,8 @@ class Prepare:
         compression: Literal["GZIP", "NONE"] = "GZIP",
         include_image_bytes: bool = True,
         read_bytes_from: Literal["parquet", "filesystem"] = "parquet",
+        parquet_id_col="image_id",
+        parquet_bytes_col="img_bytes",
         deterministic_order: bool = True,
         order_key: Literal["sha256", "image_id"] = "sha256",
         write_workers: Optional[int] = None,
@@ -476,13 +484,34 @@ class Prepare:
             "compression": compression,
             "include_image_bytes": bool(include_image_bytes),
             "read_bytes_from": read_bytes_from,
+            "example_id_feature": example_id_feature,
+            "parquet_id_col": parquet_id_col,
+            "parquet_bytes_col": parquet_bytes_col,
             "deterministic_order": bool(deterministic_order),
             "order_key": order_key,
             "write_workers": write_workers,
             "write_alignment_index": bool(write_alignment_index),
-            "example_id_feature": example_id_feature,
         }
         return _tfr_writer.write(manifest, splits, cfg)
+
+    def preview_tfrecord(
+        self,
+        path: Path,
+        *,
+        n: int = 8,
+        compression: str = "GZIP",
+        decode_images: bool = False,
+        out_dir: Optional[Path] = None,
+        max_side: int = 1024,
+    ) -> List[Dict[str, Any]]:
+        return _tfr_head(
+            path=Path(path),
+            n=n,
+            compression=compression,
+            decode_images=decode_images,
+            out_dir=out_dir,
+            max_side=max_side,
+        )
 
     def write_label_sidecars(
         self,
@@ -493,13 +522,59 @@ class Prepare:
         format: Literal["jsonl", "parquet"] = "jsonl",
         deterministic_order: bool = True,
         order_key: Literal["sha256", "image_id"] = "sha256",
-    ) -> SinkResult: ...
+    ) -> SinkResult:
+        cfg: Dict[str, Any] = {
+            "out_dir": Path(out_dir),
+            "deterministic_order": bool(deterministic_order),
+            "order_key": order_key,
+        }
+        if format == "jsonl":
+            return _sidecar_jsonl.write(manifest, splits, cfg)
+        if format == "parquet":
+            return _sidecar_parquet.write(manifest, splits, cfg)
+        raise ValueError(f"unsupported sidecar format: {format!r}")
 
     def class_map_io(
         self,
         *,
         load: Optional[Path] = None,
         save: Optional[Path] = None,
-        map: Optional[ClassMap] = None,
+        map: Optional[Dict[str, int]] = None,
         normalize: bool = True,
-    ) -> Batch[Dict[str, int], ManifestMeta]: ...
+    ) -> Batch[Dict[str, int], ManifestMeta]:
+        """
+        Load/save a canonical class→id map.
+        Priority: `map` arg > file at `load`. If `save` is provided, persist the final map.
+        Returns Batch[data=<class_map>, meta={...}].
+        """
+        # 1) assemble source
+        if map is not None:
+            cm = dict(map)
+        elif load is not None:
+            p = Path(load)
+            txt = p.read_text(encoding="utf-8")
+            cm = json.loads(txt)
+        else:
+            cm = {}
+
+        # 2) normalize + validate + canonicalize
+        cm_norm = _classmap.canonicalize_class_map(cm, normalize_names=normalize)
+
+        # 3) persist if requested
+        if save is not None:
+            sp = Path(save)
+            sp.parent.mkdir(parents=True, exist_ok=True)
+            sp.write_text(
+                json.dumps(cm_norm, ensure_ascii=False, indent=2), encoding="utf-8"
+            )
+
+        # 4) meta
+        j = json.dumps(cm_norm, sort_keys=True, ensure_ascii=False).encode("utf-8")
+        meta: ManifestMeta = {
+            "size": len(cm_norm),
+            "normalized": bool(normalize),
+            "hash": Hash().hash_object(j),
+            "loaded_from": str(load) if load else None,
+            "saved_to": str(save) if save else None,
+        }
+        return Batch(data=cm_norm, is_last=True, meta=meta)

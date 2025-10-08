@@ -39,6 +39,8 @@ def align_stream(
                 "sha256": meta.get("sha256"),
                 "det": [],
                 "cls": [],
+                "shard_path": meta.get("shard_path"),
+                "rg_id": meta.get("rg_id"),
             }
 
     # 2) stream labels and attach
@@ -53,6 +55,8 @@ def align_stream(
                 "height": meta.get("height"),
                 "width": meta.get("width"),
                 "sha256": meta.get("sha256"),
+                "shard_path": meta.get("shard_path"),
+                "rg_id": meta.get("rg_id"),
                 "det": [],
                 "cls": [],
             }

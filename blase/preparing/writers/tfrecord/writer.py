@@ -13,6 +13,40 @@ def _ensure_dir(p: Path):
     p.mkdir(parents=True, exist_ok=True)
 
 
+def _load_fs_bytes(row):
+    p = row.get("path")
+    if not p:
+        return b""
+    try:
+        with open(p, "rb") as fh:
+            return fh.read()
+    except Exception:
+        return b""
+
+
+def _load_parquet_bytes(row, *, id_col, bytes_col):
+    import pyarrow.parquet as pq
+
+    shard = row.get("shard_path")
+    if not shard:
+        return b""
+    pf = pq.ParquetFile(shard)
+    rgs = [row["rg_id"]] if row.get("rg_id") is not None else range(pf.num_row_groups)
+    want = row["image_id"].strip().lower()
+    for rg in rgs:
+        tbl = pf.read_row_group(rg, columns=[id_col, bytes_col])
+        ids = tbl[id_col].to_pylist()
+        bys = tbl[bytes_col].to_pylist()
+        for iid, v in zip(ids, bys):
+            if str(iid).strip().lower() == want:
+                if hasattr(v, "as_buffer"):
+                    return v.as_buffer().to_pybytes()
+                if hasattr(v, "to_pybytes"):
+                    return v.to_pybytes()
+                return bytes(v) if v is not None else b""
+    return b""
+
+
 def write(
     manifest_iter: Iterable[ManifestBatch],
     splits: Splits,
@@ -26,6 +60,7 @@ def write(
     order_key = cfg["order_key"]
     shard_size_mb = int(cfg["shard_size_mb"])
     write_alignment_index = cfg["write_alignment_index"]
+    deterministic_order = cfg.get("deterministic_order", True)
 
     # Pass 1: collect rows in memory keyed by image_id (baseline; stream-opt later).
     rows: Dict[str, Dict[str, Any]] = {}
@@ -53,7 +88,8 @@ def write(
     for sp, shard_rel_paths in shard_map.items():
         ids = [iid for iid in splits.get(sp, []) if iid in rows]
         # sort by order_key deterministically
-        ids.sort(key=lambda iid: str(rows[iid].get(order_key) or iid))
+        if deterministic_order:
+            ids.sort(key=lambda iid: str(rows[iid].get(order_key) or iid))
         # chunk by number of shards
         if shard_rel_paths:
             per = max(1, (len(ids) + len(shard_rel_paths) - 1) // len(shard_rel_paths))
@@ -74,6 +110,26 @@ def write(
             rec_idx = 0
             for iid in shard_ids:
                 row = rows[iid]
+                if include_bytes and not row.get("_image_bytes"):
+                    if cfg.get("read_bytes_from") == "parquet":
+                        row["_image_bytes"] = _load_parquet_bytes(
+                            row,
+                            id_col=cfg.get("parquet_id_col", "image_id"),
+                            bytes_col=cfg.get("parquet_bytes_col", "img_bytes"),
+                        )
+                    else:
+                        try:
+                            with open(row.get("path", ""), "rb") as fh:
+                                row["_image_bytes"] = fh.read()
+                        except Exception:
+                            row["_image_bytes"] = b""
+
+                    if not row["_image_bytes"]:
+                        raise RuntimeError(
+                            f"empty image bytes for {row['image_id']} "
+                            f"(id_col={cfg.get('parquet_id_col')}, bytes_col={cfg.get('parquet_bytes_col')}, "
+                            f"shard={row.get('shard_path')}, rg={row.get('rg_id')})"
+                        )
                 ex_bytes = make_example(
                     row, mode=mode, include_image_bytes=include_bytes
                 )

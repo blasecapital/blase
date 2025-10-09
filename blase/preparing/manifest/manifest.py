@@ -1,22 +1,27 @@
-from typing import Any, Dict, Iterable, Sequence, Callable, List
+from typing import Any, Dict, Iterable, Sequence
+
+from blase.types import Batch
+
 from ..interfaces import ManifestBatch
 from ..registry import PrepareRegistry
 
 
-def _mk_label_readers(
-    reg: PrepareRegistry, srcs: Sequence[Dict[str, Any]]
-) -> List[Callable[[], Iterable[Dict[str, Any]]]]:
+def _mk_label_readers(reg: PrepareRegistry, label_srcs: Sequence[Dict[str, Any]]):
     fns = []
-    for s in srcs:
-        fmt = s["fmt"]
-        reader = reg.label_readers.get(fmt)
+    for src in label_srcs:
+        reader = reg.label_readers.get(src["fmt"])
         if reader is None:
-            raise ValueError(f"no label reader for fmt={fmt!r}")
-        payload = {"uri": s["uri"], "fmt": fmt, "options": dict(s.get("options", {}))}
+            raise ValueError(f"no label reader registered for fmt={src['fmt']!r}")
 
-        def _mk(p=payload, r=reader):
+        def _mk(fn=reader.read, _src=src):
             def _reader():
-                return r.read(p)
+                return fn(
+                    {
+                        "uri": _src["uri"],
+                        "fmt": _src["fmt"],
+                        "options": dict(_src.get("options", {})),
+                    }
+                )
 
             return _reader
 
@@ -76,7 +81,7 @@ def build_manifest_stream(
 
     # second pass: align
     iters = [fn() for fn in label_fns]
-    yield from reg.aligner.align_stream(
+    inner = reg.aligner.align_stream(
         label_iters=iters,
         kv_index=kv_index,
         rg_index=rg_index,
@@ -88,3 +93,34 @@ def build_manifest_stream(
         },
         scale_cfg=scale_cfg,
     )
+
+    # Option A: pass-through, add class_meta to first batch only
+    first = True
+    for mb in inner:
+        if first and class_meta:
+            yield Batch(
+                data=mb.data,
+                meta={**(mb.meta or {}), "class_meta": class_meta},
+                is_last=mb.is_last,
+            )
+            first = False
+        else:
+            yield mb
+
+    # Option B: also guarantee a final is_last=True
+    first = True
+    prev = None
+    for mb in inner:
+        meta = mb.meta or {}
+        if first and class_meta:
+            meta = {**meta, "class_meta": class_meta}
+            first = False
+        if prev is not None:
+            yield prev
+        prev = Batch(data=mb.data, meta=meta, is_last=mb.is_last)
+    if prev is not None:
+        yield (
+            prev
+            if prev.is_last
+            else Batch(data=prev.data, meta=prev.meta or {}, is_last=True)
+        )

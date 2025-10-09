@@ -2,6 +2,8 @@ from __future__ import annotations
 from pathlib import Path
 import json
 import types
+import importlib.machinery
+import sys
 
 
 def load_callable_from_blob(blob_path: Path):
@@ -74,11 +76,25 @@ def load_callable_from_blob(blob_path: Path):
     module_source = data.get("module_source") or ""
     function_source = data.get("function_source") or ""
 
+    # Create a real module object
     mod_name = f"blase_restored.{mod_hint}"
     mod = types.ModuleType(mod_name)
+    mod.__file__ = str(blob_path)
+    mod.__package__ = mod_name.rpartition(".")[0] or None
+    mod.__spec__ = importlib.machinery.ModuleSpec(
+        name=mod_name, loader=None, origin=str(blob_path)
+    )
+
+    # Register module before exec so dataclasses/typing can resolve it
+    sys.modules[mod_name] = mod
+    # Also register parent package if absent
+    pkg = mod.__package__
+    if pkg and pkg not in sys.modules:
+        pkg_mod = types.ModuleType(pkg)
+        pkg_mod.__path__ = []  # namespace pkg
+        sys.modules[pkg] = pkg_mod
+
     g = mod.__dict__
-    g["__name__"] = mod_name
-    g["__package__"] = mod_name.rpartition(".")[0]
 
     # Define module-level symbols first (helpers/imports)
     if module_source:

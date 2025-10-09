@@ -48,6 +48,16 @@ from blase.examining.preview_image_backend import (
     maybe_materialize_thumbs,
     maybe_materialize_thumbs_bytes,
 )
+from blase.prepare import (
+    Prepare,
+    ImageConfig,
+    JoinConfig,
+    BoxConfig,
+    ClassConfig,
+    ScaleConfig,
+)
+from blase.preparing.default_registry import default_registry
+
 from blase.utils.fs import ensure_parent_dir
 
 # simple arg mapping: role -> kwarg
@@ -1315,6 +1325,85 @@ def run_restore_preview_images(
     return grid_to if grid_to and Path(grid_to).exists() else ""
 
 
+def run_restore_build_manifest(
+    *, run_path, params, step_hash, realized, upstream_gen=None, **_
+):
+    st = store.load_step(run_path, step_hash)
+    p = st["params"]  # this is the canonicalized params you recorded
+    prep = Prepare(registry=default_registry())
+    outs = store.load_step_outputs(Path(run_path), step_hash)
+    if outs:
+        manifest_id = outs[0]["data_hash"]  # or pick by name=='manifest'
+        return manifest_id
+
+    gen = prep.build_manifest(
+        data_sources=p["data_sources"],
+        label_sources=p["label_sources"],
+        image_cfg=ImageConfig(**p["image_cfg"]),
+        join_cfg=JoinConfig(**p["join_cfg"]),
+        box_cfg=BoxConfig(**p["box_cfg"]),
+        class_cfg=ClassConfig(**p["class_cfg"]),
+        scale_cfg=ScaleConfig(**p["scale_cfg"]),
+        track=False,
+    )
+    got = Hash().hash_object(p)
+    want = st["meta"].get("manifest_hash") or st["meta"].get("manifest_root_hash")
+    if want and got != want:
+        raise RuntimeError(f"manifest hash mismatch: got {got} vs {want}")
+    return ""  # no artifact
+
+
+def run_restore_compute_stats(
+    *,
+    run_path,
+    params,
+    step_hash,
+    realized,
+    upstream_gen=None,
+    target_override=None,
+    backend_override=None,
+    **_,
+):
+    # load step, rebuild upstream manifest, recompute stats
+    st = store.load_step(run_path, step_hash)
+    p = st["params"]  # {"by": "..."}
+    ls = []
+    for d in p.get("label_sources", []):
+        if "kind" not in d:
+            ls.append({**d, "kind": d.get("mode") or "detection"})
+        else:
+            ls.append(d)
+    # resolve upstream manifest producer via recorded input id
+    up_id = store.pick_input_id_by_step(
+        run_path, step_hash, prefer=("manifest", "manifest_root")
+    )
+    prod = store.find_step_by_output(run_path, up_id)  # returns {"params": ...}
+    mp = prod["params"]
+
+    prep = Prepare(registry=default_registry())
+    gen = prep.build_manifest(
+        data_sources=mp["data_sources"],
+        label_sources=ls,
+        image_cfg=ImageConfig(**mp["image_cfg"]),
+        join_cfg=JoinConfig(**mp["join_cfg"]),
+        box_cfg=BoxConfig(**mp["box_cfg"]),
+        class_cfg=ClassConfig(**mp["class_cfg"]),
+        scale_cfg=ScaleConfig(**mp["scale_cfg"]),
+        track=False,
+    )
+    stats_b = prep.compute_stats(gen, by=p.get("by", "class"))
+    outp = (
+        Path(run_path).resolve().parents[1]
+        / "data"
+        / "working"
+        / f"{step_hash[:5]}_stats"
+        / "stats.json"
+    )
+    outp.parent.mkdir(parents=True, exist_ok=True)
+    outp.write_text(json.dumps(stats_b.data, ensure_ascii=False, indent=2))
+    return str(outp)
+
+
 # Public registry of handlers (by function FQN)
 RESTORE_HANDLERS: Dict[str, Any] = {
     "blase.Extract.read_csv": run_read_csv_restore,
@@ -1324,4 +1413,6 @@ RESTORE_HANDLERS: Dict[str, Any] = {
     "blase.Load.save_to_csv": run_save_to_csv_replay,
     "blase.Load.save_images_to_parquet": run_save_images_to_parquet_replay,
     "blase.Examine.preview_images": run_restore_preview_images,
+    "blase.Prepare.build_manifest": run_restore_build_manifest,
+    "blase.Prepare.compute_stats": run_restore_compute_stats,
 }

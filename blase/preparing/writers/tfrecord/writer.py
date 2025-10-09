@@ -2,7 +2,7 @@ from typing import Iterable, Dict, Any, List
 from pathlib import Path
 import json
 
-from blase.types import SinkResult, Artifact
+from blase.types import SinkResult, Artifact, Batch
 from blase.preparing.interfaces import ManifestBatch, Splits
 from blase.preparing.writers.tfrecord.features import make_example
 from blase.preparing.writers.tfrecord.shard_plan import plan_shards
@@ -70,13 +70,17 @@ def write(
 
     # Plan shards deterministically.
     # Use a one-shot manifest from in-memory rows for planning.
-    def _one_shot():
-        yield type(mb)(
-            data=list(rows.values()), meta={"count": len(rows)}, is_last=True
-        )  # reusing Batch class
+    def _one_shot(manifest_iter):
+        for mb in manifest_iter:
+            # if you merge meta, do it here safely
+            meta = mb.meta or {}
+            yield Batch(data=mb.data, meta=meta, is_last=mb.is_last)
 
     shard_map = plan_shards(
-        _one_shot(), splits, shard_size_mb=shard_size_mb, order_key=order_key
+        _one_shot(manifest_iter),
+        splits,
+        shard_size_mb=shard_size_mb,
+        order_key=order_key,
     )
 
     artifacts: List[Artifact] = []

@@ -16,6 +16,7 @@ import json
 
 from blase.types import Batch, SinkResult
 from blase.utils.hashing import Hash
+from blase.track import Track
 
 from blase.preparing.registry import PrepareRegistry
 
@@ -295,69 +296,180 @@ class Prepare:
 
     def __init__(self, registry: Union[PrepareRegistry, None] = None):
         self._reg = registry or default_registry()
+        self._stream = None
+        self._manifest_id = None
 
     def build_manifest(
         self,
         *,
-        data_sources: Optional[Sequence[Union[DataSource, Mapping[str, Any]]]] = None,
-        label_sources: Optional[Sequence[Union[LabelSource, Mapping[str, Any]]]] = None,
-        image_cfg: ImageConfig = ImageConfig(),
-        join_cfg: JoinConfig = JoinConfig(),
-        box_cfg: BoxConfig = BoxConfig(),
-        class_cfg: ClassConfig = ClassConfig(),
-        scale_cfg: ScaleConfig = ScaleConfig(),
+        data_sources=None,
+        label_sources=None,
+        image_cfg=ImageConfig(),
+        join_cfg=JoinConfig(),
+        box_cfg=BoxConfig(),
+        class_cfg=ClassConfig(),
+        scale_cfg=ScaleConfig(),
+        track: bool = True,
     ) -> Iterable[ManifestBatch]:
+        tracker = Track.get(track)
+
+        # coerce + normalize
         ds = _coerce_list_data_sources(data_sources)
         ls = _coerce_list_label_sources(label_sources)
-        # normalize into dicts
         ds_norm = [{"uri": d.uri, "fmt": d.fmt, "options": dict(d.options)} for d in ds]
-        ls_norm = [{"uri": s.uri, "fmt": s.fmt, "options": dict(s.options)} for s in ls]
-        stream = build_manifest_stream(
-            reg=self._reg,
-            data_sources=ds_norm,
-            label_sources=ls_norm,
-            image_cfg={
+        ls_norm = [
+            {"kind": s.kind, "uri": s.uri, "fmt": s.fmt, "options": dict(s.options)}
+            for s in ls
+        ]
+
+        # flattened param view (serializable)
+        params = {
+            "data_sources": ds_norm,
+            "label_sources": ls_norm,
+            "image_cfg": {
                 "id_col": image_cfg.id_col,
                 "path_col": image_cfg.path_col,
                 "height_col": image_cfg.height_col,
                 "width_col": image_cfg.width_col,
                 "sha256_col": image_cfg.sha256_col,
             },
-            join_cfg={
+            "join_cfg": {
                 "image_id_resolver": join_cfg.image_id_resolver,
                 "drop_orphans": join_cfg.drop_orphans,
                 "keep_unlabeled_images": join_cfg.keep_unlabeled_images,
                 "dedupe_policy": join_cfg.dedupe_policy,
             },
-            box_cfg={
+            "box_cfg": {
                 "coord_in": box_cfg.coord_in,
                 "coord_out": box_cfg.coord_out,
                 "clamp_boxes": box_cfg.clamp_boxes,
                 "drop_oob_boxes": box_cfg.drop_oob_boxes,
             },
-            class_cfg={
+            "class_cfg": {
                 "class_map": class_cfg.class_map,
                 "normalize_names": class_cfg.normalize_names,
             },
-            scale_cfg={
+            "scale_cfg": {
                 "batch_rows": scale_cfg.batch_rows,
                 "seed": scale_cfg.seed,
                 "join_strategy": scale_cfg.join_strategy,
                 "rows_per_chunk": scale_cfg.rows_per_chunk,
                 "index_backend": scale_cfg.index_backend,
             },
-        )
-        return stream
+        }
+
+        # ============== untracked ==============
+        if tracker is None:
+            return build_manifest_stream(reg=self._reg, **params)
+
+        # ============== tracked ==============
+        def _tracked_iter():
+            new_stream = (
+                self._stream is None or getattr(self._stream, "params", None) != params
+            )
+            if new_stream and self._stream is not None:
+                try:
+                    self._stream.close_ok()
+                except Exception:
+                    pass
+
+            if new_stream:
+                self._stream = tracker.stream(
+                    "blase.Prepare.build_manifest",
+                    params,
+                    code_fn=self.build_manifest,
+                )
+                setattr(self._stream, "params", params)
+
+                # register as an output once; use name 'manifest'
+                try:
+                    data_id = self._stream.step.register_data(
+                        kind="manifest",
+                        version="1",
+                        path_or_bytes=b"",
+                        metadata={"params_hash": Hash().hash_object(params)},
+                    )
+                    self._stream.step.add_output(data_id, name="manifest")
+                    self._manifest_id = data_id
+                except Exception:
+                    pass
+
+            try:
+                inner = build_manifest_stream(reg=self._reg, **params)
+                for mb in inner:
+                    # enrich meta with manifest ids
+                    meta = dict(mb.meta or {})
+                    meta.setdefault("manifest_root_hash", self._manifest_id)
+                    meta.setdefault("manifest_hash", self._manifest_id)
+
+                    new_meta = self._stream.emit(last_batch=mb.is_last, meta=meta)
+                    yield Batch(
+                        data=mb.data,
+                        meta=(new_meta or meta),
+                        is_last=mb.is_last,
+                    )
+
+                self._stream.close_ok()
+                self._stream = None
+                self._manifest_id = None
+            except Exception as e:
+                try:
+                    self._stream.close_error(type(e), e, e.__traceback__)
+                finally:
+                    self._stream = None
+                    self._manifest_id = None
+                raise
+
+        return _tracked_iter()
 
     def compute_stats(
         self,
         manifest: Iterable[ManifestBatch],
         *,
         by: Literal["class", "image", "global"] = "class",
+        track: bool = True,
     ) -> Batch[Stats, ManifestMeta]:
-        stats = _counters.compute(manifest, {"by": by})
-        meta: ManifestMeta = {"by": by}
-        return Batch(data=stats, meta=meta, is_last=True)
+        tracker = Track.get(track)
+        if tracker is None:
+            s = _counters.compute(manifest, {"by": by})
+            return Batch(data=s, meta={"by": by}, is_last=True)
+
+        step = tracker.stream(
+            "blase.Prepare.compute_stats", {"by": by}, code_fn=self.compute_stats
+        )
+        # plumb upstream manifest hashes into the step
+        try:
+            # one pass compute while capturing upstream meta
+            upstream = {"manifest_root_hash": None, "manifest_hash": None}
+
+            def _iter():
+                for mb in manifest:
+                    rh = (mb.meta or {}).get("manifest_root_hash")
+                    mh = (mb.meta or {}).get("manifest_hash")
+                    upstream["manifest_root_hash"] = (
+                        upstream["manifest_root_hash"] or rh
+                    )
+                    upstream["manifest_hash"] = upstream["manifest_hash"] or mh
+                    yield mb
+
+            stats = _counters.compute(_iter(), {"by": by})
+            # add inputs if available
+            for rid, role in [
+                (upstream["manifest_root_hash"], "manifest_root"),
+                (upstream["manifest_hash"], "manifest"),
+            ]:
+                if rid:
+                    try:
+                        step.step.add_input(rid, role=role, arg_name=None)
+                    except Exception:
+                        pass
+            meta = {"by": by}
+            new_meta = step.emit(last_batch=True, meta=meta) or meta
+            step.close_ok()
+            return Batch(data=stats, meta=new_meta, is_last=True)
+        except Exception as e:
+            step.close_error(type(e), e, e.__traceback__)
+            raise
 
     def split(
         self,

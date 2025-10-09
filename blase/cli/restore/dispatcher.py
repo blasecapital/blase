@@ -30,9 +30,6 @@ def run_data(
     run_path: Path, data_hash: str, mode: str, to: Optional[str], policy: Policy
 ) -> int:
     kind = store.get_data_kind(run_path, data_hash) or "data"
-    print("[POLICY]", policy)
-    print("[MODE]", mode)
-    print("[TO]", to)
     # try fast materialize first
     try:
         if to:
@@ -240,6 +237,8 @@ def run_step(
             "blase.Load.save_to_csv",
             "blase.Load.save_images_to_parquet",
             "blase.Examine.preview_images",
+            "blase.Prepare.compute_stats",
+            "blase.Prepare.build_manifest",
         ):
             upstream_gen = (
                 _upstream_gen_for_sink(run_path, step_hash)
@@ -247,7 +246,7 @@ def run_step(
                 else None
             )
             handler = bindings.RESTORE_HANDLERS[fqn]
-            if fqn.startswith("blase.Examine"):
+            if fqn.startswith("blase.Examine") or fqn.startswith("blase.Prepare"):
                 out_path = handler(
                     run_path=run_path,
                     params=st["params"],

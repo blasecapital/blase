@@ -40,6 +40,8 @@ from blase.preparing.writers.tfrecord.inspect import head as _tfr_head
 from blase.preparing.writers.sidecar import jsonl as _sidecar_jsonl
 from blase.preparing.writers.sidecar import parquet as _sidecar_parquet
 
+from blase.restoring import cas
+
 
 # -------------------------
 # Prepare: shared type hints
@@ -602,6 +604,7 @@ class Prepare:
         write_workers: Optional[int] = None,
         write_alignment_index: bool = True,
         example_id_feature: str = "example/id",
+        track: bool = True,
     ) -> SinkResult:
         cfg = {
             "out_dir": Path(out_dir),
@@ -618,7 +621,111 @@ class Prepare:
             "write_workers": write_workers,
             "write_alignment_index": bool(write_alignment_index),
         }
-        return _tfr_writer.write(manifest, splits, cfg)
+
+        tracker = Track.get(track)
+        if tracker is None:
+            return _tfr_writer.write(manifest, splits, cfg)
+
+        # ---------- tracked path ----------
+        # 1) params recorded on the step (stringify paths for stability)
+        params = {
+            **{k: (str(v) if isinstance(v, Path) else v) for k, v in cfg.items()},
+            "out_dir": str(cfg["out_dir"]),
+        }
+        stream = tracker.stream(
+            "blase.Prepare.to_tfrecord", params, code_fn=self.to_tfrecord
+        )
+
+        # 2) capture upstream manifest ids while passing through
+        it = iter(manifest)
+        first_mb = None
+        try:
+            first_mb = next(it)
+        except StopIteration:
+            first_mb = None
+
+        upstream = {"manifest_root_hash": None, "manifest_hash": None}
+        if first_mb is not None and isinstance(first_mb.meta, dict):
+            upstream["manifest_root_hash"] = first_mb.meta.get("manifest_root_hash")
+            upstream["manifest_hash"] = first_mb.meta.get("manifest_hash")
+
+        # 3) register splits blob as a first-class input
+        try:
+            splits_json = json.dumps(splits, sort_keys=True, ensure_ascii=False).encode(
+                "utf-8"
+            )
+        except Exception:
+            # best effort; fall back to hashing the python object
+            splits_json = json.dumps({"_hash": Hash().hash_object(splits)}).encode(
+                "utf-8"
+            )
+
+        try:
+            splits_hash = stream.step.register_data(
+                kind="splits.json", version="1", path_or_bytes=splits_json, metadata={}
+            )
+            try:
+                cas.write_bytes(
+                    run_path=stream.step.run_path,
+                    kind="data",
+                    data_hash=splits_hash,
+                    data=splits_json,
+                )
+            except Exception:
+                pass
+            stream.step.add_input(splits_hash, role="splits", arg_name="splits")
+        except Exception:
+            splits_hash = None  # non-fatal
+
+        # 4) add manifest inputs if available
+        for rid, role in [
+            (upstream["manifest_root_hash"], "manifest_root"),
+            (upstream["manifest_hash"], "manifest"),
+        ]:
+            if rid:
+                try:
+                    stream.step.add_input(rid, role=role, arg_name=None)
+                except Exception:
+                    pass
+
+        try:
+            # 5) delegate write; collect artifacts
+            def _manifest_iter_for_writer():
+                if first_mb is not None:
+                    yield first_mb
+                for mb in it:
+                    yield mb
+
+            res = _tfr_writer.write(_manifest_iter_for_writer(), splits, cfg)
+
+            # 6) register each produced file as outputs
+            artifacts = res.artifacts or []
+            for i, a in enumerate(artifacts, 1):
+                kind = (
+                    "tfrecord.index"
+                    if ("index" in (a.kind or "").lower() or a.path.endswith(".index"))
+                    else (a.kind or "tfrecord")
+                )
+                try:
+                    data_id = stream.step.register_data(
+                        kind=kind,
+                        version="1",
+                        path_or_bytes=a.path,
+                        metadata={"path": a.path},
+                    )
+                    stream.step.add_output(data_id, name=f"{kind}_{i:05d}")
+                except Exception:
+                    pass
+
+            # 7) emit final meta + close
+            meta = dict(res.meta or {})
+            new_meta = stream.emit(last_batch=True, meta=meta) or meta
+            stream.close_ok()
+            return SinkResult(artifacts=artifacts, is_last=res.is_last, meta=new_meta)
+
+        except Exception as e:
+            stream.close_error(type(e), e, e.__traceback__)
+            raise
 
     def preview_tfrecord(
         self,

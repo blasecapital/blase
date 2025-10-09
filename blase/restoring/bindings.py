@@ -1484,6 +1484,90 @@ def run_restore_split(
     return str(out_path)
 
 
+def run_restore_to_tfrecord(
+    *,
+    run_path,
+    params,
+    step_hash,
+    realized,
+    upstream_gen=None,
+    target_override: Optional[str] = None,
+    **_,
+):
+    # 1) Load this step + inputs
+    inputs = store.load_step_inputs(run_path, step_hash)
+
+    # 2) Get splits.json input
+    splits_hash = None
+    for i in inputs:
+        if i["role"] == "splits":
+            splits_hash = i["data_hash"]
+            break
+    if not splits_hash:
+        raise KeyError("to_tfrecord restore: missing 'splits' input")
+
+    # 3) Read splits json blob from CAS
+    sp = cas.path_for(run_path, "data", splits_hash)
+    splits = json.loads(Path(sp).read_text(encoding="utf-8"))
+
+    # 4) Find upstream manifest identity (prefer 'manifest', fallback 'manifest_root')
+    man_id = None
+    for role in ("manifest", "manifest_root"):
+        for i in inputs:
+            if i["role"] == role:
+                man_id = i["data_hash"]
+                break
+        if man_id:
+            break
+    if not man_id:
+        raise KeyError("to_tfrecord restore: missing manifest input")
+
+    # 5) Fetch canonical build_manifest params from the producing step
+    man_step = store.find_step_by_output(run_path, man_id)
+    if not man_step:
+        raise KeyError(f"no producing step found for manifest {man_id}")
+    p = man_step["params"]  # canonical dicts
+
+    reg = default_registry()
+    manifest_iter = build_manifest_stream(
+        reg=reg,
+        data_sources=p["data_sources"],
+        label_sources=p["label_sources"],
+        image_cfg=p["image_cfg"],
+        join_cfg=p["join_cfg"],
+        box_cfg=p["box_cfg"],
+        class_cfg=p["class_cfg"],
+        scale_cfg=p["scale_cfg"],
+    )
+
+    # 7) Replay the TFRecord write using recorded params on this step
+    prep = Prepare(registry=reg)
+    # Ensure path-like keys are strings
+    cfg = dict(params)
+    out_dir = Path(target_override) if target_override else Path(cfg["out_dir"])
+    res = prep.to_tfrecord(
+        manifest=manifest_iter,
+        splits=splits,
+        out_dir=out_dir,
+        mode=cfg.get("mode", "combined"),
+        shard_size_mb=int(cfg.get("shard_size_mb", 128)),
+        compression=cfg.get("compression", "GZIP"),
+        include_image_bytes=bool(cfg.get("include_image_bytes", True)),
+        read_bytes_from=cfg.get("read_bytes_from", "parquet"),
+        parquet_id_col=cfg.get("parquet_id_col", "image_id"),
+        parquet_bytes_col=cfg.get("parquet_bytes_col", "img_bytes"),
+        deterministic_order=bool(cfg.get("deterministic_order", True)),
+        order_key=cfg.get("order_key", "sha256"),
+        write_workers=cfg.get("write_workers", None),
+        write_alignment_index=bool(cfg.get("write_alignment_index", True)),
+        example_id_feature=cfg.get("example_id_feature", "example/id"),
+        track=False,  # replay runs untracked
+    )
+
+    # Optionally return a path for CLI printing (not required)
+    return [a.path for a in (res.artifacts or [])]
+
+
 # Public registry of handlers (by function FQN)
 RESTORE_HANDLERS: Dict[str, Any] = {
     "blase.Extract.read_csv": run_read_csv_restore,
@@ -1496,4 +1580,5 @@ RESTORE_HANDLERS: Dict[str, Any] = {
     "blase.Prepare.build_manifest": run_restore_build_manifest,
     "blase.Prepare.compute_stats": run_restore_compute_stats,
     "blase.Prepare.split": run_restore_split,
+    "blase.Prepare.to_tfrecord": run_restore_to_tfrecord,
 }

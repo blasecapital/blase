@@ -9,6 +9,7 @@ from blase.cli.restore.replay_exec import (
     _exec_transform_apply_function,
     _exec_load_save_to_csv,
     _exec_load_save_images_to_parquet,
+    _exec_prepare_to_tfrecord,
 )
 from blase.restoring import store, planner, code, bindings, materialize, cas
 from blase.restoring.materialize import NeedReplay
@@ -548,6 +549,17 @@ def _exec_plan_for_step(
                 upstream,
                 fqn,
                 ephemeral_only,
+                produced,
+                created_paths,
+                produced_hashes,
+            )
+            continue
+
+        if fqn == "blase.Prepare.to_tfrecord":
+            upstream = _exec_prepare_to_tfrecord(
+                run_path,
+                sh,
+                to_path,
                 produced,
                 created_paths,
                 produced_hashes,

@@ -390,3 +390,52 @@ def _exec_load_save_images_to_parquet(
             produced_hashes.add(dh)
 
     return None
+
+
+# ==========
+# Prepare().to_tfrecord
+# ==========
+def _exec_prepare_to_tfrecord(
+    run_path,
+    sh,
+    to_path,
+    produced,
+    created_paths,
+    produced_hashes,
+):
+    st = store.load_step(run_path, sh)
+    outs = store.load_step_outputs(run_path, sh)
+
+    # Expected hashes (both .tfrecord and .index if recorded)
+    outs_sorted = sorted(outs, key=lambda o: o.get("name", ""))
+    expected = [o["data_hash"] for o in outs_sorted]
+
+    handler = bindings.RESTORE_HANDLERS["blase.Prepare.to_tfrecord"]
+    out_paths = handler(
+        run_path=run_path,
+        params=st["params"],
+        step_hash=sh,
+        realized={},
+        upstream_gen=None,
+        target_override=to_path,
+    )
+
+    # Map recorded hashes to produced paths; if no outs recorded, compute hashes now
+    if expected:
+        for i, dh in enumerate(expected):
+            if i < len(out_paths):
+                p = Path(out_paths[i])
+                produced[dh] = p
+                created_paths.append(p)
+                produced_hashes.add(dh)
+    else:
+        # Compute and track
+        from blase.utils.hashing import Hash
+
+        for p in out_paths:
+            dh = Hash().hash_file(p)
+            produced[dh] = Path(p)
+            created_paths.append(Path(p))
+            produced_hashes.add(dh)
+
+    return None

@@ -56,6 +56,7 @@ from blase.prepare import (
     ClassConfig,
     ScaleConfig,
 )
+from blase.preparing.manifest.manifest import build_manifest_stream
 from blase.preparing.default_registry import default_registry
 
 from blase.utils.fs import ensure_parent_dir
@@ -1336,7 +1337,7 @@ def run_restore_build_manifest(
         manifest_id = outs[0]["data_hash"]  # or pick by name=='manifest'
         return manifest_id
 
-    gen = prep.build_manifest(
+    _ = prep.build_manifest(
         data_sources=p["data_sources"],
         label_sources=p["label_sources"],
         image_cfg=ImageConfig(**p["image_cfg"]),
@@ -1404,6 +1405,85 @@ def run_restore_compute_stats(
     return str(outp)
 
 
+def run_restore_split(
+    *,
+    run_path,
+    params,
+    step_hash,
+    realized,
+    upstream_gen=None,
+    target_override=None,
+    **_,
+):
+    # 1) Load this step and pick upstream manifest id
+    st = store.load_step(run_path, step_hash)
+    man_id = store.pick_input_id_by_step(
+        run_path, step_hash, prefer=("manifest", "manifest_root")
+    )
+
+    # 2) Locate producing step and get canonical manifest params
+    man_step = store.find_step_by_output(run_path, man_id)
+    if not man_step:
+        raise KeyError(f"no producing step found for manifest {man_id}")
+    p = man_step["params"]
+
+    # 3) Rebuild manifest stream
+    reg = default_registry()
+    gen = build_manifest_stream(
+        reg=reg,
+        data_sources=p["data_sources"],
+        label_sources=p["label_sources"],
+        image_cfg=p["image_cfg"],
+        join_cfg=p["join_cfg"],
+        box_cfg=p["box_cfg"],
+        class_cfg=p["class_cfg"],
+        scale_cfg=p["scale_cfg"],
+    )
+
+    # 4) Compute splits using recorded cfg
+    method = (st.get("params") or {}).get("method", "stratified")
+    split_cfg = (st.get("params") or {}).get("split_cfg") or {
+        "fractions": {"train": 0.8, "val": 0.1, "test": 0.1},
+        "seed": 42,
+        "group_key": "image_id",
+        "stratify_on": "class",
+        "holdout_query": None,
+    }
+
+    if method == "random":
+        s = reg.splitters["random"].split(gen, split_cfg)
+    elif method == "stratified":
+        s = reg.splitters["stratified"].split(gen, split_cfg)
+    elif method == "group":
+        s = reg.splitters["group"].split(gen, split_cfg)
+    elif method == "time":
+        s = reg.splitters["time"].split(gen, split_cfg)
+    else:
+        raise ValueError(f"unknown split method {method!r}")
+
+    # 5) Persist JSON
+    out_path = (
+        Path(target_override)
+        if target_override
+        else (
+            Path(run_path).resolve().parents[1]
+            / "data"
+            / "working"
+            / f"{step_hash[:5]}_splits"
+            / "splits.json"
+        )
+    )
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    # ensure plain lists for JSON
+    payload = {k: list(v) for k, v in s.items()}
+    payload["_meta"] = {"method": method, **split_cfg}
+    out_path.write_text(
+        json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8"
+    )
+
+    return str(out_path)
+
+
 # Public registry of handlers (by function FQN)
 RESTORE_HANDLERS: Dict[str, Any] = {
     "blase.Extract.read_csv": run_read_csv_restore,
@@ -1415,4 +1495,5 @@ RESTORE_HANDLERS: Dict[str, Any] = {
     "blase.Examine.preview_images": run_restore_preview_images,
     "blase.Prepare.build_manifest": run_restore_build_manifest,
     "blase.Prepare.compute_stats": run_restore_compute_stats,
+    "blase.Prepare.split": run_restore_split,
 }

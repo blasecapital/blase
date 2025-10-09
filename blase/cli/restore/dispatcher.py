@@ -239,6 +239,7 @@ def run_step(
             "blase.Examine.preview_images",
             "blase.Prepare.compute_stats",
             "blase.Prepare.build_manifest",
+            "blase.Prepare.split",
         ):
             upstream_gen = (
                 _upstream_gen_for_sink(run_path, step_hash)

@@ -483,6 +483,7 @@ class Prepare:
         group_key: str = "image_id",
         stratify_on: str = "class",
         holdout_query: Optional[str] = None,
+        track: bool = True,
     ) -> Batch[Splits, ManifestMeta]:
         cfg = {
             "fractions": {"train": train, "val": val, "test": test},
@@ -494,24 +495,94 @@ class Prepare:
         if abs(train + val + test - 1.0) > 1e-6:
             raise ValueError("train+val+test must equal 1.0")
 
+        # choose splitter
         if method == "random":
-            s = _split_random.split(manifest, cfg)
+            do_split = _split_random.split
         elif method == "stratified":
-            s = _split_strat.split(manifest, cfg)
+            do_split = _split_strat.split
         elif method == "group":
-            s = _split_group.split(manifest, cfg)
+            do_split = _split_group.split
         elif method == "time":
-            s = _split_time.split(manifest, cfg)
+            do_split = _split_time.split
         else:
             raise ValueError(f"unknown split method {method!r}")
 
-        meta: ManifestMeta = {
+        tracker = Track.get(track)
+        if tracker is None:
+            s = do_split(manifest, cfg)
+            meta: ManifestMeta = {
+                "method": method,
+                "fractions": cfg["fractions"],
+                "seed": seed,
+                "sizes": {k: len(v) for k, v in s.items()},
+            }
+            return Batch(data=s, meta=meta, is_last=True)
+
+        # tracked path
+        upstream = {"root": None, "hash": None}
+
+        def _iter_capture():
+            for mb in manifest:
+                rh = (mb.meta or {}).get("manifest_root_hash")
+                mh = (mb.meta or {}).get("manifest_hash")
+                if rh and not upstream["root"]:
+                    upstream["root"] = rh
+                if mh and not upstream["hash"]:
+                    upstream["hash"] = mh
+                yield mb
+
+        params = {
             "method": method,
             "fractions": cfg["fractions"],
             "seed": seed,
-            "sizes": {k: len(v) for k, v in s.items()},
+            "group_key": group_key,
+            "stratify_on": stratify_on,
+            "holdout_query": holdout_query,
         }
-        return Batch(data=s, meta=meta, is_last=True)
+        step = tracker.stream("blase.Prepare.split", params, code_fn=self.split)
+
+        try:
+            s = do_split(_iter_capture(), cfg)
+
+            # record upstream manifest identity if available
+            for rid, role in (
+                (upstream["root"], "manifest_root"),
+                (upstream["hash"], "manifest"),
+            ):
+                if rid:
+                    try:
+                        step.step.add_input(rid, role=role, arg_name=None)
+                    except Exception:
+                        pass
+
+            # register a splits artifact id (metadata only to avoid large payloads)
+            sizes = {k: len(v) for k, v in s.items()}
+            splits_meta = {
+                "method": method,
+                "fractions": cfg["fractions"],
+                "seed": seed,
+                "sizes": sizes,
+            }
+            try:
+                splits_id = step.step.register_data(
+                    kind="splits", version="1", path_or_bytes=b"", metadata=splits_meta
+                )
+                step.step.add_output(splits_id, name="splits")
+            except Exception:
+                splits_id = None
+
+            meta: ManifestMeta = {
+                **splits_meta,
+                "upstream_manifest_root": upstream["root"],
+                "upstream_manifest": upstream["hash"],
+                "splits_id": splits_id,
+            }
+            new_meta = step.emit(last_batch=True, meta=meta) or meta
+            step.close_ok()
+            return Batch(data=s, meta=new_meta, is_last=True)
+        except Exception as e:
+            step.close_error(type(e), e, e.__traceback__)
+            raise
 
     def to_tfrecord(
         self,

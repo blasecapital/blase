@@ -29,14 +29,13 @@ def import_blase_fresh(project_root: Path) -> ModuleType:
 
 
 def workspace(tmp_path, monkeypatch):
-    project_root = tmp_path / "proj_compute_stats"
+    project_root = tmp_path / "proj_split_restore"
     project_root.mkdir(parents=True, exist_ok=True)
     (project_root / "runs").mkdir(parents=True, exist_ok=True)
-    data_root = project_root / "data" / "source_of_truth"
-    data_root.mkdir(parents=True, exist_ok=True)
+    (project_root / "data" / "working").mkdir(parents=True, exist_ok=True)
     monkeypatch.chdir(project_root)
     monkeypatch.setenv("BLASE_HOME", str(project_root))
-    return project_root, data_root
+    return project_root
 
 
 def _latest_run_path(project_root: Path) -> Path:
@@ -47,8 +46,7 @@ def _latest_run_path(project_root: Path) -> Path:
             continue
         db = d / "nodes" / "nodes.db"
         if db.exists():
-            mt = db.stat().st_mtime
-            cands.append((mt, d))
+            cands.append((db.stat().st_mtime, d))
     assert cands, "no runs found"
     cands.sort(reverse=True)
     return cands[0][1]
@@ -62,26 +60,26 @@ def _con(project_root: Path) -> sqlite3.Connection:
     return c
 
 
-def latest_compute_stats_step(project_root: Path) -> str:
+def latest_split_step(project_root: Path) -> str:
     c = _con(project_root)
     try:
         row = c.execute(
             """
             SELECT step_hash
             FROM steps
-            WHERE function_fqn='blase.Prepare.compute_stats'
+            WHERE function_fqn='blase.Prepare.split'
               AND status IN ('completed','complete','done','success','ok')
             ORDER BY ts_start DESC
             LIMIT 1
             """
         ).fetchone()
-        assert row, "no completed Prepare.compute_stats step recorded"
+        assert row, "no completed Prepare.split step recorded"
         return row["step_hash"]
     finally:
         c.close()
 
 
-def cli_restore_step(project_root: Path, step_hash: str):
+def cli_restore_step_to(project_root: Path, step_hash: str, to_path: Path):
     run_path = _latest_run_path(project_root)
     cmd = [
         sys.executable,
@@ -95,6 +93,8 @@ def cli_restore_step(project_root: Path, step_hash: str):
         step_hash,
         "--mode",
         "replay",
+        "--to",
+        str(to_path),
     ]
     return subprocess.run(cmd, cwd=project_root, capture_output=True, text=True)
 
@@ -144,8 +144,8 @@ def write_tiny_coco(path: Path):
 
 
 @pytest.mark.integration
-def test_compute_stats_then_replay(tmp_path, monkeypatch):
-    project_root, data_root = workspace(tmp_path, monkeypatch)
+def test_split_then_replay(tmp_path, monkeypatch):
+    project_root = workspace(tmp_path, monkeypatch)
     pq_path = project_root / "data" / "working" / "images_000.parquet"
     coco_path = project_root / "data" / "working" / "labels.json"
     write_parquet_images(pq_path)
@@ -161,7 +161,7 @@ def test_compute_stats_then_replay(tmp_path, monkeypatch):
     images_parquet = blase.prepare.images_parquet
     coco = blase.prepare.coco
 
-    prep = Prepare()  # uses default_registry()
+    prep = Prepare()  # default_registry()
 
     manifest = prep.build_manifest(
         data_sources=[images_parquet(str(pq_path))],
@@ -174,27 +174,48 @@ def test_compute_stats_then_replay(tmp_path, monkeypatch):
         track=True,
     )
 
-    # record compute_stats with tracking; this should capture manifest inputs
-    stats_b = prep.compute_stats(manifest, by="class", track=True)
-    assert isinstance(stats_b.data, dict)
-    assert "class_hist" in stats_b.data
+    # record split with tracking; this should capture manifest inputs
+    splits_b = prep.split(
+        manifest=manifest,
+        method="stratified",
+        train=0.67,
+        val=0.33,
+        test=0.0,
+        seed=123,
+        track=True,
+    )
+    assert isinstance(splits_b.data, dict)
+    assert "train" in splits_b.data and "val" in splits_b.data
 
-    # verify inputs were recorded on the compute_stats step
-    step_hash = latest_compute_stats_step(project_root)
+    # verify inputs recorded on the split step
+    step_hash = latest_split_step(project_root)
     c = _con(project_root)
     try:
-        inputs = c.execute(
-            "SELECT role FROM step_inputs WHERE step_hash=?", (step_hash,)
-        ).fetchall()
-        roles = {r["role"] for r in inputs}
+        roles = {
+            r["role"]
+            for r in c.execute(
+                "SELECT role FROM step_inputs WHERE step_hash=?", (step_hash,)
+            ).fetchall()
+        }
         assert roles & {"manifest", "manifest_root"}, (
-            "compute_stats missing manifest inputs"
+            "split step missing manifest inputs"
         )
     finally:
         c.close()
 
-    # replay compute_stats; handler should succeed with no side effects
-    rc = cli_restore_step(project_root, step_hash)
+    # replay split → JSON materialization
+    out_json = project_root / "data" / "working" / "splits_replay.json"
+    if out_json.exists():
+        out_json.unlink()
+    rc = cli_restore_step_to(project_root, step_hash, out_json)
     assert rc.returncode == 0, (
         f"replay failed\nSTDOUT:\n{rc.stdout}\nSTDERR:\n{rc.stderr}"
     )
+    assert out_json.exists() and out_json.is_file()
+
+    # validate JSON payload
+    payload = json.loads(out_json.read_text(encoding="utf-8"))
+    assert "train" in payload and "val" in payload
+    assert isinstance(payload["train"], list) and isinstance(payload["val"], list)
+    meta = payload.get("_meta", {})
+    assert meta.get("method") in {"stratified", "random", "group", "time"}

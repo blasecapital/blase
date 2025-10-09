@@ -1,3 +1,5 @@
+from types import SimpleNamespace
+
 from .registry import PrepareRegistry
 
 # capability backends
@@ -17,13 +19,35 @@ from .splitters import (
     time as _time,
 )
 from .stats import counters as _stats
+from .manifest.classmap import build_or_validate_class_map as _classmap
+from .manifest.align_stream import align_stream as _align
 from .writers.tfrecord import writer as _tfr
 from .writers.sidecar import jsonl as _sidecar_jsonl, parquet as _sidecar_parquet
 
 
+image_indexer = SimpleNamespace(
+    build_index=lambda sources, cfg: _idx.build_image_index(
+        data_sources=sources,
+        image_cfg={
+            "id_col": cfg.get("id_col"),
+            "path_col": cfg.get("path_col"),
+            "height_col": cfg.get("height_col"),
+            "width_col": cfg.get("width_col"),
+            "sha256_col": cfg.get("sha256_col"),
+        },
+        scale_cfg={
+            "rows_per_chunk": cfg.get("rows_per_chunk"),
+            "index_backend": cfg.get("index_backend"),
+        },
+    )
+)
+classmap = SimpleNamespace(build_or_validate=_classmap)
+aligner = SimpleNamespace(align_stream=_align)
+
+
 def default_registry() -> PrepareRegistry:
     return PrepareRegistry(
-        image_indexer=_idx,  # module with build_index(...)
+        image_indexer=image_indexer,  # module with build_index(...)
         label_readers={
             "coco": _coco,
             "jsonl_boxes": _jsonl,
@@ -32,6 +56,8 @@ def default_registry() -> PrepareRegistry:
             "parquet_cls": _pcls,  # classification via parquet
             "labelbox": _lb,
         },
+        classmap=classmap,
+        aligner=aligner,
         splitters={
             "stratified": _strat,
             "random": _rand,

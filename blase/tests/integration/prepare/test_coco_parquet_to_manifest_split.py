@@ -1,5 +1,6 @@
 import json
 from pathlib import Path
+from types import SimpleNamespace
 
 import pandas as pd
 import pyarrow as pa
@@ -17,8 +18,9 @@ from blase.prepare import (
 )
 from blase.preparing.registry import PrepareRegistry
 
-# You will replace these with real concrete backends in registry
 from blase.preparing.manifest import index_images as _idx
+from blase.preparing.manifest.classmap import build_or_validate_class_map as _classmap
+from blase.preparing.manifest.align_stream import align_stream as _align
 from blase.preparing.readers import coco as _coco
 from blase.preparing.splitters import stratified as _strat
 from blase.preparing.stats import counters as _stats
@@ -67,9 +69,30 @@ def _write_tiny_coco(p: Path):
 
 
 def _default_registry():
+    image_indexer = SimpleNamespace(
+        build_index=lambda sources, cfg: _idx.build_image_index(
+            data_sources=sources,
+            image_cfg={
+                "id_col": cfg.get("id_col"),
+                "path_col": cfg.get("path_col"),
+                "height_col": cfg.get("height_col"),
+                "width_col": cfg.get("width_col"),
+                "sha256_col": cfg.get("sha256_col"),
+            },
+            scale_cfg={
+                "rows_per_chunk": cfg.get("rows_per_chunk"),
+                "index_backend": cfg.get("index_backend"),
+            },
+        )
+    )
+    classmap = SimpleNamespace(build_or_validate=_classmap)
+    aligner = SimpleNamespace(align_stream=_align)
+
     return PrepareRegistry(
-        image_indexer=_idx,  # module providing build_index
+        image_indexer=image_indexer,  # now has .build_index(...)
         label_readers={"coco": _coco},
+        classmap=classmap,  # exposes .build_or_validate(...)
+        aligner=aligner,  # exposes .align_stream(...)
         splitters={"stratified": _strat, "random": _strat},
         stats=_stats,
         tfr_writer=_tfr,

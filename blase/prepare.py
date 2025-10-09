@@ -12,7 +12,6 @@ from typing import (
 )
 from pathlib import Path
 from dataclasses import dataclass, field
-from itertools import islice
 import json
 
 from blase.types import Batch, SinkResult
@@ -24,8 +23,7 @@ from blase.preparing.default_registry import default_registry
 
 from blase.preparing.interfaces import ManifestBatch
 
-from blase.preparing.manifest import index_images as _idx
-from blase.preparing.manifest import align_stream as _align
+from blase.preparing.manifest.manifest import build_manifest_stream
 from blase.preparing.manifest import classmap as _classmap
 
 from blase.preparing.stats import counters as _counters
@@ -309,15 +307,15 @@ class Prepare:
         class_cfg: ClassConfig = ClassConfig(),
         scale_cfg: ScaleConfig = ScaleConfig(),
     ) -> Iterable[ManifestBatch]:
-        # coerce inputs
         ds = _coerce_list_data_sources(data_sources)
         ls = _coerce_list_label_sources(label_sources)
-
-        # 1) images → KV index
-        kv_index, bloom, rg_index = _idx.build_image_index(
-            data_sources=[
-                {"uri": d.uri, "fmt": d.fmt, "options": dict(d.options)} for d in ds
-            ],
+        # normalize into dicts
+        ds_norm = [{"uri": d.uri, "fmt": d.fmt, "options": dict(d.options)} for d in ds]
+        ls_norm = [{"uri": s.uri, "fmt": s.fmt, "options": dict(s.options)} for s in ls]
+        stream = build_manifest_stream(
+            reg=self._reg,
+            data_sources=ds_norm,
+            label_sources=ls_norm,
             image_cfg={
                 "id_col": image_cfg.id_col,
                 "path_col": image_cfg.path_col,
@@ -325,64 +323,6 @@ class Prepare:
                 "width_col": image_cfg.width_col,
                 "sha256_col": image_cfg.sha256_col,
             },
-            scale_cfg={
-                "rows_per_chunk": scale_cfg.rows_per_chunk,
-                "index_backend": scale_cfg.index_backend,
-            },
-        )
-
-        # 2) label readers → reopenable callables
-        label_reader_fns: list[callable] = []
-        for src in ls:
-            reader = self._reg.label_readers.get(src.fmt)
-            if reader is None:
-                raise ValueError(f"no label reader registered for fmt={src.fmt!r}")
-
-            def _mk(fn=reader.read, _src=src):
-                def _reader():
-                    return fn(
-                        {
-                            "uri": _src.uri,
-                            "fmt": _src.fmt,
-                            "options": dict(_src.options),
-                        }
-                    )
-
-                return _reader
-
-            label_reader_fns.append(_mk())
-
-        # 3) class map (first pass)
-        label_iters_for_map = [fn() for fn in label_reader_fns]
-        class_map, class_meta = _classmap.build_or_validate_class_map(
-            label_iters_for_map,
-            {
-                "class_map": class_cfg.class_map,
-                "normalize_names": class_cfg.normalize_names,
-            },
-        )
-
-        # 3.1) optional sanity probe (helps catch id_from/id_col mismatches fast)
-        kv_ids = set(kv_index.keys())
-        probe_ids = set()
-        for it in [fn() for fn in label_reader_fns]:
-            for row in islice(it, 1000):
-                iid = row.get("image_id")
-                if iid:
-                    probe_ids.add(iid)
-        if probe_ids and not (kv_ids & probe_ids):
-            raise RuntimeError(
-                "no label image_ids match Parquet ids; check LabelSource.options['id_from'] "
-                "and ImageConfig.id_col; examples="
-                f"labels:{sorted(list(probe_ids))[:5]} vs parquet:{sorted(list(kv_ids))[:5]}"
-            )
-
-        # 4) align stream (second pass)
-        label_iters_for_align = [fn() for fn in label_reader_fns]
-        yield from _align.align_stream(
-            label_iters=label_iters_for_align,
-            kv_index=kv_index,
-            rg_index=rg_index,
             join_cfg={
                 "image_id_resolver": join_cfg.image_id_resolver,
                 "drop_orphans": join_cfg.drop_orphans,
@@ -396,15 +336,18 @@ class Prepare:
                 "drop_oob_boxes": box_cfg.drop_oob_boxes,
             },
             class_cfg={
-                "class_map": class_map,
+                "class_map": class_cfg.class_map,
                 "normalize_names": class_cfg.normalize_names,
             },
             scale_cfg={
                 "batch_rows": scale_cfg.batch_rows,
                 "seed": scale_cfg.seed,
                 "join_strategy": scale_cfg.join_strategy,
+                "rows_per_chunk": scale_cfg.rows_per_chunk,
+                "index_backend": scale_cfg.index_backend,
             },
         )
+        return stream
 
     def compute_stats(
         self,

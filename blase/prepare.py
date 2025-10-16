@@ -940,40 +940,129 @@ class Prepare:
         save: Optional[Path] = None,
         map: Optional[Dict[str, int]] = None,
         normalize: bool = True,
+        track: bool = True,
     ) -> Batch[Dict[str, int], ManifestMeta]:
         """
         Load/save a canonical class→id map.
         Priority: `map` arg > file at `load`. If `save` is provided, persist the final map.
         Returns Batch[data=<class_map>, meta={...}].
         """
-        # 1) assemble source
-        if map is not None:
-            cm = dict(map)
-        elif load is not None:
-            p = Path(load)
-            txt = p.read_text(encoding="utf-8")
-            cm = json.loads(txt)
-        else:
-            cm = {}
+        tracker = Track.get(track)
 
-        # 2) normalize + validate + canonicalize
-        cm_norm = _classmap.canonicalize_class_map(cm, normalize_names=normalize)
+        if tracker is None:
+            if map is not None:
+                cm = dict(map)
+            elif load is not None:
+                txt = Path(load).read_text(encoding="utf-8")
+                cm = json.loads(txt)
+            else:
+                cm = {}
 
-        # 3) persist if requested
-        if save is not None:
-            sp = Path(save)
-            sp.parent.mkdir(parents=True, exist_ok=True)
-            sp.write_text(
-                json.dumps(cm_norm, ensure_ascii=False, indent=2), encoding="utf-8"
-            )
+            cm_norm = _classmap.canonicalize_class_map(cm, normalize_names=normalize)
+            if save is not None:
+                sp = Path(save)
+                sp.parent.mkdir(parents=True, exist_ok=True)
+                sp.write_text(
+                    json.dumps(cm_norm, ensure_ascii=False, indent=2), encoding="utf-8"
+                )
 
-        # 4) meta
-        j = json.dumps(cm_norm, sort_keys=True, ensure_ascii=False).encode("utf-8")
-        meta: ManifestMeta = {
-            "size": len(cm_norm),
-            "normalized": bool(normalize),
-            "hash": Hash().hash_object(j),
-            "loaded_from": str(load) if load else None,
-            "saved_to": str(save) if save else None,
+            j = json.dumps(cm_norm, sort_keys=True, ensure_ascii=False).encode("utf-8")
+            meta: ManifestMeta = {
+                "size": len(cm_norm),
+                "normalized": bool(normalize),
+                "hash": Hash().hash_object(j),
+                "loaded_from": str(load) if load else None,
+                "saved_to": str(save) if save else None,
+            }
+            return Batch(data=cm_norm, is_last=True, meta=meta)
+
+        params = {
+            "load": (str(load) if load else None),
+            "save": (str(save) if save else None),
+            "normalize": bool(normalize),
+            # do NOT inline the map here; persist it as a blob instead
+            "has_inline_map": map is not None,
         }
-        return Batch(data=cm_norm, is_last=True, meta=meta)
+        stream = tracker.stream(
+            "blase.Prepare.class_map_io", params, code_fn=self.class_map_io
+        )
+        try:
+            # 1) assemble source & record inputs
+            cm = None
+            # inline map → persist as CAS blob (input role='map')
+            if map is not None:
+                map_bytes = json.dumps(map, ensure_ascii=False).encode("utf-8")
+                try:
+                    map_hash = stream.step.register_data(
+                        kind="class.map.json",
+                        version="1",
+                        path_or_bytes=map_bytes,
+                        metadata={"size": len(map)},
+                    )
+                    # ensure the blob exists on disk for replay
+                    try:
+                        cas.write_bytes(
+                            run_path=stream.step.run_path,
+                            kind="data",
+                            data_hash=map_hash,
+                            data=map_bytes,
+                        )
+                    except Exception:
+                        pass
+                    stream.step.add_input(map_hash, role="map", arg_name="map")
+                except Exception:
+                    map_hash = None
+                cm = dict(map)
+
+            # load=... → record the source file hash (input role='source')
+            if cm is None and load is not None:
+                p = Path(load)
+                try:
+                    src_hash = Hash().hash_file(p)
+                    stream.step.add_input(src_hash, role="source", arg_name="load")
+                except Exception:
+                    pass
+                txt = p.read_text(encoding="utf-8")
+                cm = json.loads(txt)
+
+            if cm is None:
+                cm = {}
+
+            # 2) normalize
+            cm_norm = _classmap.canonicalize_class_map(cm, normalize_names=normalize)
+
+            # 3) persist if requested; also record file output in CAS index
+            out_path = None
+            if save is not None:
+                out_path = Path(save)
+                out_path.parent.mkdir(parents=True, exist_ok=True)
+                out_path.write_text(
+                    json.dumps(cm_norm, ensure_ascii=False, indent=2), encoding="utf-8"
+                )
+                try:
+                    out_hash = stream.step.register_data(
+                        kind="class.map.file",
+                        version="1",
+                        path_or_bytes=str(out_path),
+                        metadata={"path": str(out_path)},
+                    )
+                    stream.step.add_output(out_hash, name="class_map_json")
+                except Exception:
+                    pass
+
+            # 4) meta + emit
+            j = json.dumps(cm_norm, sort_keys=True, ensure_ascii=False).encode("utf-8")
+            meta = {
+                "size": len(cm_norm),
+                "normalized": bool(normalize),
+                "hash": Hash().hash_object(j),
+                "loaded_from": str(load) if load else None,
+                "saved_to": str(save) if save else None,
+            }
+            stream.emit(last_batch=True, meta=meta)
+            stream.close_ok()
+            return Batch(data=cm_norm, is_last=True, meta=meta)
+
+        except Exception as e:
+            stream.close_error(type(e), e, e.__traceback__)
+            raise

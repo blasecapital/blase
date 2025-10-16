@@ -243,6 +243,7 @@ def run_step(
             "blase.Prepare.to_tfrecord",
             "blase.Prepare.preview_tfrecord",
             "blase.Prepare.write_label_sidecars",
+            "blase.Prepare.class_map_io",
         ):
             upstream_gen = (
                 _upstream_gen_for_sink(run_path, step_hash)

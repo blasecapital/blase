@@ -12,6 +12,7 @@ from blase.cli.restore.replay_exec import (
     _exec_prepare_to_tfrecord,
     _exec_prepare_preview_tfrecord,
     _exec_prepare_write_label_sidecars,
+    _exec_prepare_class_map_io,
 )
 from blase.restoring import store, planner, code, bindings, materialize, cas
 from blase.restoring.materialize import NeedReplay
@@ -581,6 +582,17 @@ def _exec_plan_for_step(
 
         if fqn == "blase.Prepare.write_label_sidecars":
             upstream = _exec_prepare_write_label_sidecars(
+                run_path,
+                sh,
+                to_path,
+                produced,
+                created_paths,
+                produced_hashes,
+            )
+            continue
+
+        if fqn == "blase.Prepare.class_map_io":
+            upstream = _exec_prepare_class_map_io(
                 run_path,
                 sh,
                 to_path,

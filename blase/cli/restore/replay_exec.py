@@ -572,3 +572,32 @@ def _exec_prepare_write_label_sidecars(
             produced_hashes.add(h)
 
     return None
+
+
+def _exec_prepare_class_map_io(
+    run_path, sh, to_path, produced, created_paths, produced_hashes
+):
+    st = store.load_step(run_path, sh)
+    handler = bindings.RESTORE_HANDLERS["blase.Prepare.class_map_io"]
+
+    out_path = handler(
+        run_path=run_path,
+        params=st["params"],
+        step_hash=sh,
+        realized={},
+        upstream_gen=None,
+        target_override=to_path,
+    )
+
+    if not out_path:
+        return None
+
+    p = Path(out_path)
+    if not (p.exists() and p.is_file()):
+        return None
+
+    hp = Hash().hash_file(p)
+    produced[hp] = p
+    created_paths.append(p)
+    produced_hashes.add(hp)
+    return None

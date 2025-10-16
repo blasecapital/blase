@@ -59,6 +59,7 @@ from blase.prepare import (
 )
 from blase.preparing.writers.tfrecord.inspect import head as _tfr_head
 from blase.preparing.manifest.manifest import build_manifest_stream
+from blase.preparing.manifest import classmap as _classmap
 from blase.preparing.default_registry import default_registry
 
 from blase.utils.fs import ensure_parent_dir
@@ -1681,6 +1682,51 @@ def run_restore_write_label_sidecars(
     return [a.path for a in (res.artifacts or [])]
 
 
+def run_restore_class_map_io(
+    *,
+    run_path,
+    params,
+    step_hash,
+    realized,
+    upstream_gen=None,
+    target_override=None,
+    **_,
+):
+    st = store.load_step(run_path, step_hash)
+    p = dict(st.get("params") or {})
+    ins = store.load_step_inputs(run_path, step_hash)
+
+    map_hash = next((i["data_hash"] for i in ins if i["role"] == "map"), None)
+    if map_hash:
+        mp = cas.path_for(run_path, "data", map_hash)
+        cm = json.loads(Path(mp).read_text(encoding="utf-8"))
+    else:
+        src_hash = next((i["data_hash"] for i in ins if i["role"] == "source"), None)
+        if src_hash:
+            kind = store.get_data_kind(run_path, src_hash) or "data"
+            src_path = materialize.ensure_local(run_path, src_hash, kind=kind)
+            cm = json.loads(Path(src_path).read_text(encoding="utf-8"))
+        else:
+            cm = dict(p["map"]) if p.get("map") is not None else {}
+
+    norm = bool(p.get("normalize", True))
+    cm_norm = _classmap.canonicalize_class_map(cm, normalize_names=norm)
+
+    save_to = (
+        Path(target_override)
+        if target_override
+        else (Path(p["save"]) if p.get("save") else None)
+    )
+    if save_to is not None:
+        save_to.parent.mkdir(parents=True, exist_ok=True)
+        save_to.write_text(
+            json.dumps(cm_norm, ensure_ascii=False, indent=2), encoding="utf-8"
+        )
+        return str(save_to)
+
+    return ""
+
+
 # Public registry of handlers (by function FQN)
 RESTORE_HANDLERS: Dict[str, Any] = {
     "blase.Extract.read_csv": run_read_csv_restore,
@@ -1696,4 +1742,5 @@ RESTORE_HANDLERS: Dict[str, Any] = {
     "blase.Prepare.to_tfrecord": run_restore_to_tfrecord,
     "blase.Prepare.preview_tfrecord": run_restore_preview_tfrecord,
     "blase.Prepare.write_label_sidecars": run_restore_write_label_sidecars,
+    "blase.Prepare.class_map_io": run_restore_class_map_io,
 }

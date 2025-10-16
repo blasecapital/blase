@@ -35,6 +35,7 @@ from blase.extracting.parquet_backend import (
 from blase.load import Load
 from blase.restoring import store, cas
 from blase.utils.hashing import Hash
+from blase.restoring import materialize
 from blase.restoring.io_safety import resolve_conflict_path
 from blase.loading.img_parquet_backend import (
     _build_parquet_table_from_images,
@@ -56,6 +57,7 @@ from blase.prepare import (
     ClassConfig,
     ScaleConfig,
 )
+from blase.preparing.writers.tfrecord.inspect import head as _tfr_head
 from blase.preparing.manifest.manifest import build_manifest_stream
 from blase.preparing.default_registry import default_registry
 
@@ -1568,6 +1570,44 @@ def run_restore_to_tfrecord(
     return [a.path for a in (res.artifacts or [])]
 
 
+def run_restore_preview_tfrecord(
+    *,
+    run_path,
+    params,
+    step_hash,
+    realized,
+    upstream_gen=None,
+    target_override=None,
+    **_,
+):
+    st = store.load_step(run_path, step_hash)
+    ins = store.load_step_inputs(run_path, step_hash)
+
+    src = next((i["data_hash"] for i in ins if i["role"] == "source"), None)
+    if not src:
+        raise KeyError("preview_tfrecord restore: missing 'source' input")
+
+    kind = store.get_data_kind(run_path, src) or "tfrecord"
+    src_path, _ = materialize.ensure_local(run_path, src, kind=kind), False
+    p = dict(st["params"] or {})
+    out_dir = (
+        Path(target_override)
+        if target_override
+        else (Path(p["out_dir"]) if p.get("out_dir") else None)
+    )
+
+    _ = _tfr_head(
+        path=Path(src_path),
+        n=int(p.get("n", 8)),
+        compression=p.get("compression", "GZIP"),
+        decode_images=bool(p.get("decode_images", False)),
+        out_dir=out_dir,
+        max_side=int(p.get("max_side", 1024)),
+    )
+
+    return str(out_dir) if out_dir else ""
+
+
 # Public registry of handlers (by function FQN)
 RESTORE_HANDLERS: Dict[str, Any] = {
     "blase.Extract.read_csv": run_read_csv_restore,
@@ -1581,4 +1621,5 @@ RESTORE_HANDLERS: Dict[str, Any] = {
     "blase.Prepare.compute_stats": run_restore_compute_stats,
     "blase.Prepare.split": run_restore_split,
     "blase.Prepare.to_tfrecord": run_restore_to_tfrecord,
+    "blase.Prepare.preview_tfrecord": run_restore_preview_tfrecord,
 }

@@ -736,15 +736,91 @@ class Prepare:
         decode_images: bool = False,
         out_dir: Optional[Path] = None,
         max_side: int = 1024,
+        track: bool = True,
     ) -> List[Dict[str, Any]]:
-        return _tfr_head(
-            path=Path(path),
-            n=n,
-            compression=compression,
-            decode_images=decode_images,
-            out_dir=out_dir,
-            max_side=max_side,
+        cfg = {
+            "path": str(Path(path)),
+            "n": int(n),
+            "compression": compression,
+            "decode_images": bool(decode_images),
+            "out_dir": (str(out_dir) if out_dir else None),
+            "max_side": int(max_side),
+        }
+
+        tracker = Track.get(track)
+        if tracker is None:
+            return _tfr_head(
+                path=cfg["path"],
+                n=cfg["n"],
+                compression=cfg["compression"],
+                decode_images=cfg["decode_images"],
+                out_dir=(Path(cfg["out_dir"]) if cfg["out_dir"] else None),
+                max_side=cfg["max_side"],
+            )
+
+        stream = tracker.stream(
+            "blase.Prepare.preview_tfrecord", cfg, code_fn=self.preview_tfrecord
         )
+        try:
+            tf_path = Path(cfg["path"])
+            src_hash = Hash().hash_file(tf_path)
+            try:
+                stream.step.add_input(src_hash, role="source", arg_name="path")
+            except Exception:
+                pass
+
+            out = _tfr_head(
+                path=tf_path,
+                n=cfg["n"],
+                compression=cfg["compression"],
+                decode_images=cfg["decode_images"],
+                out_dir=(Path(cfg["out_dir"]) if cfg["out_dir"] else None),
+                max_side=cfg["max_side"],
+            )
+
+            written_files = []
+            if cfg["decode_images"] and cfg["out_dir"]:
+                for p in sorted(Path(cfg["out_dir"]).glob("*.preview.png")):
+                    try:
+                        dh = stream.step.register_data(
+                            kind="image",
+                            version="1",
+                            path_or_bytes=str(p),
+                            metadata={"path": str(p), "source": src_hash},
+                        )
+                        stream.step.add_output(dh, name=p.name)
+                        written_files.append(str(p))
+                    except Exception:
+                        pass
+
+            summary = {
+                "n": cfg["n"],
+                "compression": cfg["compression"],
+                "decode_images": cfg["decode_images"],
+                "out_dir": cfg["out_dir"],
+                "max_side": cfg["max_side"],
+                "written": written_files,
+            }
+            try:
+                b = json.dumps(summary, ensure_ascii=False).encode("utf-8")
+                _ = stream.step.register_data(
+                    kind="preview.summary",
+                    version="1",
+                    path_or_bytes=b,
+                    metadata=summary,
+                )
+            except Exception:
+                pass
+
+            stream.emit(
+                last_batch=True,
+                meta={"source": src_hash, "written": written_files},
+            )
+            stream.close_ok()
+            return out
+        except Exception as e:
+            stream.close_error(type(e), e, e.__traceback__)
+            raise
 
     def write_label_sidecars(
         self,

@@ -439,3 +439,76 @@ def _exec_prepare_to_tfrecord(
             produced_hashes.add(dh)
 
     return None
+
+
+# ==========
+# Prepare().preview_tfrecord
+# ==========
+def _exec_prepare_preview_tfrecord(
+    run_path,
+    sh,
+    to_path,
+    produced,
+    created_paths,
+    produced_hashes,
+):
+    st = store.load_step(run_path, sh)
+    outs = store.load_step_outputs(run_path, sh)  # may be empty if nothing persisted
+
+    # Sort for stability; keep (hash, name)
+    outs_sorted = sorted(outs, key=lambda o: o.get("name", "") or "")
+    expected = [(o["data_hash"], o.get("name") or "") for o in outs_sorted]
+
+    # Decide a target directory for side effects
+    if to_path:
+        target_dir = Path(to_path)
+        target_dir.mkdir(parents=True, exist_ok=True)
+    else:
+        RESTORE_DEFAULT_DIR.mkdir(parents=True, exist_ok=True)
+        target_dir = (RESTORE_DEFAULT_DIR / f"preview_tfrecord_{sh[:8]}").resolve()
+        target_dir.mkdir(parents=True, exist_ok=True)
+
+    handler = bindings.RESTORE_HANDLERS["blase.Prepare.preview_tfrecord"]
+    _ = handler(
+        run_path=run_path,
+        params=st["params"],
+        step_hash=sh,
+        realized={},
+        upstream_gen=None,
+        target_override=str(target_dir),
+    )
+
+    # If we have recorded outputs, try to map by name → file under target_dir
+    if expected:
+        for dh, name in expected:
+            # best-effort filename resolution
+            cand = target_dir / name if name and "." in name else None
+            p = None
+            if cand and cand.exists():
+                p = cand
+            else:
+                # fallback: pick any file that contains the name, else first image-like
+                files = sorted(
+                    [p for p in target_dir.glob("*") if p.is_file()],
+                    key=lambda x: x.name,
+                )
+                if name:
+                    p = next((f for f in files if name in f.name), None)
+                if p is None and files:
+                    p = files[0]
+
+            if p and p.exists():
+                produced[dh] = p
+                created_paths.append(p)
+                produced_hashes.add(dh)
+        return None
+
+    # No recorded outputs: hash every produced file and record those
+    files = [p for p in sorted(target_dir.glob("*")) if p.is_file()]
+    for p in files:
+        dh = Hash().hash_file(p)
+        produced[dh] = p
+        created_paths.append(p)
+        produced_hashes.add(dh)
+
+    return None

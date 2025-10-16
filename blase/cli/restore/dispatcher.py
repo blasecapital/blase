@@ -241,6 +241,7 @@ def run_step(
             "blase.Prepare.build_manifest",
             "blase.Prepare.split",
             "blase.Prepare.to_tfrecord",
+            "blase.Prepare.preview_tfrecord",
         ):
             upstream_gen = (
                 _upstream_gen_for_sink(run_path, step_hash)

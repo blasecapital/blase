@@ -1608,6 +1608,79 @@ def run_restore_preview_tfrecord(
     return str(out_dir) if out_dir else ""
 
 
+def run_restore_write_label_sidecars(
+    *,
+    run_path,
+    params,
+    step_hash,
+    realized,
+    upstream_gen=None,
+    target_override=None,
+    **_,
+):
+    # 1) Step + inputs
+    st = store.load_step(run_path, step_hash)
+    ins = store.load_step_inputs(run_path, step_hash)
+
+    # 2) Splits json (required)
+    splits_hash = next((i["data_hash"] for i in ins if i["role"] == "splits"), None)
+    if not splits_hash:
+        raise KeyError("write_label_sidecars restore: missing 'splits' input")
+    sp = cas.path_for(run_path, "data", splits_hash)
+    splits = json.loads(Path(sp).read_text(encoding="utf-8"))
+
+    # 3) Upstream manifest identity
+    man_id = None
+    for role in ("manifest", "manifest_root"):
+        m = next((i["data_hash"] for i in ins if i["role"] == role), None)
+        if m:
+            man_id = m
+            break
+    if not man_id:
+        raise KeyError("write_label_sidecars restore: missing manifest input")
+
+    # 4) Build canonical manifest stream from producing step
+    man_step = store.find_step_by_output(run_path, man_id)
+    if not man_step:
+        raise KeyError(f"no producing step found for manifest {man_id}")
+    p = man_step["params"]  # canonical dicts
+
+    reg = default_registry()
+    manifest_iter = build_manifest_stream(
+        reg=reg,
+        data_sources=p["data_sources"],
+        label_sources=p["label_sources"],
+        image_cfg=p["image_cfg"],
+        join_cfg=p["join_cfg"],
+        box_cfg=p["box_cfg"],
+        class_cfg=p["class_cfg"],
+        scale_cfg=p["scale_cfg"],
+    )
+
+    # 5) Replay sidecar write to target (or recorded out_dir)
+    prep = Prepare(registry=reg)
+    fmt = (st.get("params") or {}).get("format", "jsonl")
+    order_key = (st.get("params") or {}).get("order_key", "sha256")
+    det = bool((st.get("params") or {}).get("deterministic_order", True))
+    out_dir = (
+        Path(target_override)
+        if target_override
+        else Path((st.get("params") or {}).get("out_dir", "."))
+    )
+
+    res = prep.write_label_sidecars(
+        manifest=manifest_iter,
+        splits=splits,
+        out_dir=out_dir,
+        format=fmt,
+        deterministic_order=det,
+        order_key=order_key,
+        track=False,
+    )
+
+    return [a.path for a in (res.artifacts or [])]
+
+
 # Public registry of handlers (by function FQN)
 RESTORE_HANDLERS: Dict[str, Any] = {
     "blase.Extract.read_csv": run_read_csv_restore,
@@ -1622,4 +1695,5 @@ RESTORE_HANDLERS: Dict[str, Any] = {
     "blase.Prepare.split": run_restore_split,
     "blase.Prepare.to_tfrecord": run_restore_to_tfrecord,
     "blase.Prepare.preview_tfrecord": run_restore_preview_tfrecord,
+    "blase.Prepare.write_label_sidecars": run_restore_write_label_sidecars,
 }

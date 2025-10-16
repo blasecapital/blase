@@ -831,17 +831,107 @@ class Prepare:
         format: Literal["jsonl", "parquet"] = "jsonl",
         deterministic_order: bool = True,
         order_key: Literal["sha256", "image_id"] = "sha256",
+        track: bool = True,
     ) -> SinkResult:
         cfg: Dict[str, Any] = {
             "out_dir": Path(out_dir),
             "deterministic_order": bool(deterministic_order),
             "order_key": order_key,
+            "format": format,
         }
-        if format == "jsonl":
-            return _sidecar_jsonl.write(manifest, splits, cfg)
-        if format == "parquet":
-            return _sidecar_parquet.write(manifest, splits, cfg)
-        raise ValueError(f"unsupported sidecar format: {format!r}")
+
+        tracker = Track.get(track)
+        if tracker is None:
+            try:
+                writer = _sidecar_jsonl if format == "jsonl" else _sidecar_parquet
+                return writer.write(manifest, splits, cfg)
+            except Exception:
+                raise ValueError(f"unsupported sidecar format: {format!r}")
+
+        params = {**cfg, "out_dir": str(Path(out_dir))}
+        stream = tracker.stream(
+            "blase.Prepare.write_label_sidecars",
+            params,
+            code_fn=self.write_label_sidecars,
+        )
+
+        upstream = {"manifest_root_hash": None, "manifest_hash": None}
+
+        def _iter_manifest():
+            for mb in manifest:
+                rh = (mb.meta or {}).get("manifest_root_hash")
+                mh = (mb.meta or {}).get("manifest_hash")
+                upstream["manifest_root_hash"] = upstream["manifest_root_hash"] or rh
+                upstream["manifest_hash"] = upstream["manifest_hash"] or mh
+                yield mb
+
+        try:
+            splits_json = json.dumps(splits, sort_keys=True, ensure_ascii=False).encode(
+                "utf-8"
+            )
+        except Exception:
+            splits_json = json.dumps({"_hash": Hash().hash_object(splits)}).encode(
+                "utf-8"
+            )
+
+        try:
+            splits_hash = stream.step.register_data(
+                kind="splits.json", version="1", path_or_bytes=splits_json, metadata={}
+            )
+            # NEW: persist the bytes into CAS so step replay can read them later
+            try:
+                cas.write_bytes(
+                    run_path=stream.step.run_path,
+                    kind="data",
+                    data_hash=splits_hash,
+                    data=splits_json,
+                )
+            except Exception:
+                pass
+            stream.step.add_input(splits_hash, role="splits", arg_name="splits")
+        except Exception:
+            splits_hash = None
+
+        writer = _sidecar_jsonl if format == "jsonl" else _sidecar_parquet
+        try:
+            res = writer.write(_iter_manifest(), splits, cfg)
+
+            for rid, role in [
+                (upstream["manifest_root_hash"], "manifest_root"),
+                (upstream["manifest_hash"], "manifest"),
+            ]:
+                if rid:
+                    try:
+                        stream.step.add_input(rid, role=role, arg_name=None)
+                    except Exception:
+                        pass
+
+            artifacts = res.artifacts or []
+            for i, a in enumerate(artifacts, 1):
+                kind = (
+                    "labels.sidecar.parquet"
+                    if str(a.path).endswith(".parquet")
+                    else "labels.sidecar.jsonl"
+                )
+                try:
+                    data_id = stream.step.register_data(
+                        kind=kind,
+                        version="1",
+                        path_or_bytes=a.path,
+                        metadata={"path": a.path},
+                    )
+                    stream.step.add_output(data_id, name=f"{kind}_{i:05d}")
+                except Exception:
+                    pass
+
+            meta = dict(res.meta or {})
+            new_meta = stream.emit(last_batch=True, meta=meta) or meta
+            stream.close_ok()
+            return SinkResult(artifacts=artifacts, is_last=res.is_last, meta=new_meta)
+
+        except Exception as e:
+            stream.close_error(type(e), e, e.__traceback__)
+            raise
 
     def class_map_io(
         self,

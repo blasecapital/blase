@@ -512,3 +512,63 @@ def _exec_prepare_preview_tfrecord(
         produced_hashes.add(dh)
 
     return None
+
+
+# ==========
+# Prepare().write_label_sidecars
+# ==========
+def _exec_prepare_write_label_sidecars(
+    run_path,
+    sh,
+    to_path,
+    produced,
+    created_paths,
+    produced_hashes,
+):
+    st = store.load_step(run_path, sh)
+    outs = store.load_step_outputs(run_path, sh)
+
+    outs_sorted = sorted(outs, key=lambda o: o.get("name", ""))
+    expected = [o["data_hash"] for o in outs_sorted]
+
+    handler = bindings.RESTORE_HANDLERS["blase.Prepare.write_label_sidecars"]
+    out_paths = handler(
+        run_path=run_path,
+        params=st["params"],
+        step_hash=sh,
+        realized={},
+        upstream_gen=None,
+        target_override=to_path,
+    )
+
+    produced_pairs = []
+    for p in out_paths:
+        h = Hash().hash_file(p)
+        produced_pairs.append((h, Path(p)))
+
+    if expected:
+        exp_set = set(expected)
+        got_set = {h for h, _ in produced_pairs}
+
+        # Verify replays produced all expected hashes
+        missing = exp_set - got_set
+        if missing:
+            raise SystemExit(
+                f"restore: sidecar replay missing expected outputs: {sorted(missing)}"
+            )
+
+        # Prefer 1:1 mapping by hash
+        by_hash = {h: p for h, p in produced_pairs}
+        for eh in expected:
+            p = by_hash[eh]
+            produced[eh] = p
+            created_paths.append(p)
+            produced_hashes.add(eh)
+    else:
+        # No recorded outs; record by computed hash
+        for h, p in produced_pairs:
+            produced[h] = p
+            created_paths.append(p)
+            produced_hashes.add(h)
+
+    return None

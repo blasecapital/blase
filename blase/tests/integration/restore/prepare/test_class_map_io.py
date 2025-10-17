@@ -10,16 +10,20 @@ import pytest
 
 # ---------- helpers ----------
 
+
 def import_blase_fresh(project_root: Path) -> ModuleType:
     os.environ["BLASE_HOME"] = str(project_root)
     cwd = os.getcwd()
     os.chdir(project_root)
     try:
-        for m in [m for m in list(sys.modules) if m == "blase" or m.startswith("blase.")]:
+        for m in [
+            m for m in list(sys.modules) if m == "blase" or m.startswith("blase.")
+        ]:
             sys.modules.pop(m, None)
         return importlib.import_module("blase")
     finally:
         os.chdir(cwd)
+
 
 def workspace(tmp_path, monkeypatch):
     project_root = tmp_path / "proj_classmap_restore"
@@ -29,6 +33,7 @@ def workspace(tmp_path, monkeypatch):
     monkeypatch.chdir(project_root)
     monkeypatch.setenv("BLASE_HOME", str(project_root))
     return project_root
+
 
 def _latest_run_path(project_root: Path) -> Path:
     runs = project_root / "runs"
@@ -43,12 +48,14 @@ def _latest_run_path(project_root: Path) -> Path:
     cands.sort(reverse=True)
     return cands[0][1]
 
+
 def _con(project_root: Path) -> sqlite3.Connection:
     rp = _latest_run_path(project_root)
     db = rp / "nodes" / "nodes.db"
     c = sqlite3.connect(db)
     c.row_factory = sqlite3.Row
     return c
+
 
 def latest_step(project_root: Path, fqn: str) -> str:
     c = _con(project_root)
@@ -68,6 +75,7 @@ def latest_step(project_root: Path, fqn: str) -> str:
     finally:
         c.close()
 
+
 def outputs_for_step(project_root: Path, step_hash: str):
     c = _con(project_root)
     try:
@@ -79,31 +87,53 @@ def outputs_for_step(project_root: Path, step_hash: str):
     finally:
         c.close()
 
+
 def cli_restore_step_to_file(project_root: Path, step_hash: str, to_file: Path):
     run_path = _latest_run_path(project_root)
     cmd = [
-        sys.executable, "-m", "blase.cli.cli", "restore", "run",
-        "--run", str(run_path),
-        "--step", step_hash,
-        "--mode", "replay",
-        "--to", str(to_file),
-        "--on-conflict", "overwrite",
+        sys.executable,
+        "-m",
+        "blase.cli.cli",
+        "restore",
+        "run",
+        "--run",
+        str(run_path),
+        "--step",
+        step_hash,
+        "--mode",
+        "replay",
+        "--to",
+        str(to_file),
+        "--on-conflict",
+        "overwrite",
     ]
     return subprocess.run(cmd, cwd=project_root, capture_output=True, text=True)
+
 
 def cli_restore_data_to(project_root: Path, data_hash: str, to_path: Path):
     run_path = _latest_run_path(project_root)
     cmd = [
-        sys.executable, "-m", "blase.cli.cli", "restore", "run",
-        "--run", str(run_path),
-        "--data", data_hash,
-        "--mode", "replay",
-        "--to", str(to_path),
-        "--on-conflict", "overwrite",
+        sys.executable,
+        "-m",
+        "blase.cli.cli",
+        "restore",
+        "run",
+        "--run",
+        str(run_path),
+        "--data",
+        data_hash,
+        "--mode",
+        "replay",
+        "--to",
+        str(to_path),
+        "--on-conflict",
+        "overwrite",
     ]
     return subprocess.run(cmd, cwd=project_root, capture_output=True, text=True)
 
+
 # ---------- test ----------
+
 
 @pytest.mark.integration
 def test_class_map_io_step_and_data_restore(tmp_path, monkeypatch):
@@ -138,7 +168,9 @@ def test_class_map_io_step_and_data_restore(tmp_path, monkeypatch):
     if replay_file.exists():
         replay_file.unlink()
     rc = cli_restore_step_to_file(project_root, step_hash, replay_file)
-    assert rc.returncode == 0, f"step replay failed\nSTDOUT:\n{rc.stdout}\nSTDERR:\n{rc.stderr}"
+    assert rc.returncode == 0, (
+        f"step replay failed\nSTDOUT:\n{rc.stdout}\nSTDERR:\n{rc.stderr}"
+    )
     assert replay_file.exists() and replay_file.stat().st_size > 0
     payload2 = json.loads(replay_file.read_text(encoding="utf-8"))
     assert set(payload2.keys()) == set(cm.keys())
@@ -148,7 +180,9 @@ def test_class_map_io_step_and_data_restore(tmp_path, monkeypatch):
     if data_target.exists():
         data_target.unlink()
     rc2 = cli_restore_data_to(project_root, out_hash, data_target)
-    assert rc2.returncode == 0, f"data restore failed\nSTDOUT:\n{rc2.stdout}\nSTDERR:\n{rc2.stderr}"
+    assert rc2.returncode == 0, (
+        f"data restore failed\nSTDOUT:\n{rc2.stdout}\nSTDERR:\n{rc2.stderr}"
+    )
     assert data_target.exists() and data_target.stat().st_size > 0
     payload3 = json.loads(data_target.read_text(encoding="utf-8"))
     assert set(payload3.keys()) == set(cm.keys())

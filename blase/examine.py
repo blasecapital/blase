@@ -124,9 +124,7 @@ class Examine:
         return_thumbs: bool = False,
         head_read_bytes: int = 128 * 1024,
         max_side: Optional[int] = None,
-        max_total_decode_bytes: Optional[
-            int
-        ] = None,
+        max_total_decode_bytes: Optional[int] = None,
         save: bool = False,
         to: Optional[str] = None,
         save_individual: bool = False,

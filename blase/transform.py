@@ -59,7 +59,9 @@ class Transform:
         self._stream = None
         self._fn_tag = None
 
-    def apply_function(self, *, batch: Batch, transform_func, track=True) -> Batch:
+    def apply_function(
+        self, *, batch: Batch, transform_func, track=True, pass_batch: bool = False
+    ) -> Batch:
         """
         Apply a user transform to one batch in a tracked stream, propagating lineage.
 
@@ -146,10 +148,21 @@ class Transform:
         ... )
         """
         tracker = Track.get(track)
+        arg = batch if pass_batch else batch.data
 
         if tracker is None:
+            out = transform_func(arg)
+            # allow Batch return for label/path edits
+            if isinstance(out, Batch):
+                return type(batch)(
+                    data=out.data,
+                    labels=out.labels if out.labels is not None else batch.labels,
+                    paths=out.paths if out.paths is not None else batch.paths,
+                    is_last=batch.is_last,
+                    meta=dict(batch.meta or {}, **(out.meta or {})),
+                )
             return Batch(
-                data=transform_func(batch.data),
+                data=out,
                 labels=batch.labels,
                 paths=batch.paths,
                 is_last=batch.is_last,
@@ -174,6 +187,7 @@ class Transform:
             m = batch.meta or {}
             params = {
                 "fn_qualname": fn_qual,
+                "pass_batch": bool(pass_batch),
             }
 
             bs = m.get("chunk_size")
@@ -223,7 +237,7 @@ class Transform:
             self._fn_tag = fn_qual
 
         try:
-            out = transform_func(batch.data)
+            out = transform_func(arg)
         except Exception as e:
             self._stream.close_error(type(e), e, e.__traceback__)
             self._stream = None
@@ -238,6 +252,17 @@ class Transform:
             self._stream = None
             self._fn_tag = None
 
+        # accept Batch return
+        if isinstance(out, Batch):
+            return type(batch)(
+                data=out.data,
+                labels=out.labels if out.labels is not None else batch.labels,
+                paths=out.paths if out.paths is not None else batch.paths,
+                is_last=batch.is_last,
+                meta={**(new_meta or {}), **(out.meta or {})},
+            )
+
+        # legacy: data-only return
         return Batch(
             data=out,
             labels=batch.labels,

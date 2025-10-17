@@ -390,3 +390,214 @@ def _exec_load_save_images_to_parquet(
             produced_hashes.add(dh)
 
     return None
+
+
+# ==========
+# Prepare().to_tfrecord
+# ==========
+def _exec_prepare_to_tfrecord(
+    run_path,
+    sh,
+    to_path,
+    produced,
+    created_paths,
+    produced_hashes,
+):
+    st = store.load_step(run_path, sh)
+    outs = store.load_step_outputs(run_path, sh)
+
+    # Expected hashes (both .tfrecord and .index if recorded)
+    outs_sorted = sorted(outs, key=lambda o: o.get("name", ""))
+    expected = [o["data_hash"] for o in outs_sorted]
+
+    handler = bindings.RESTORE_HANDLERS["blase.Prepare.to_tfrecord"]
+    out_paths = handler(
+        run_path=run_path,
+        params=st["params"],
+        step_hash=sh,
+        realized={},
+        upstream_gen=None,
+        target_override=to_path,
+    )
+
+    # Map recorded hashes to produced paths; if no outs recorded, compute hashes now
+    if expected:
+        for i, dh in enumerate(expected):
+            if i < len(out_paths):
+                p = Path(out_paths[i])
+                produced[dh] = p
+                created_paths.append(p)
+                produced_hashes.add(dh)
+    else:
+        # Compute and track
+        from blase.utils.hashing import Hash
+
+        for p in out_paths:
+            dh = Hash().hash_file(p)
+            produced[dh] = Path(p)
+            created_paths.append(Path(p))
+            produced_hashes.add(dh)
+
+    return None
+
+
+# ==========
+# Prepare().preview_tfrecord
+# ==========
+def _exec_prepare_preview_tfrecord(
+    run_path,
+    sh,
+    to_path,
+    produced,
+    created_paths,
+    produced_hashes,
+):
+    st = store.load_step(run_path, sh)
+    outs = store.load_step_outputs(run_path, sh)  # may be empty if nothing persisted
+
+    # Sort for stability; keep (hash, name)
+    outs_sorted = sorted(outs, key=lambda o: o.get("name", "") or "")
+    expected = [(o["data_hash"], o.get("name") or "") for o in outs_sorted]
+
+    # Decide a target directory for side effects
+    if to_path:
+        target_dir = Path(to_path)
+        target_dir.mkdir(parents=True, exist_ok=True)
+    else:
+        RESTORE_DEFAULT_DIR.mkdir(parents=True, exist_ok=True)
+        target_dir = (RESTORE_DEFAULT_DIR / f"preview_tfrecord_{sh[:8]}").resolve()
+        target_dir.mkdir(parents=True, exist_ok=True)
+
+    handler = bindings.RESTORE_HANDLERS["blase.Prepare.preview_tfrecord"]
+    _ = handler(
+        run_path=run_path,
+        params=st["params"],
+        step_hash=sh,
+        realized={},
+        upstream_gen=None,
+        target_override=str(target_dir),
+    )
+
+    # If we have recorded outputs, try to map by name → file under target_dir
+    if expected:
+        for dh, name in expected:
+            # best-effort filename resolution
+            cand = target_dir / name if name and "." in name else None
+            p = None
+            if cand and cand.exists():
+                p = cand
+            else:
+                # fallback: pick any file that contains the name, else first image-like
+                files = sorted(
+                    [p for p in target_dir.glob("*") if p.is_file()],
+                    key=lambda x: x.name,
+                )
+                if name:
+                    p = next((f for f in files if name in f.name), None)
+                if p is None and files:
+                    p = files[0]
+
+            if p and p.exists():
+                produced[dh] = p
+                created_paths.append(p)
+                produced_hashes.add(dh)
+        return None
+
+    # No recorded outputs: hash every produced file and record those
+    files = [p for p in sorted(target_dir.glob("*")) if p.is_file()]
+    for p in files:
+        dh = Hash().hash_file(p)
+        produced[dh] = p
+        created_paths.append(p)
+        produced_hashes.add(dh)
+
+    return None
+
+
+# ==========
+# Prepare().write_label_sidecars
+# ==========
+def _exec_prepare_write_label_sidecars(
+    run_path,
+    sh,
+    to_path,
+    produced,
+    created_paths,
+    produced_hashes,
+):
+    st = store.load_step(run_path, sh)
+    outs = store.load_step_outputs(run_path, sh)
+
+    outs_sorted = sorted(outs, key=lambda o: o.get("name", ""))
+    expected = [o["data_hash"] for o in outs_sorted]
+
+    handler = bindings.RESTORE_HANDLERS["blase.Prepare.write_label_sidecars"]
+    out_paths = handler(
+        run_path=run_path,
+        params=st["params"],
+        step_hash=sh,
+        realized={},
+        upstream_gen=None,
+        target_override=to_path,
+    )
+
+    produced_pairs = []
+    for p in out_paths:
+        h = Hash().hash_file(p)
+        produced_pairs.append((h, Path(p)))
+
+    if expected:
+        exp_set = set(expected)
+        got_set = {h for h, _ in produced_pairs}
+
+        # Verify replays produced all expected hashes
+        missing = exp_set - got_set
+        if missing:
+            raise SystemExit(
+                f"restore: sidecar replay missing expected outputs: {sorted(missing)}"
+            )
+
+        # Prefer 1:1 mapping by hash
+        by_hash = {h: p for h, p in produced_pairs}
+        for eh in expected:
+            p = by_hash[eh]
+            produced[eh] = p
+            created_paths.append(p)
+            produced_hashes.add(eh)
+    else:
+        # No recorded outs; record by computed hash
+        for h, p in produced_pairs:
+            produced[h] = p
+            created_paths.append(p)
+            produced_hashes.add(h)
+
+    return None
+
+
+def _exec_prepare_class_map_io(
+    run_path, sh, to_path, produced, created_paths, produced_hashes
+):
+    st = store.load_step(run_path, sh)
+    handler = bindings.RESTORE_HANDLERS["blase.Prepare.class_map_io"]
+
+    out_path = handler(
+        run_path=run_path,
+        params=st["params"],
+        step_hash=sh,
+        realized={},
+        upstream_gen=None,
+        target_override=to_path,
+    )
+
+    if not out_path:
+        return None
+
+    p = Path(out_path)
+    if not (p.exists() and p.is_file()):
+        return None
+
+    hp = Hash().hash_file(p)
+    produced[hp] = p
+    created_paths.append(p)
+    produced_hashes.add(hp)
+    return None

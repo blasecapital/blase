@@ -35,6 +35,7 @@ from blase.extracting.parquet_backend import (
 from blase.load import Load
 from blase.restoring import store, cas
 from blase.utils.hashing import Hash
+from blase.restoring import materialize
 from blase.restoring.io_safety import resolve_conflict_path
 from blase.loading.img_parquet_backend import (
     _build_parquet_table_from_images,
@@ -48,6 +49,19 @@ from blase.examining.preview_image_backend import (
     maybe_materialize_thumbs,
     maybe_materialize_thumbs_bytes,
 )
+from blase.prepare import (
+    Prepare,
+    ImageConfig,
+    JoinConfig,
+    BoxConfig,
+    ClassConfig,
+    ScaleConfig,
+)
+from blase.preparing.writers.tfrecord.inspect import head as _tfr_head
+from blase.preparing.manifest.manifest import build_manifest_stream
+from blase.preparing.manifest import classmap as _classmap
+from blase.preparing.default_registry import default_registry
+
 from blase.utils.fs import ensure_parent_dir
 
 # simple arg mapping: role -> kwarg
@@ -503,7 +517,7 @@ def run_read_images_restore(
         yield Batch(
             data=decoded,
             labels=None,
-            paths=None,
+            paths=[it["abs_path"] or it["rel_path"] for it in items],
             is_last=is_last,
             meta=meta,
         )
@@ -790,6 +804,7 @@ def run_apply_function_restore(
 
     # Treat as CSV/tabular if the pipeline says so, regardless of generator vs path.
     csv_mode = params.get("backend") in ("pandas", "polars")
+    pass_batch = bool(params.get("pass_batch"))
 
     # ---- image helpers ----
     def _looks_like_img(b: bytes) -> bool:
@@ -899,24 +914,77 @@ def run_apply_function_restore(
         return _normalize_imgs(z)
 
     for batch in gen:
+        # --- CSV mode ---
         if csv_mode:
-            out = transform_fn(batch.data)
-            yield Batch(
-                data=out,
-                labels=None,
-                paths=None,
-                is_last=batch.is_last,
-                meta=batch.meta,
-            )
+            if pass_batch:
+                out = transform_fn(batch)
+                if not isinstance(out, Batch):
+                    out = type(batch)(
+                        data=out,
+                        labels=batch.labels,
+                        paths=batch.paths,
+                        is_last=batch.is_last,
+                        meta=batch.meta,
+                    )
+            else:
+                out = transform_fn(batch.data)
+                out = type(batch)(
+                    data=out,
+                    labels=batch.labels,
+                    paths=batch.paths,
+                    is_last=batch.is_last,
+                    meta=batch.meta,
+                )
+            yield out
             continue
 
-        # Non-CSV: images/parquet-images or other non-tabular data
+        # --- Image/non-tabular mode ---
+        if pass_batch:
+            b = batch
+            paths = (
+                getattr(b, "paths", None)
+                or (b.meta or {}).get("paths")
+                or (b.meta or {}).get("items_rel_paths")
+            )
+            if paths is None:
+                # keep length, avoid crash; adapter can no-op on None
+                paths = [None] * (len(b.data) if hasattr(b, "data") else 0)
+            b = type(b)(
+                data=b.data,
+                labels=b.labels,
+                paths=list(paths),
+                is_last=b.is_last,
+                meta=b.meta,
+            )
+            out = transform_fn(b)
+            if not isinstance(out, Batch):
+                out = type(b)(
+                    data=out,
+                    labels=b.labels,
+                    paths=b.paths,
+                    is_last=b.is_last,
+                    meta=b.meta,
+                )
+            yield out
+            continue
+
+        # Legacy data-only replay (kept for old runs)
         out_n, meta_n = _normalize_images_batch(batch.data, batch.meta)  # pre
         out = transform_fn(out_n)
         out, meta = _normalize_images_batch(out, meta_n)  # post
-
         out = _normalize_out(out)
-        yield Batch(data=out, labels=None, paths=None, is_last=batch.is_last, meta=meta)
+
+        # Prefer labels/paths from meta if produced; else keep originals
+        lbls = (meta or {}).get("labels", None)
+        paths = (meta or {}).get("paths", None)
+        if lbls is None:
+            lbls = batch.labels
+        if paths is None:
+            paths = batch.paths
+
+        yield Batch(
+            data=out, labels=lbls, paths=paths, is_last=batch.is_last, meta=meta
+        )
 
 
 def run_save_to_csv_replay(
@@ -1261,6 +1329,404 @@ def run_restore_preview_images(
     return grid_to if grid_to and Path(grid_to).exists() else ""
 
 
+def run_restore_build_manifest(
+    *, run_path, params, step_hash, realized, upstream_gen=None, **_
+):
+    st = store.load_step(run_path, step_hash)
+    p = st["params"]  # this is the canonicalized params you recorded
+    prep = Prepare(registry=default_registry())
+    outs = store.load_step_outputs(Path(run_path), step_hash)
+    if outs:
+        manifest_id = outs[0]["data_hash"]  # or pick by name=='manifest'
+        return manifest_id
+
+    _ = prep.build_manifest(
+        data_sources=p["data_sources"],
+        label_sources=p["label_sources"],
+        image_cfg=ImageConfig(**p["image_cfg"]),
+        join_cfg=JoinConfig(**p["join_cfg"]),
+        box_cfg=BoxConfig(**p["box_cfg"]),
+        class_cfg=ClassConfig(**p["class_cfg"]),
+        scale_cfg=ScaleConfig(**p["scale_cfg"]),
+        track=False,
+    )
+    got = Hash().hash_object(p)
+    want = st["meta"].get("manifest_hash") or st["meta"].get("manifest_root_hash")
+    if want and got != want:
+        raise RuntimeError(f"manifest hash mismatch: got {got} vs {want}")
+    return ""  # no artifact
+
+
+def run_restore_compute_stats(
+    *,
+    run_path,
+    params,
+    step_hash,
+    realized,
+    upstream_gen=None,
+    target_override=None,
+    backend_override=None,
+    **_,
+):
+    # load step, rebuild upstream manifest, recompute stats
+    st = store.load_step(run_path, step_hash)
+    p = st["params"]  # {"by": "..."}
+    ls = []
+    for d in p.get("label_sources", []):
+        if "kind" not in d:
+            ls.append({**d, "kind": d.get("mode") or "detection"})
+        else:
+            ls.append(d)
+    # resolve upstream manifest producer via recorded input id
+    up_id = store.pick_input_id_by_step(
+        run_path, step_hash, prefer=("manifest", "manifest_root")
+    )
+    prod = store.find_step_by_output(run_path, up_id)  # returns {"params": ...}
+    mp = prod["params"]
+
+    prep = Prepare(registry=default_registry())
+    gen = prep.build_manifest(
+        data_sources=mp["data_sources"],
+        label_sources=ls,
+        image_cfg=ImageConfig(**mp["image_cfg"]),
+        join_cfg=JoinConfig(**mp["join_cfg"]),
+        box_cfg=BoxConfig(**mp["box_cfg"]),
+        class_cfg=ClassConfig(**mp["class_cfg"]),
+        scale_cfg=ScaleConfig(**mp["scale_cfg"]),
+        track=False,
+    )
+    stats_b = prep.compute_stats(gen, by=p.get("by", "class"))
+    outp = (
+        Path(run_path).resolve().parents[1]
+        / "data"
+        / "working"
+        / f"{step_hash[:5]}_stats"
+        / "stats.json"
+    )
+    outp.parent.mkdir(parents=True, exist_ok=True)
+    outp.write_text(json.dumps(stats_b.data, ensure_ascii=False, indent=2))
+    return str(outp)
+
+
+def run_restore_split(
+    *,
+    run_path,
+    params,
+    step_hash,
+    realized,
+    upstream_gen=None,
+    target_override=None,
+    **_,
+):
+    # 1) Load this step and pick upstream manifest id
+    st = store.load_step(run_path, step_hash)
+    man_id = store.pick_input_id_by_step(
+        run_path, step_hash, prefer=("manifest", "manifest_root")
+    )
+
+    # 2) Locate producing step and get canonical manifest params
+    man_step = store.find_step_by_output(run_path, man_id)
+    if not man_step:
+        raise KeyError(f"no producing step found for manifest {man_id}")
+    p = man_step["params"]
+
+    # 3) Rebuild manifest stream
+    reg = default_registry()
+    gen = build_manifest_stream(
+        reg=reg,
+        data_sources=p["data_sources"],
+        label_sources=p["label_sources"],
+        image_cfg=p["image_cfg"],
+        join_cfg=p["join_cfg"],
+        box_cfg=p["box_cfg"],
+        class_cfg=p["class_cfg"],
+        scale_cfg=p["scale_cfg"],
+    )
+
+    # 4) Compute splits using recorded cfg
+    method = (st.get("params") or {}).get("method", "stratified")
+    split_cfg = (st.get("params") or {}).get("split_cfg") or {
+        "fractions": {"train": 0.8, "val": 0.1, "test": 0.1},
+        "seed": 42,
+        "group_key": "image_id",
+        "stratify_on": "class",
+        "holdout_query": None,
+    }
+
+    if method == "random":
+        s = reg.splitters["random"].split(gen, split_cfg)
+    elif method == "stratified":
+        s = reg.splitters["stratified"].split(gen, split_cfg)
+    elif method == "group":
+        s = reg.splitters["group"].split(gen, split_cfg)
+    elif method == "time":
+        s = reg.splitters["time"].split(gen, split_cfg)
+    else:
+        raise ValueError(f"unknown split method {method!r}")
+
+    # 5) Persist JSON
+    out_path = (
+        Path(target_override)
+        if target_override
+        else (
+            Path(run_path).resolve().parents[1]
+            / "data"
+            / "working"
+            / f"{step_hash[:5]}_splits"
+            / "splits.json"
+        )
+    )
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    # ensure plain lists for JSON
+    payload = {k: list(v) for k, v in s.items()}
+    payload["_meta"] = {"method": method, **split_cfg}
+    out_path.write_text(
+        json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8"
+    )
+
+    return str(out_path)
+
+
+def run_restore_to_tfrecord(
+    *,
+    run_path,
+    params,
+    step_hash,
+    realized,
+    upstream_gen=None,
+    target_override: Optional[str] = None,
+    **_,
+):
+    # 1) Load this step + inputs
+    inputs = store.load_step_inputs(run_path, step_hash)
+
+    # 2) Get splits.json input
+    splits_hash = None
+    for i in inputs:
+        if i["role"] == "splits":
+            splits_hash = i["data_hash"]
+            break
+    if not splits_hash:
+        raise KeyError("to_tfrecord restore: missing 'splits' input")
+
+    # 3) Read splits json blob from CAS
+    sp = cas.path_for(run_path, "data", splits_hash)
+    splits = json.loads(Path(sp).read_text(encoding="utf-8"))
+
+    # 4) Find upstream manifest identity (prefer 'manifest', fallback 'manifest_root')
+    man_id = None
+    for role in ("manifest", "manifest_root"):
+        for i in inputs:
+            if i["role"] == role:
+                man_id = i["data_hash"]
+                break
+        if man_id:
+            break
+    if not man_id:
+        raise KeyError("to_tfrecord restore: missing manifest input")
+
+    # 5) Fetch canonical build_manifest params from the producing step
+    man_step = store.find_step_by_output(run_path, man_id)
+    if not man_step:
+        raise KeyError(f"no producing step found for manifest {man_id}")
+    p = man_step["params"]  # canonical dicts
+
+    reg = default_registry()
+    manifest_iter = build_manifest_stream(
+        reg=reg,
+        data_sources=p["data_sources"],
+        label_sources=p["label_sources"],
+        image_cfg=p["image_cfg"],
+        join_cfg=p["join_cfg"],
+        box_cfg=p["box_cfg"],
+        class_cfg=p["class_cfg"],
+        scale_cfg=p["scale_cfg"],
+    )
+
+    # 7) Replay the TFRecord write using recorded params on this step
+    prep = Prepare(registry=reg)
+    # Ensure path-like keys are strings
+    cfg = dict(params)
+    out_dir = Path(target_override) if target_override else Path(cfg["out_dir"])
+    res = prep.to_tfrecord(
+        manifest=manifest_iter,
+        splits=splits,
+        out_dir=out_dir,
+        mode=cfg.get("mode", "combined"),
+        shard_size_mb=int(cfg.get("shard_size_mb", 128)),
+        compression=cfg.get("compression", "GZIP"),
+        include_image_bytes=bool(cfg.get("include_image_bytes", True)),
+        read_bytes_from=cfg.get("read_bytes_from", "parquet"),
+        parquet_id_col=cfg.get("parquet_id_col", "image_id"),
+        parquet_bytes_col=cfg.get("parquet_bytes_col", "img_bytes"),
+        deterministic_order=bool(cfg.get("deterministic_order", True)),
+        order_key=cfg.get("order_key", "sha256"),
+        write_workers=cfg.get("write_workers", None),
+        write_alignment_index=bool(cfg.get("write_alignment_index", True)),
+        example_id_feature=cfg.get("example_id_feature", "example/id"),
+        track=False,  # replay runs untracked
+    )
+
+    # Optionally return a path for CLI printing (not required)
+    return [a.path for a in (res.artifacts or [])]
+
+
+def run_restore_preview_tfrecord(
+    *,
+    run_path,
+    params,
+    step_hash,
+    realized,
+    upstream_gen=None,
+    target_override=None,
+    **_,
+):
+    st = store.load_step(run_path, step_hash)
+    ins = store.load_step_inputs(run_path, step_hash)
+
+    src = next((i["data_hash"] for i in ins if i["role"] == "source"), None)
+    if not src:
+        raise KeyError("preview_tfrecord restore: missing 'source' input")
+
+    kind = store.get_data_kind(run_path, src) or "tfrecord"
+    src_path, _ = materialize.ensure_local(run_path, src, kind=kind), False
+    p = dict(st["params"] or {})
+    out_dir = (
+        Path(target_override)
+        if target_override
+        else (Path(p["out_dir"]) if p.get("out_dir") else None)
+    )
+
+    _ = _tfr_head(
+        path=Path(src_path),
+        n=int(p.get("n", 8)),
+        compression=p.get("compression", "GZIP"),
+        decode_images=bool(p.get("decode_images", False)),
+        out_dir=out_dir,
+        max_side=int(p.get("max_side", 1024)),
+    )
+
+    return str(out_dir) if out_dir else ""
+
+
+def run_restore_write_label_sidecars(
+    *,
+    run_path,
+    params,
+    step_hash,
+    realized,
+    upstream_gen=None,
+    target_override=None,
+    **_,
+):
+    # 1) Step + inputs
+    st = store.load_step(run_path, step_hash)
+    ins = store.load_step_inputs(run_path, step_hash)
+
+    # 2) Splits json (required)
+    splits_hash = next((i["data_hash"] for i in ins if i["role"] == "splits"), None)
+    if not splits_hash:
+        raise KeyError("write_label_sidecars restore: missing 'splits' input")
+    sp = cas.path_for(run_path, "data", splits_hash)
+    splits = json.loads(Path(sp).read_text(encoding="utf-8"))
+
+    # 3) Upstream manifest identity
+    man_id = None
+    for role in ("manifest", "manifest_root"):
+        m = next((i["data_hash"] for i in ins if i["role"] == role), None)
+        if m:
+            man_id = m
+            break
+    if not man_id:
+        raise KeyError("write_label_sidecars restore: missing manifest input")
+
+    # 4) Build canonical manifest stream from producing step
+    man_step = store.find_step_by_output(run_path, man_id)
+    if not man_step:
+        raise KeyError(f"no producing step found for manifest {man_id}")
+    p = man_step["params"]  # canonical dicts
+
+    reg = default_registry()
+    manifest_iter = build_manifest_stream(
+        reg=reg,
+        data_sources=p["data_sources"],
+        label_sources=p["label_sources"],
+        image_cfg=p["image_cfg"],
+        join_cfg=p["join_cfg"],
+        box_cfg=p["box_cfg"],
+        class_cfg=p["class_cfg"],
+        scale_cfg=p["scale_cfg"],
+    )
+
+    # 5) Replay sidecar write to target (or recorded out_dir)
+    prep = Prepare(registry=reg)
+    fmt = (st.get("params") or {}).get("format", "jsonl")
+    order_key = (st.get("params") or {}).get("order_key", "sha256")
+    det = bool((st.get("params") or {}).get("deterministic_order", True))
+    out_dir = (
+        Path(target_override)
+        if target_override
+        else Path((st.get("params") or {}).get("out_dir", "."))
+    )
+
+    res = prep.write_label_sidecars(
+        manifest=manifest_iter,
+        splits=splits,
+        out_dir=out_dir,
+        format=fmt,
+        deterministic_order=det,
+        order_key=order_key,
+        track=False,
+    )
+
+    return [a.path for a in (res.artifacts or [])]
+
+
+def run_restore_class_map_io(
+    *,
+    run_path,
+    params,
+    step_hash,
+    realized,
+    upstream_gen=None,
+    target_override=None,
+    **_,
+):
+    st = store.load_step(run_path, step_hash)
+    p = dict(st.get("params") or {})
+    ins = store.load_step_inputs(run_path, step_hash)
+
+    map_hash = next((i["data_hash"] for i in ins if i["role"] == "map"), None)
+    if map_hash:
+        mp = cas.path_for(run_path, "data", map_hash)
+        cm = json.loads(Path(mp).read_text(encoding="utf-8"))
+    else:
+        src_hash = next((i["data_hash"] for i in ins if i["role"] == "source"), None)
+        if src_hash:
+            kind = store.get_data_kind(run_path, src_hash) or "data"
+            src_path = materialize.ensure_local(run_path, src_hash, kind=kind)
+            cm = json.loads(Path(src_path).read_text(encoding="utf-8"))
+        else:
+            cm = dict(p["map"]) if p.get("map") is not None else {}
+
+    norm = bool(p.get("normalize", True))
+    cm_norm = _classmap.canonicalize_class_map(cm, normalize_names=norm)
+
+    save_to = (
+        Path(target_override)
+        if target_override
+        else (Path(p["save"]) if p.get("save") else None)
+    )
+    if save_to is not None:
+        save_to.parent.mkdir(parents=True, exist_ok=True)
+        save_to.write_text(
+            json.dumps(cm_norm, ensure_ascii=False, indent=2), encoding="utf-8"
+        )
+        return str(save_to)
+
+    return ""
+
+
 # Public registry of handlers (by function FQN)
 RESTORE_HANDLERS: Dict[str, Any] = {
     "blase.Extract.read_csv": run_read_csv_restore,
@@ -1270,4 +1736,11 @@ RESTORE_HANDLERS: Dict[str, Any] = {
     "blase.Load.save_to_csv": run_save_to_csv_replay,
     "blase.Load.save_images_to_parquet": run_save_images_to_parquet_replay,
     "blase.Examine.preview_images": run_restore_preview_images,
+    "blase.Prepare.build_manifest": run_restore_build_manifest,
+    "blase.Prepare.compute_stats": run_restore_compute_stats,
+    "blase.Prepare.split": run_restore_split,
+    "blase.Prepare.to_tfrecord": run_restore_to_tfrecord,
+    "blase.Prepare.preview_tfrecord": run_restore_preview_tfrecord,
+    "blase.Prepare.write_label_sidecars": run_restore_write_label_sidecars,
+    "blase.Prepare.class_map_io": run_restore_class_map_io,
 }

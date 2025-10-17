@@ -122,6 +122,55 @@ def load_step_outputs(run_path: Path, step_hash: str) -> List[Dict[str, Any]]:
     return [{"data_hash": r[0], "name": r[1]} for r in rows]
 
 
+def find_step_by_output(run_path: Path, data_hash: str):
+    """
+    Return the producing step record for a given data_hash, or None if not found.
+    Depends on table:
+      step_outputs(step_hash TEXT, data_hash TEXT, name TEXT, ...)
+      steps(step_hash TEXT PRIMARY KEY, function_fqn TEXT, params_json TEXT, status TEXT, ...)
+    """
+    db = run_path / "nodes" / "nodes.db"
+    with _conn(db) as c:
+        row = c.execute(
+            """
+            SELECT s.step_hash, s.function_fqn, s.params_json, s.status
+            FROM step_outputs o
+            JOIN steps s ON s.step_hash = o.step_hash
+            WHERE o.data_hash = ?
+            LIMIT 1
+            """,
+            (data_hash,),
+        ).fetchone()
+    if not row:
+        return None
+    step_hash, fqn, params_json, status = row
+    return {
+        "step_hash": step_hash,
+        "function_fqn": fqn,
+        "params": json.loads(params_json or "{}"),
+        "status": status,
+    }
+
+
+def pick_input_id_by_step(
+    run_path: Path, step_hash: str, prefer=("manifest", "manifest_root")
+) -> str:
+    db = Path(run_path) / "nodes" / "nodes.db"
+    with _conn(db) as c:
+        rows = c.execute(
+            "SELECT role, data_hash FROM step_inputs WHERE step_hash=?",
+            (step_hash,),
+        ).fetchall()
+    if not rows:
+        raise KeyError("no upstream manifest input recorded")
+    by_role = {r[0]: r[1] for r in rows}
+    for role in prefer:
+        if by_role.get(role):
+            return by_role[role]
+    # fallback: any input
+    return rows[0][1]
+
+
 def record_materialization(run_path: Path, data_hash: str, path: str) -> None:
     db = run_path / "nodes" / "nodes.db"
     with _conn(db) as c:

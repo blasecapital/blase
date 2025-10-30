@@ -77,20 +77,23 @@ class TfCompiler(Compiler):
                 pass
         if jit is True:
             tf.config.optimizer.set_jit(True)
-        norm_metrics = []
-        for m in metrics or []:
-            if isinstance(m, str):
-                norm_metrics.append(m)
-            elif hasattr(m, "update_state"):  # already a Metric instance
-                norm_metrics.append(m)
-            elif callable(m):  # functional metric -> wrap
-                norm_metrics.append(
-                    tf.keras.metrics.MeanMetricWrapper(
-                        m, name=getattr(m, "__name__", "metric")
+        norm_metrics = None
+        if isinstance(metrics, dict):
+            norm_metrics = metrics
+        elif metrics:  # non-empty sequence → normalize
+            nm = []
+            for m in metrics:
+                if isinstance(m, str) or hasattr(m, "update_state"):
+                    nm.append(m)
+                elif callable(m):
+                    nm.append(
+                        tf.keras.metrics.MeanMetricWrapper(
+                            m, name=getattr(m, "__name__", "metric")
+                        )
                     )
-                )
-            else:
-                raise TypeError(f"Unsupported metric: {m!r}")
+                else:
+                    raise TypeError(f"Unsupported metric: {m!r}")
+            norm_metrics = nm
         model.compile(optimizer=optimizer, loss=loss, metrics=norm_metrics)
         return model
 

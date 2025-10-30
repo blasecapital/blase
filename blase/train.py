@@ -45,29 +45,38 @@ class Train:
         self._callbacks_factory: Optional[CallbackFactory] = None
         self._model: Optional[Any] = None
         self._compiled: bool = False
+        self._evaluator = None
+        self._exporter = None
 
     # ---------- Data sources ----------
     def from_tfrecords(
         self,
         *,
-        train_glob: str,
+        train_glob: Union[str, Iterable[str]],
         val_glob: Optional[Union[str, Iterable[str]]] = None,
         test_glob: Optional[Union[str, Iterable[str]]] = None,
-        feature_spec: Dict[str, Any],
+        feature_spec: Optional[Dict[str, Any]] = None,
         parse_fn: Optional[Callable[..., Any]] = None,
         augment_fn: Optional[Callable[..., Any]] = None,
         batch_size: int = 256,
         shuffle_buffer: int = 10_000,
         repeat_train: bool = True,
-        compression: Optional[str] = None,
+        compression: Optional[str] = None,  # None|""|"GZIP"
         cache: Union[bool, str] = False,
         snapshot_dir: Optional[str] = None,
         drop_remainder: bool = True,
+        num_parallel_reads: Optional[int] = None,  # None → AUTOTUNE in builder
+        num_parallel_calls: Optional[int] = None,  # None → AUTOTUNE in builder
+        prefetch: bool = True,
     ) -> "Train":
         if not train_glob:
             raise ValueError("from_tfrecords: train_glob is empty.")
-        if not isinstance(feature_spec, dict) or not feature_spec:
-            raise ValueError("from_tfrecords: feature_spec must be a non-empty dict.")
+        if feature_spec is None and parse_fn is None:
+            raise ValueError("Provide feature_spec or parse_fn.")
+
+        comp = (compression or "").upper()
+        if comp not in {"", "GZIP"}:
+            raise ValueError(f"Unsupported compression: {compression!r}")
 
         cfg = dict(
             train_glob=train_glob,
@@ -79,11 +88,15 @@ class Train:
             batch_size=batch_size,
             shuffle_buffer=shuffle_buffer,
             repeat_train=repeat_train,
-            compression=compression,
+            compression=comp if comp else None,
             cache=cache,
             snapshot_dir=snapshot_dir,
             drop_remainder=drop_remainder,
+            num_parallel_reads=num_parallel_reads,
+            num_parallel_calls=num_parallel_calls,
+            prefetch=prefetch,
         )
+        self._ds_cfg = cfg  # for summary/plan
         self._ds_builder = default_registry.tf_dataset_builder(**cfg)
         return self
 
@@ -190,12 +203,14 @@ class Train:
             callbacks,
         )
 
-    def evaluate(
-        self,
-        *,
-        split: Split = "test",
-        steps: Optional[int] = None,
-    ) -> Dict[str, float]: ...
+    def evaluate(self, *, split="test", steps=None):
+        if self._model is None:
+            raise RuntimeError("No model to evaluate. Call compile()/fit() first.")
+        if not self._ds_builder:
+            raise RuntimeError("No dataset. Call from_*() first.")
+        ds = self._ds_builder.build()[{"train": 0, "val": 1, "test": 2}[split]]
+        ev = self._evaluator or default_registry.evaluator(self.backend)
+        return ev.evaluate(self._model, ds, steps)
 
     def predict(
         self,
@@ -203,15 +218,16 @@ class Train:
         split: Split = "test",
         steps: Optional[int] = None,
         return_numpy: bool = True,
-    ) -> Any: ...
+    ) -> Any:
+        ds = self._ds_builder.build()[{"train": 0, "val": 1, "test": 2}[split]]
+        ds_x = ds.map(lambda x, y: x)
+        return self._model.predict(ds_x, steps=steps)
 
-    def export(
-        self,
-        *,
-        kind: ExportKind = "saved_model",
-        path: Optional[str] = None,
-        extra: Optional[Dict[str, Any]] = None,  # e.g., TFLite optimizations
-    ) -> str: ...
+    def export(self, *, kind="saved_model", path=None, extra=None):
+        if self._model is None:
+            raise RuntimeError("No model to export. Call compile()/fit() first.")
+        ex = self._exporter or default_registry.exporter(self.backend)
+        return ex.export(self._model, kind, path, extra)
 
     # ---------- Introspection ----------
     def summary(self) -> str: ...

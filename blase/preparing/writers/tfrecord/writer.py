@@ -137,7 +137,7 @@ def write(
                 ex_bytes = make_example(
                     row, mode=mode, include_image_bytes=include_bytes
                 )
-                w.write(ex_bytes)  # your TF writer must accept dict or serialized bytes
+                w.write(ex_bytes)
                 if write_alignment_index:
                     alignment.setdefault(iid, {})
                     alignment[iid][sp] = rec_idx

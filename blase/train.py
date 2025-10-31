@@ -1,9 +1,15 @@
 from typing import Any, Callable, Dict, Iterable, List, Literal, Optional, Tuple, Union
+from pathlib import Path
+import json
+import glob
+import sys
+import os
+import platform
 
 from blase.training.protocols import (
     StrategyAdapter,
     PrecisionPolicy,
-    Tracker,
+    # Tracker,
     DatasetBuilder,
     ModelFactory,
     Compiler,
@@ -11,7 +17,40 @@ from blase.training.protocols import (
     Fitter,
 )
 
+from blase.track import Track
+from blase.tracking.snapshot import build_code_blob
+from blase.utils.hashing import Hash
+
 from blase.training.defaults import registry as default_registry
+
+
+def _as_list(
+    x: Union[str, Path, Iterable[Union[str, Path]], None],
+) -> List[Union[str, Path]]:
+    if x is None:
+        return []
+    if isinstance(x, (str, Path)):
+        return [x]
+    return list(x)
+
+
+def _expand_glob_list(
+    globs: Union[str, Path, Iterable[Union[str, Path]], None],
+) -> List[Path]:
+    """Expand strings/paths or glob patterns to a sorted unique list of existing Paths."""
+    out: List[Path] = []
+    for item in _as_list(globs):
+        s = str(item)
+        p = Path(s).expanduser()
+        if any(ch in s for ch in "*?[]"):
+            matches = [Path(m) for m in glob.glob(s, recursive=True)]
+            out.extend(matches)
+        else:
+            out.append(p)
+    # de-dup and keep only existing files
+    uniq = {p.resolve() for p in out if p.exists()}
+    return sorted(uniq)
+
 
 Backend = Literal["tensorflow", "torch"]
 ExportKind = Literal["saved_model", "tflite", "onnx"]
@@ -25,14 +64,14 @@ class Train:
         backend: Backend = "tensorflow",
         strategy: Optional[StrategyAdapter] = None,
         precision: Optional[PrecisionPolicy] = None,
-        tracker: Optional[Tracker] = None,
+        track: bool = True,
         run_dir: Optional[str] = None,
         seed: Optional[int] = None,
     ) -> None:
         self.backend = backend
         self.strategy = strategy or default_registry.strategy(backend)
         self.precision = precision or default_registry.precision(backend)
-        self.tracker = tracker or default_registry.tracker(run_dir)
+        self.tracker = Track.get(track)
         self.run_dir = run_dir
         self.seed = seed
 
@@ -96,8 +135,82 @@ class Train:
             num_parallel_calls=num_parallel_calls,
             prefetch=prefetch,
         )
-        self._ds_cfg = cfg  # for summary/plan
+        self._ds_cfg = cfg
         self._ds_builder = default_registry.tf_dataset_builder(**cfg)
+
+        if self.tracker:
+            params = {k: (str(v) if isinstance(v, Path) else v) for k, v in cfg.items()}
+            for k in ("train_glob", "val_glob", "test_glob"):
+                g = params.get(k)
+                if g is not None and not isinstance(g, (list, tuple)):
+                    params[k] = [g]
+
+            stream = self.tracker.stream(
+                "blase.Train.from_tfrecords", params, code_fn=self.from_tfrecords
+            )
+
+            if parse_fn is not None:
+                try:
+                    blob, meta = build_code_blob(parse_fn)
+                    parse_id = stream.step.register_data(
+                        kind="code.json",
+                        version="1",
+                        path_or_bytes=blob,
+                        metadata=meta,
+                    )
+                    stream.step.add_input(
+                        parse_id, role="parse_fn", arg_name="parse_fn"
+                    )
+                except Exception:
+                    pass
+
+            if augment_fn is not None:
+                try:
+                    blob, meta = build_code_blob(augment_fn)
+                    aug_id = stream.step.register_data(
+                        kind="code.json", version="1", path_or_bytes=blob, metadata=meta
+                    )
+                    stream.step.add_input(
+                        aug_id, role="augment_fn", arg_name="augment_fn"
+                    )
+                except Exception:
+                    pass
+
+            if feature_spec is not None:
+                try:
+                    fs_blob = json.dumps(feature_spec, sort_keys=True).encode("utf-8")
+                    fs_id = stream.step.register_data(
+                        kind="feature_spec.json",
+                        version="1",
+                        path_or_bytes=fs_blob,
+                        metadata={},
+                    )
+                    stream.step.add_input(
+                        fs_id, role="feature_spec", arg_name="feature_spec"
+                    )
+                except Exception:
+                    pass
+
+            for role, globs in (
+                ("train", params["train_glob"]),
+                ("val", params.get("val_glob") or []),
+                ("test", params.get("test_glob") or []),
+            ):
+                for p in _expand_glob_list(globs):
+                    try:
+                        did = stream.step.register_data(
+                            kind="tfrecord",
+                            version="1",
+                            path_or_bytes=str(p),
+                            metadata={},
+                        )
+                        stream.step.add_input(did, role=role, arg_name=f"{role}_glob")
+                    except Exception:
+                        pass
+
+            stream.emit(last_batch=True, meta={})
+            stream.close_ok()
+
         return self
 
     def from_numpy(
@@ -134,6 +247,67 @@ class Train:
         self._model_factory = model_fn
         self._model_kwargs = dict(model_kwargs or {})
         self._compiler = compiler or self._compiler  # allow override here
+
+        if self.tracker:
+
+            def _safe_cfg(d):
+                try:
+                    json.dumps(d, sort_keys=True)
+                    return d
+                except Exception:
+                    return {"_hash": Hash().hash_object(d)}
+
+            params = {
+                "model_fn": getattr(
+                    model_fn,
+                    "__qualname__",
+                    getattr(model_fn, "__name__", str(model_fn)),
+                ),
+                "model_kwargs": _safe_cfg(self._model_kwargs),
+            }
+
+            s = self.tracker.stream(
+                "blase.Train.configure_model",
+                params=params,
+                code_fn=self.configure_model,
+            )
+
+            try:
+                blob, meta = build_code_blob(model_fn)
+                mid = s.step.register_data(
+                    kind="code.json",
+                    version="1",
+                    path_or_bytes=blob,
+                    metadata={},
+                )
+                s.step.add_input(
+                    mid,
+                    role="model_fn",
+                    arg_name="model_fn",
+                )
+            except Exception:
+                pass
+
+            if compiler is not None:
+                try:
+                    blob, meta = build_code_blob(compiler.__class__)
+                    cid = s.step.register_data(
+                        kind="code.json",
+                        version="1",
+                        path_or_bytes=blob,
+                        metadata=meta,
+                    )
+                    s.step.add_input(
+                        cid,
+                        role="compiler_cls",
+                        arg_name=None,
+                    )
+                except Exception:
+                    pass
+
+            s.emit(last_batch=True, meta={})
+            s.close_ok()
+
         return self
 
     def _ensure_model(self) -> None:
@@ -170,11 +344,125 @@ class Train:
             self._model, optimizer, loss, metrics or [], lr_schedule, jit=jit
         )
         self._compiled = True
+
+        if self.tracker:
+
+            def _ser(obj):
+                # Prefer get_config; fall back to fqname+repr
+                try:
+                    if hasattr(obj, "get_config"):
+                        return {
+                            "type": f"{obj.__class__.__module__}.{obj.__class__.__qualname__}",
+                            "config": obj.get_config(),
+                        }
+                except Exception:
+                    pass
+                t = getattr(obj, "__class__", type(obj))
+                return {
+                    "type": f"{t.__module__}.{getattr(t, '__qualname__', t.__name__)}",
+                    "repr": repr(obj),
+                }
+
+            params = {
+                "optimizer": _ser(optimizer),
+                "loss": _ser(loss),
+                "metrics": [_ser(m) for m in (metrics or [])],
+                "lr_schedule": _ser(lr_schedule) if lr_schedule is not None else None,
+                "jit": jit,
+            }
+
+            s = self.tracker.stream(
+                "blase.Train.compile",
+                params=params,
+                code_fn=self.compile,
+            )
+
+            # Snapshot custom callables as inputs
+            def _maybe_snap(obj, role):
+                if obj is None:
+                    return
+                try:
+                    blob, meta = build_code_blob(obj)
+                    did = s.step.register_data(
+                        kind="code.json", version="1", path_or_bytes=blob, metadata=meta
+                    )
+                    s.step.add_input(did, role=role, arg_name=role)
+                except Exception:
+                    pass
+
+            if callable(optimizer):
+                _maybe_snap(optimizer, "optimizer")
+            if callable(loss):
+                _maybe_snap(loss, "loss")
+            for m in metrics or []:
+                if callable(m):
+                    _maybe_snap(m, "metric")
+            if callable(lr_schedule):
+                _maybe_snap(lr_schedule, "lr_schedule")
+
+            for lyr in getattr(self._model, "layers", []):
+                mod = getattr(type(lyr), "__module__", "")
+                if not mod.startswith(("tensorflow", "keras")):
+                    _maybe_snap(type(lyr), "custom_layer")
+
+            s.emit(last_batch=True, meta={})
+            s.close_ok()
+
         return self
 
     # ---------- Callbacks / logging ----------
     def configure_callbacks(self, **cfg) -> "Train":
         self._callbacks_factory = default_registry.callbacks(self.backend, **cfg)
+
+        if self.tracker:
+
+            def _norm(v):
+                if isinstance(v, Path):
+                    return str(v)
+                try:
+                    json.dumps(v, sort_keys=True)
+                    return v
+                except Exception:
+                    return {"_hash": Hash().hash_object(v)}
+
+            params = {k: _norm(v) for k, v in cfg.items()}
+            s = self.tracker.stream(
+                "blase.Train.configure_callbacks",
+                params=params,
+                code_fn=self.configure_callbacks,
+            )
+
+            def _iter_objs(x):
+                if x is None:
+                    return
+                if isinstance(x, (list, tuple, set)):
+                    for i in x:
+                        yield i
+                else:
+                    yield x
+
+            for v in cfg.values():
+                for obj in _iter_objs(v):
+                    if callable(obj):
+                        try:
+                            blob, meta = build_code_blob(obj)
+                            did = s.step.register_data(
+                                kind="code.json",
+                                version="1",
+                                path_or_bytes=blob,
+                                metadata=meta,
+                            )
+                            s.step.add_input(
+                                did,
+                                role="callback",
+                                arg_name=None,
+                            )
+                        except Exception:
+                            pass
+
+            s.emit(last_batch=True, meta={})
+            s.close_ok()
+
         return self
 
     # ---------- Fit / eval / export ----------
@@ -192,16 +480,155 @@ class Train:
             raise RuntimeError("from_* data source must be configured before fit(...).")
         train_ds, val_ds, _ = self._ds_builder.build()
         callbacks = self._callbacks_factory.build() if self._callbacks_factory else []
-        return self._fitter.fit(
-            self._model,
-            train_ds,
-            val_ds,
-            epochs,
-            steps_per_epoch,
-            validation_steps,
-            class_weight,
-            callbacks,
+
+        if not self.tracker:
+            return self._fitter.fit(
+                self._model,
+                train_ds,
+                val_ds,
+                epochs,
+                steps_per_epoch,
+                validation_steps,
+                class_weight,
+                callbacks,
+            )
+
+        def _safe_json(obj):
+            try:
+                json.dumps(obj, sort_keys=True)
+                return obj
+            except Exception:
+                return {"_hash": Hash().hash_object(obj)}
+
+        spec = {
+            "backend": self.backend,
+            "seed": self.seed,
+            "data_cfg": _safe_json(getattr(self, "_ds_cfg", {})),
+            "model_factory": getattr(
+                self._model_factory, "__qualname__", str(self._model_factory)
+            ),
+            "model_kwargs": _safe_json(self._model_kwargs),
+            "fit": {
+                "epochs": epochs,
+                "steps_per_epoch": steps_per_epoch,
+                "validation_steps": validation_steps,
+                "class_weight": _safe_json(class_weight),
+            },
+            "env": _safe_json(
+                {
+                    "python": sys.version.split()[0],
+                    "platform": platform.platform(),
+                    # "tensorflow": getattr(tf, "__version__", None),
+                    # "keras": getattr(tf.keras, "__version__", None) if hasattr(tf, "keras") else None,
+                    # "numpy": getattr(np, "__version__", None),
+                    "cuda": os.environ.get("CUDA_VERSION"),
+                    "cudnn": os.environ.get("CUDNN_VERSION"),
+                    # "devices": [d.name for d in tf.config.list_logical_devices()] if "tf" in globals() else None,
+                }
+            ),
+        }
+
+        stream = self.tracker.stream(
+            "blase.Train.fit",
+            params=spec,
+            code_fn=self.fit,
         )
+
+        def _snap(obj, role):
+            try:
+                b, m = build_code_blob(obj)
+                did = stream.step.register_data("code.json","1", b, m)
+                stream.step.add_input(did, role=role, arg_name=role)
+            except Exception:
+                pass
+
+        # model factory already handled; also add loss/optimizer/metrics if custom
+        comp = getattr(self, "_compiler", None)
+        if comp is not None:
+            for obj, role in [
+                (getattr(comp, "optimizer", None), "optimizer"),
+                (getattr(comp, "loss", None), "loss"),
+                *[(m, "metric") for m in getattr(comp, "metrics", [])],
+                (getattr(comp, "lr_schedule", None), "lr_schedule"),
+            ]:
+                if callable(obj):
+                    _snap(obj, role)
+
+        try:
+            if self._model_factory is not None:
+                blob, meta = build_code_blob(self._model_factory)
+                mid = stream.step.register_data(
+                    kind="code.json",
+                    version="1",
+                    path_or_bytes=blob,
+                    metadata=meta,
+                )
+                stream.step.add_input(mid, role="model_fn", arg_name="model_fn")
+        except Exception:
+            pass
+
+        ds_cfg = getattr(self, "_ds_cfg", {})
+        for role, globs in (
+            ("train", ds_cfg.get("train_glob")),
+            ("val", ds_cfg.get("val_glob")),
+            ("test", ds_cfg.get("test_glob")),
+        ):
+            for p in _expand_glob_list(globs):
+                try:
+                    did = stream.step.register_data(
+                        kind="tfrecord",
+                        version="1",
+                        path_or_bytes=str(p),
+                        metadata={},
+                    )
+                    stream.step.add_input(
+                        data_hash=did,
+                        role=role,
+                        arg_name=f"{role}_glob",
+                    )
+                except Exception:
+                    pass
+
+        try:
+            history = self._fitter.fit(
+                self._model,
+                train_ds,
+                val_ds,
+                epochs,
+                steps_per_epoch,
+                validation_steps,
+                class_weight,
+                callbacks,
+            )
+
+            try:
+                final = {
+                    k: (v[-1] if isinstance(v, (list, tuple)) and v else v)
+                    for k, v in getattr(history, "history", {}).items()
+                }
+                hist_blob = json.dumps(
+                    {
+                        "keys": list(getattr(history, "history", {}).keys()),
+                        "final": final,
+                    },
+                    sort_keys=True,
+                ).encode("utf-8")
+            except Exception:
+                # worst-case fallback
+                hist_blob = json.dumps({"_repr": repr(history)}).encode("utf-8")
+
+            hid = stream.step.register_data(
+                kind="metrics.json", version="1", path_or_bytes=hist_blob, metadata={}
+            )
+            stream.step.add_output(hid, name="train_history")
+
+            stream.emit(last_batch=True, meta={})
+            stream.close_ok()
+            return history
+
+        except Exception as e:
+            stream.close_error(type(e), e, e.__traceback__)
+            raise
 
     def evaluate(self, *, split="test", steps=None):
         if self._model is None:
